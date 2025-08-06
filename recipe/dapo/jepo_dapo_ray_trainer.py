@@ -488,8 +488,16 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
+                    # Track whether we've added this generation batch to JEPO buffer
+                    added_to_jepo_buffer = False
+                    
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
+                        
+                        # Add to JEPO buffer when filtering is disabled
+                        if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps:
+                            self._check_and_buffer_incorrect_responses(new_batch)
+                            added_to_jepo_buffer = True
                     else:  # Filtering logic (same as original DAPO)
                         metric_name = self.config.algorithm.filter_groups.metric
                         if metric_name == "seq_final_reward":
@@ -533,6 +541,18 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
                             if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
                                 print(f"{num_gen_batches=}. Keep generating...")
+                                
+                                # Add to JEPO buffer for each generation batch before continuing
+                                if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
+                                    self._check_and_buffer_incorrect_responses(new_batch)
+                                    added_to_jepo_buffer = True
+                                    
+                                    # Perform JEPO training if buffer is full
+                                    if len(self.jepo_buffer.buffer) >= self.jepo_config.buffer_size:
+                                        jepo_metrics = self._run_jepo_training()
+                                        if jepo_metrics:
+                                            print(f"JEPO training completed with metrics: {jepo_metrics}")
+                                
                                 progress_bar.update(1)
                                 self.gen_steps += 1
                                 continue
@@ -604,8 +624,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         metrics.update(actor_output_metrics)
 
                     # === JEPO Buffer Management ===
-                    # Check for all-incorrect UIDs and add to JEPO buffer
-                    if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps:
+                    # Check for all-incorrect UIDs and add to JEPO buffer for the final batch (if not already added)
+                    if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
                         self._check_and_buffer_incorrect_responses(batch)
 
                     # === JEPO Training Step ===
@@ -613,7 +633,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     # Perform JEPO training when buffer conditions are met
                     if (self.use_jepo and 
                         len(self.jepo_buffer.buffer) > 0 and 
-                        self.global_steps % self.jepo_update_frequency == 0):
+                        (len(self.jepo_buffer.buffer) >= self.jepo_config.buffer_size or 
+                         self.global_steps % self.jepo_update_frequency == 0)):
                         
                         with marked_timer("jepo_training", timing_raw, "purple"):
                             jepo_metrics = self._run_jepo_training()
