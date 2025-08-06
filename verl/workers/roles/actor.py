@@ -35,6 +35,10 @@ class ActorWorker(Worker):
         raise NotImplementedError
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def jepo_update_actor(self, data: DataProto):
+        raise NotImplementedError
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         raise NotImplementedError
 
