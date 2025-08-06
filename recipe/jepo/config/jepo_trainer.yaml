@@ -1,0 +1,36 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  gen_batch_size: ${data.train_batch_size}
+
+reward_model:
+  reward_manager: dapo  # Use DAPO reward manager as base
+  overlong_buffer: 
+    enable: False # We try to avoid forgetting to set enable
+    len: 0
+    penalty_factor: 0.0
+    log: False
+
+algorithm:
+  # JEPO specific parameters
+  jepo_delimiter: "\n\n"  # delimiter to split chain-of-thought from response
+  jepo_format_penalty: 0.1  # penalty p for responses without delimiter
+  jepo_beta_supp: 1.0  # coefficient for grad2 (suppression gradient)
+  jepo_beta_kl: 0.1  # coefficient for KL divergence gradient
+  jepo_buffer_size: 1000  # maximum buffer size for storing incorrect responses
+  jepo_steps: 5  # number of JEPO steps when buffer is full
+  
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: False # We try to avoid forgetting to set enable
+    metric: null # acc / score / seq_reward / seq_final_reward / ...
+    max_num_gen_batches: 0 # Non-positive values mean no upper limit
+
+trainer:
+  project_name: verl-jepo
