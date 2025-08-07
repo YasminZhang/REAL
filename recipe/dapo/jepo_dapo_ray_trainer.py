@@ -142,36 +142,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         Returns:
             Dictionary of training metrics
         """
-        # Extract prompt and ground truth for JEPO metadata
-        # Note: prompts and responses are tokens, ground_truth is string
-        prompts_tokens = jepo_batch.batch.get("prompts", [])
-        ground_truth_data = jepo_batch.non_tensor_batch.get("reward_model", {})
-        ground_truth_answer = ground_truth_data.get("ground_truth", "")
-        
-        # For JEPO, we need the first prompt as string (convert from tokens if needed)
-        if len(prompts_tokens) > 0:
-            # Assuming we have a tokenizer available
-            if hasattr(self, 'tokenizer'):
-                prompt_str = self.tokenizer.decode(prompts_tokens[0], skip_special_tokens=True)
-            else:
-                prompt_str = str(prompts_tokens[0])  # Fallback
-        else:
-            prompt_str = ""
-        
-        # Add JEPO-specific configuration and metadata to the existing DataProto
-        jepo_batch.meta_info.update({
-            "jepo_config": {
-                "delimiter": self.jepo_config.delimiter,
-                "format_penalty": self.jepo_config.format_penalty,
-                "beta_supp": self.jepo_config.beta_supp,
-                "beta_kl": self.jepo_config.beta_kl,
-            },
-            "use_jepo": True,
-            "temperature": self.config.actor_rollout_ref.rollout.temperature,
-            "jepo_prompt": prompt_str,
-            "jepo_answer": ground_truth_answer if isinstance(ground_truth_answer, str) else str(ground_truth_answer),
-        })
-        
         # Call the JEPO-specific actor update with the properly formatted DataProto
         actor_output = self.actor_rollout_wg.jepo_update_actor(jepo_batch)
         
@@ -332,6 +302,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         num_prompt_in_batch = 0
         num_prompt_in_jepo_buffer = 0
         num_gen_batches = 0
+        all_incorrect_batch = None  # Buffer for all incorrect responses
         
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -484,7 +455,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             print(f"Solve None: {len(all_incorrect_traj_idxs)}")
                             print(f"Solve Partial: {len(kept_traj_idxs)}")
                             all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
-                            all_incorrect_batch = all_incorrect_new_batch.copy() if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
+                            all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
                             added_to_jepo_buffer = True
                             
                             # Perform JEPO training if buffer is full
