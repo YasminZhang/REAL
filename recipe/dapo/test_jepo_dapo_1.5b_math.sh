@@ -33,9 +33,9 @@ jepo_delimiter="Answer:"
 jepo_format_penalty=0.1
 jepo_beta_supp=1.0
 jepo_beta_kl=0.1
-jepo_buffer_size=100
-jepo_steps=5
-jepo_update_frequency=10
+jepo_buffer_size=1
+jepo_steps=1
+jepo_update_frequency=1
 
 # Ray - single node setup for 1.5B
 NNODES=1
@@ -135,11 +135,11 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.test_freq=5 \
     trainer.save_freq=10 \
     trainer.total_epochs=5 \
     trainer.total_training_steps=100 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    trainer.log_val_generations=5
+    trainer.log_val_generations=5 
