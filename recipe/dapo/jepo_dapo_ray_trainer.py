@@ -40,6 +40,7 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
+from verl.single_controller.ray.base import Role
 
 from dapo_ray_trainer import RayDAPOTrainer
 
@@ -68,7 +69,22 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
     """
     
     def __init__(self, *args, **kwargs):
+        # Import JEPOActor and modify role_worker_mapping to use JEPO actor
+        from verl.workers.actor.jepo_actor import JEPOActor
+        
+        # If role_worker_mapping is provided, override the ActorRollout role to use JEPOActor
+        if 'role_worker_mapping' in kwargs:
+            kwargs['role_worker_mapping'][Role.ActorRollout] = JEPOActor
+        elif len(args) >= 2:  # role_worker_mapping is typically the 2nd argument
+            # Convert args to list to modify it
+            args_list = list(args)
+            if isinstance(args_list[1], dict) and Role.ActorRollout in args_list[1]:
+                args_list[1][Role.ActorRollout] = JEPOActor
+                args = tuple(args_list)
+        
         super().__init__(*args, **kwargs)
+        
+        print(f"JEPO-DAPO Trainer initialized with actor class: {self.role_worker_mapping.get(Role.ActorRollout, 'Unknown')}")
         
         # Initialize JEPO components
         self.jepo_config = JEPOConfig(

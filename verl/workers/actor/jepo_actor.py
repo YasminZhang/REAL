@@ -113,6 +113,8 @@ class JEPOActor(DataParallelPPOActor):
                     # JEPO Actor: All data is pre-filtered to be incorrect responses only
                     responses = model_inputs.get("responses", [])
                     uids = model_inputs.get("uid", [])
+                    prompts = model_inputs.get("prompts", [])
+                    ground_truths = model_inputs.get("ground_truth", [])
                     
                     if not responses:
                         # Fall back to standard PPO if no responses
@@ -147,6 +149,8 @@ class JEPOActor(DataParallelPPOActor):
                             jepo_questions_log_probs = []
                             jepo_questions_response_tokens = []
                             jepo_questions_old_log_probs = []
+                            jepo_questions_prompts = []
+                            jepo_questions_ground_truths = []
                             
                             # Extract tokenizer once
                             tokenizer = getattr(self.actor_module, 'tokenizer', None)
@@ -171,10 +175,16 @@ class JEPOActor(DataParallelPPOActor):
                                         tokens = tokenizer.encode(response, add_special_tokens=False)
                                         response_tokens.append(tokens)
                                     
+                                    # Extract prompt and ground truth for this UID (should be same for all responses with same UID)
+                                    uid_prompt = prompts[uid_indices[0]] if prompts else ""
+                                    uid_ground_truth = ground_truths[uid_indices[0]] if ground_truths else ""
+                                    
                                     jepo_questions_responses.append(uid_responses)
                                     jepo_questions_log_probs.append(uid_log_prob)
                                     jepo_questions_response_tokens.append(response_tokens)
                                     jepo_questions_old_log_probs.append(uid_old_log_prob)
+                                    jepo_questions_prompts.append(uid_prompt)
+                                    jepo_questions_ground_truths.append(uid_ground_truth)
                             
                             if jepo_questions_responses:
                                 # Batched JEPO computation
@@ -182,9 +192,12 @@ class JEPOActor(DataParallelPPOActor):
                                     questions_responses=jepo_questions_responses,
                                     questions_log_probs=jepo_questions_log_probs,
                                     questions_response_tokens=jepo_questions_response_tokens,
+                                    questions=jepo_questions_prompts,
+                                    ground_truth_answers=jepo_questions_ground_truths,
                                     tokenizer=tokenizer,
                                     delimiter=delimiter,
                                     format_penalty=format_penalty,
+                                    model=self.actor_module,
                                     device=log_prob.device
                                 )
                                 

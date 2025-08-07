@@ -163,20 +163,29 @@ class RayJEPOTrainer(RayPPOTrainer):
         answer_log_probs = torch.stack(answer_log_probs)
         cot_log_probs = torch.stack(cot_log_probs)
         
-        # Compute JEPO advantages
-        tilde_A_i, tilde_A_i_ref = compute_jepo_advantages(
+        # Prepare response tokens for JEPO
+        response_token_lists = []
+        for tokens in response_tokens:
+            response_token_lists.append(tokens.squeeze(0).tolist())  # Remove batch dim and convert to list
+        
+        # Compute JEPO advantages using ground truth answer
+        tilde_A_i, tilde_A_i_ref, cot_log_probs_jepo, answer_log_probs_jepo = compute_jepo_advantages(
             responses=responses,
             log_probs=answer_log_probs,
+            response_tokens=response_token_lists,
+            tokenizer=self.tokenizer,
             delimiter=self.jepo_config.delimiter,
             format_penalty=self.jepo_config.format_penalty,
-            pi_theta=current_log_probs,
+            ground_truth_answer=answer,
+            model=self.actor_rollout_ref.module,
+            question=prompt,
             device=self.device
         )
         
-        # Compute JEPO loss
+        # Compute JEPO loss using the ground truth answer log probs
         loss_dict = jepo_loss(
             chain_of_thought_log_probs=cot_log_probs,
-            answer_log_probs=answer_log_probs,
+            answer_log_probs=answer_log_probs_jepo,  # Use ground truth answer log probs from JEPO
             tilde_A_i=tilde_A_i,
             tilde_A_i_ref=tilde_A_i_ref,
             ref_log_probs=ref_log_probs,

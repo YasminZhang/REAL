@@ -47,19 +47,49 @@ def test_jepo_advantages():
     
     # Mock log probabilities (batch_size=3, seq_len=10)
     log_probs = torch.randn(3, 10)
-    pi_theta = torch.randn(3, 1000)  # vocab_size = 1000
     
-    tilde_A_i, tilde_A_i_ref = compute_jepo_advantages(
+    # Mock tokenizer
+    class MockTokenizer:
+        def encode(self, text, add_special_tokens=False, return_tensors=None):
+            # Simple mock: return list of token IDs based on text length
+            if return_tensors == "pt":
+                return torch.tensor([[i for i in range(len(text.split()))]])
+            return [i for i in range(len(text.split()))]
+    
+    tokenizer = MockTokenizer()
+    
+    # Mock model
+    class MockModel:
+        def __call__(self, input_ids, labels=None):
+            class MockOutput:
+                def __init__(self, seq_len, vocab_size=1000):
+                    self.logits = torch.randn(1, seq_len, vocab_size)
+            return MockOutput(input_ids.shape[1])
+    
+    model = MockModel()
+    
+    # Mock response tokens
+    response_tokens = [
+        tokenizer.encode(response) for response in responses
+    ]
+    
+    tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_jepo_advantages(
         responses=responses,
         log_probs=log_probs,
+        response_tokens=response_tokens,
+        tokenizer=tokenizer,
         delimiter="\n\n",
         format_penalty=0.1,
-        pi_theta=pi_theta,
+        ground_truth_answer="4",
+        model=model,
+        question="What is 2+2?",
         device=torch.device('cpu')
     )
     
     assert tilde_A_i.shape == (3,)
     assert tilde_A_i_ref.shape == (3,)
+    assert cot_log_probs.shape == (3,)
+    assert answer_log_probs.shape == (3,)
     assert torch.all(torch.abs(tilde_A_i) <= 1.0)  # Should be clipped to [-1, 1]
     
     print("✓ JEPO advantages test passed")

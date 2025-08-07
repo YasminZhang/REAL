@@ -76,7 +76,9 @@ def compute_jepo_advantages(
     tokenizer,
     delimiter: str,
     format_penalty: float,
-    pi_theta: torch.Tensor,
+    ground_truth_answer: str,
+    model,
+    question: str,
     device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -85,19 +87,21 @@ def compute_jepo_advantages(
     
     Args:
         responses: List of n response strings
-        log_probs: Log probabilities for each response [n, seq_len]
+        log_probs: Log probabilities for each response [n, seq_len] 
         response_tokens: List of tokenized responses for each response
         tokenizer: Tokenizer to decode tokens and find delimiter positions
         delimiter: String used to split chain-of-thought from response
         format_penalty: Penalty p for responses without delimiter
-        pi_theta: Policy probabilities [n, vocab_size]
+        ground_truth_answer: The correct answer from dataset for computing π_θ(a*|x,c_j)
+        model: The policy model for computing ground truth answer probabilities
+        question: The original question x
         device: Device to place tensors on
         
     Returns:
         tilde_A_i: Clipped advantages for chain-of-thought
         tilde_A_i_ref: Normalized format advantages
         cot_log_probs_tensor: Chain-of-thought log probabilities [n]
-        answer_log_probs_tensor: Answer log probabilities [n]
+        answer_log_probs_tensor: Ground truth answer log probabilities [n]
     """
     n = len(responses)
     
@@ -152,19 +156,60 @@ def compute_jepo_advantages(
     cot_log_probs_tensor = torch.stack(cot_log_probs)  # [n]
     answer_log_probs_tensor = torch.stack(answer_log_probs)  # [n]
     
-    # Step 2: Vectorized advantage computation
-    # Calculate log(1/n * sum_j pi_theta(a|x,c_j)) - same for all i
-    log_mean_prob = torch.logsumexp(cot_log_probs_tensor, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32, device=device))
+    # Step 2: Compute π_θ(a*|x,c_j) for each chain-of-thought c_j
+    # where a* is the ground truth answer
+    answer_log_probs_gt = []  # Log probs for ground truth answer given each CoT
     
-    # Calculate v_i = log(1/(n-1) * sum_{j!=i} pi_theta(a|x,c_j)) for all i
-    # Use broadcasting to compute all v_i values efficiently
+    for i, cot in enumerate(chain_of_thoughts):
+        # Construct prompt: question + CoT + delimiter 
+        if has_delimiter[i]:
+            prompt_with_cot = question + cot + delimiter
+        else:
+            # If no delimiter in response, still try to use the "CoT" part
+            prompt_with_cot = question + cot + delimiter
+        
+        # Tokenize the prompt + ground truth answer
+        full_input = prompt_with_cot + ground_truth_answer
+        input_ids = tokenizer.encode(full_input, return_tensors="pt").to(device)
+        
+        # Get log probabilities from model
+        with torch.no_grad():
+            outputs = model(input_ids, labels=input_ids)
+            logits = outputs.logits  # [1, seq_len, vocab_size]
+            log_probs_full = torch.log_softmax(logits, dim=-1)  # [1, seq_len, vocab_size]
+        
+        # Find where the ground truth answer starts in the tokenized sequence
+        prompt_tokens = tokenizer.encode(prompt_with_cot, add_special_tokens=False)
+        answer_tokens = tokenizer.encode(ground_truth_answer, add_special_tokens=False)
+        
+        # Extract log probabilities for ground truth answer tokens
+        answer_start_pos = len(prompt_tokens)
+        answer_log_prob_sum = 0.0
+        
+        for j, token_id in enumerate(answer_tokens):
+            if answer_start_pos + j < log_probs_full.shape[1]:
+                # Get log prob for this specific token
+                token_log_prob = log_probs_full[0, answer_start_pos + j - 1, token_id]  # -1 because logits are shifted
+                answer_log_prob_sum += token_log_prob.item()
+        
+        answer_log_probs_gt.append(torch.tensor(answer_log_prob_sum, device=device))
+    
+    answer_log_probs_tensor = torch.stack(answer_log_probs_gt)  # [n]
+    
+    # Step 2b: Vectorized advantage computation using ground truth answer probabilities
+    # A_i = log(1/n * sum_j π_θ(a*|x,c_j)) - v_i
+    # where v_i = log(1/(n-1) * sum_{j!=i} π_θ(a*|x,c_j))
+    
+    log_mean_prob = torch.logsumexp(answer_log_probs_tensor, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32, device=device))
+    
+    # Calculate v_i = log(1/(n-1) * sum_{j!=i} π_θ(a*|x,c_j)) for all i
     if n > 1:
         # Create mask to exclude each i-th element
         indices = torch.arange(n, device=device)
         mask = indices.unsqueeze(1) != indices.unsqueeze(0)  # [n, n]
         
-        # Broadcast cot_log_probs_tensor and apply mask
-        masked_log_probs = cot_log_probs_tensor.unsqueeze(0).expand(n, -1)  # [n, n]
+        # Broadcast answer_log_probs_tensor and apply mask
+        masked_log_probs = answer_log_probs_tensor.unsqueeze(0).expand(n, -1)  # [n, n]
         masked_log_probs = torch.where(mask, masked_log_probs, torch.tensor(float('-inf'), device=device))
         
         # Compute logsumexp for each row (excluding i-th element)
@@ -172,7 +217,7 @@ def compute_jepo_advantages(
     else:
         v_i = torch.tensor(float('-inf'), device=device).expand(n)
     
-    # A_i = log(1/n * sum_j pi_theta(a|x,c_j)) - v_i (vectorized)
+    # A_i = log(1/n * sum_j π_θ(a*|x,c_j)) - v_i (vectorized)
     A_tensor = log_mean_prob - v_i  # [n]
     
     # Step 3: Calculate tilde_A_i = clip(A_i / std(A), -1, 1) (vectorized)
@@ -199,7 +244,7 @@ def compute_jepo_advantages(
         tilde_A_i.to(device), 
         tilde_A_i_ref.to(device), 
         cot_log_probs_tensor.to(device), 
-        answer_log_probs_tensor.to(device)
+        answer_log_probs_tensor.to(device)  # Now contains ground truth answer log probs
     )
 
 
@@ -207,9 +252,12 @@ def compute_jepo_advantages_batched(
     questions_responses: List[List[str]],  # List of questions, each with multiple responses
     questions_log_probs: List[torch.Tensor],  # List of log prob tensors for each question
     questions_response_tokens: List[List[List[int]]],  # List of tokenized responses for each question
+    questions: List[str],  # List of original questions
+    ground_truth_answers: List[str],  # List of ground truth answers for each question
     tokenizer,
     delimiter: str,
     format_penalty: float,
+    model,
     device: torch.device
 ) -> tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
@@ -219,9 +267,12 @@ def compute_jepo_advantages_batched(
         questions_responses: List of [responses for question_i]
         questions_log_probs: List of [log_probs tensor for question_i] 
         questions_response_tokens: List of [tokenized responses for question_i]
+        questions: List of original questions x_i
+        ground_truth_answers: List of ground truth answers a*_i for each question
         tokenizer: Tokenizer
         delimiter: String delimiter
         format_penalty: Penalty for missing delimiter
+        model: Policy model for computing ground truth probabilities
         device: Device
         
     Returns:
@@ -229,7 +280,7 @@ def compute_jepo_advantages_batched(
         - tilde_A_i_list: Clipped advantages for each question
         - tilde_A_i_ref_list: Format advantages for each question  
         - cot_log_probs_list: CoT log probs for each question
-        - answer_log_probs_list: Answer log probs for each question
+        - answer_log_probs_list: Ground truth answer log probs for each question
     """
     num_questions = len(questions_responses)
     
@@ -244,10 +295,7 @@ def compute_jepo_advantages_batched(
         log_probs = questions_log_probs[q_idx] 
         response_tokens = questions_response_tokens[q_idx]
         
-        # Dummy pi_theta for this question (not used in current implementation)
-        pi_theta = torch.exp(log_probs)
-        
-        # Compute advantages for this question
+        # Compute advantages for this question using ground truth answer
         tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_jepo_advantages(
             responses=responses,
             log_probs=log_probs,
@@ -255,7 +303,9 @@ def compute_jepo_advantages_batched(
             tokenizer=tokenizer,
             delimiter=delimiter,
             format_penalty=format_penalty,
-            pi_theta=pi_theta,
+            ground_truth_answer=ground_truth_answers[q_idx],
+            model=model,
+            question=questions[q_idx],
             device=device
         )
         
