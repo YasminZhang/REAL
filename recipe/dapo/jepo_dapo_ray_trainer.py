@@ -235,9 +235,10 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         """
         try:
             # Get the accuracy list from non_tensor_batch
-            acc_list = batch.non_tensor_batch.get("acc", [])
+            metric_name = self.config.algorithm.filter_groups.metric
+            acc_list = batch.non_tensor_batch.get(metric_name, [])
             if len(acc_list) == 0:
-                print("No acc list found for JEPO buffer check")
+                print(f"No {metric_name} list found for JEPO buffer check")
                 return
             
             uids = batch.non_tensor_batch.get("uid", [])
@@ -553,22 +554,34 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             prompt_uid2metric_vals[uid].append(metric_val)
 
                         prompt_uid2metric_std = {}
+                        prompt_uid2metric_mean = {}
                         for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
                             prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                            prompt_uid2metric_mean[prompt_uid] = np.mean(metric_vals)
 
                         kept_prompt_uids = [
                             uid
                             for uid, std in prompt_uid2metric_std.items()
                             if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
                         ]
+                        # all_incorrect_uids = [
+                        #     uid
+                        #     for uid, mean in prompt_uid2metric_mean.items()
+                        #     if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
+                        # ]
                         num_prompt_in_batch += len(kept_prompt_uids)
 
                         kept_traj_idxs = []
+                        #all_incorrect_traj_idxs = []
                         for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
+                            # if traj_from_prompt_uid in all_incorrect_uids:
+                            #     all_incorrect_traj_idxs.append(idx)
 
                         new_batch = new_batch[kept_traj_idxs]
+                        #all_incorrect_batch = new_batch[all_incorrect_traj_idxs]
+
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
                         prompt_bsz = self.config.data.train_batch_size

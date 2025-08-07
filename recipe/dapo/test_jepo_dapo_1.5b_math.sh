@@ -27,6 +27,11 @@ train_prompt_bsz=128
 n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 
+# DAPO
+enable_filter_groups=True
+filter_groups_metric=acc
+max_num_gen_batches=10
+
 # JEPO specific parameters
 use_jepo=True
 jepo_delimiter="Answer:"
