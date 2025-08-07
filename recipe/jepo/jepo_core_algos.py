@@ -254,7 +254,6 @@ def compute_jepo_advantages(
 
 
 def compute_jepo_advantages_batched(
-    questions_responses: List[List[str]] = None,  # Optional - List of questions, each with multiple responses
     questions_log_probs: List[torch.Tensor],  # List of log prob tensors for each question
     questions_response_tokens: List[List[List[int]]],  # List of tokenized responses for each question
     questions: List[str],  # List of original questions
@@ -263,7 +262,8 @@ def compute_jepo_advantages_batched(
     delimiter: str,
     format_penalty: float,
     model,
-    device: torch.device
+    device: torch.device,
+    questions_responses: List[List[str]] = None,  # Optional - List of questions, each with multiple responses
 ) -> tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
     Batched version of compute_jepo_advantages for multiple questions
