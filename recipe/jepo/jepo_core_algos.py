@@ -70,7 +70,6 @@ class JEPOBuffer:
 
 
 def compute_jepo_advantages(
-    responses: List[str],
     log_probs: torch.Tensor,
     response_tokens: List[List[int]],
     tokenizer,
@@ -79,7 +78,8 @@ def compute_jepo_advantages(
     ground_truth_answer: str,
     model,
     question: str,
-    device: torch.device
+    device: torch.device,
+    responses: List[str] = None,  # Optional - can work with just tokens
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute JEPO advantages based on the algorithm described in jepo.md
@@ -114,39 +114,44 @@ def compute_jepo_advantages(
     # Vectorized preprocessing - find delimiter positions for all responses
     delimiter_tokens = tokenizer.encode(delimiter, add_special_tokens=False)
     
+    # Handle case where responses are None (working with tokens only)
+    if responses is None:
+        responses = [None] * len(response_tokens)
+    
     for i, (response, tokens) in enumerate(zip(responses, response_tokens)):
-        if delimiter in response:
-            # Find delimiter position in the response string
-            cot_text = response.split(delimiter)[0]
+        # Search for delimiter token sequence directly in the response tokens (no string decoding needed)
+        delimiter_start_pos = None
+        
+        # Search for delimiter token sequence in the response tokens
+        for j in range(len(tokens) - len(delimiter_tokens) + 1):
+            if tokens[j:j+len(delimiter_tokens)] == delimiter_tokens:
+                delimiter_start_pos = j
+                break
+        
+        if delimiter_start_pos is not None:
+            # Found delimiter in tokens - extract chain-of-thought text only for storage
+            cot_tokens = tokens[:delimiter_start_pos]
+            cot_text = tokenizer.decode(cot_tokens, skip_special_tokens=True)
             
-            # Find delimiter token positions
-            delimiter_start_pos = None
-            
-            # Search for delimiter token sequence in the response tokens
-            for j in range(len(tokens) - len(delimiter_tokens) + 1):
-                if tokens[j:j+len(delimiter_tokens)] == delimiter_tokens:
-                    delimiter_start_pos = j
-                    break
-            
-            if delimiter_start_pos is not None:
-                # Extract log probs for chain-of-thought part (before delimiter)
-                cot_log_prob = torch.sum(log_probs[i, :delimiter_start_pos])
-                # Extract log probs for answer part (after delimiter)
-                delimiter_end_pos = delimiter_start_pos + len(delimiter_tokens)
-                answer_log_prob = torch.sum(log_probs[i, delimiter_end_pos:])
-                has_delimiter.append(True)
-            else:
-                # Fallback: use entire sequence if delimiter not found in tokens
-                cot_log_prob = torch.sum(log_probs[i, :])
-                answer_log_prob = torch.tensor(0.0, device=log_probs.device)  # No answer part
-                has_delimiter.append(False)
-            
+            # Extract log probs for chain-of-thought part (before delimiter)
+            cot_log_prob = torch.sum(log_probs[i, :delimiter_start_pos])
+            # Extract log probs for answer part (after delimiter)
+            delimiter_end_pos = delimiter_start_pos + len(delimiter_tokens)
+            answer_log_prob = torch.sum(log_probs[i, delimiter_end_pos:])
+            has_delimiter.append(True)
             chain_of_thoughts.append(cot_text)
         else:
-            # No delimiter: use entire response as chain-of-thought
+            # No delimiter found in tokens: use entire response as chain-of-thought
             cot_log_prob = torch.sum(log_probs[i, :])
             answer_log_prob = torch.tensor(0.0, device=log_probs.device)  # No answer part
-            chain_of_thoughts.append(response)
+            
+            # Decode full response only when needed
+            if response is not None:
+                chain_of_thoughts.append(response)  # Use original response string
+            else:
+                # Decode tokens to get response text
+                response_text = tokenizer.decode(tokens, skip_special_tokens=True)
+                chain_of_thoughts.append(response_text)
             has_delimiter.append(False)
         
         cot_log_probs.append(cot_log_prob)
@@ -249,7 +254,7 @@ def compute_jepo_advantages(
 
 
 def compute_jepo_advantages_batched(
-    questions_responses: List[List[str]],  # List of questions, each with multiple responses
+    questions_responses: List[List[str]] = None,  # Optional - List of questions, each with multiple responses
     questions_log_probs: List[torch.Tensor],  # List of log prob tensors for each question
     questions_response_tokens: List[List[List[int]]],  # List of tokenized responses for each question
     questions: List[str],  # List of original questions
@@ -282,7 +287,11 @@ def compute_jepo_advantages_batched(
         - cot_log_probs_list: CoT log probs for each question
         - answer_log_probs_list: Ground truth answer log probs for each question
     """
-    num_questions = len(questions_responses)
+    # Handle case where questions_responses is None
+    if questions_responses is None:
+        num_questions = len(questions_response_tokens)
+    else:
+        num_questions = len(questions_responses)
     
     tilde_A_i_list = []
     tilde_A_i_ref_list = []
@@ -291,7 +300,7 @@ def compute_jepo_advantages_batched(
     
     # Process all questions in batch
     for q_idx in range(num_questions):
-        responses = questions_responses[q_idx]
+        responses = questions_responses[q_idx] if questions_responses is not None else None
         log_probs = questions_log_probs[q_idx] 
         response_tokens = questions_response_tokens[q_idx]
         

@@ -111,12 +111,12 @@ class JEPOActor(DataParallelPPOActor):
                     )
 
                     # JEPO Actor: All data is pre-filtered to be incorrect responses only
-                    responses = model_inputs.get("responses", [])
+                    response_tokens_tensor = model_inputs.get("responses", None)  # These are already tokens
                     uids = model_inputs.get("uid", [])
                     prompts = model_inputs.get("prompts", [])
                     ground_truths = model_inputs.get("ground_truth", [])
                     
-                    if not responses:
+                    if response_tokens_tensor is None or len(response_tokens_tensor) == 0:
                         # Fall back to standard PPO if no responses
                         logger.warning("No responses found in JEPO actor, falling back to PPO")
                         from verl.trainer.ppo.core_algos import get_policy_loss_fn
@@ -165,21 +165,26 @@ class JEPOActor(DataParallelPPOActor):
                                 uid_indices = torch.where(uid_mask)[0]
                                 
                                 if len(uid_indices) > 1:  # Need multiple responses for JEPO
-                                    uid_responses = [responses[i] for i in uid_indices]
+                                    # Get response tokens directly (already encoded)
+                                    uid_response_tokens_tensor = response_tokens_tensor[uid_mask]
                                     uid_log_prob = log_prob[uid_mask]
                                     uid_old_log_prob = old_log_prob[uid_mask]
                                     
-                                    # Tokenize responses
+                                    # Convert tensor tokens to list of token lists (no string decoding needed)
                                     response_tokens = []
-                                    for response in uid_responses:
-                                        tokens = tokenizer.encode(response, add_special_tokens=False)
+                                    for i in range(uid_response_tokens_tensor.shape[0]):
+                                        tokens = uid_response_tokens_tensor[i].cpu().tolist()
+                                        # Remove padding tokens (typically 0 or tokenizer.pad_token_id)
+                                        if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
+                                            tokens = [t for t in tokens if t != tokenizer.pad_token_id]
                                         response_tokens.append(tokens)
                                     
                                     # Extract prompt and ground truth for this UID (should be same for all responses with same UID)
                                     uid_prompt = prompts[uid_indices[0]] if prompts else ""
                                     uid_ground_truth = ground_truths[uid_indices[0]] if ground_truths else ""
                                     
-                                    jepo_questions_responses.append(uid_responses)
+                                    # Pass None for responses since JEPO algorithm now works directly with tokens
+                                    jepo_questions_responses.append(None)  # No longer needed - algorithm works with tokens
                                     jepo_questions_log_probs.append(uid_log_prob)
                                     jepo_questions_response_tokens.append(response_tokens)
                                     jepo_questions_old_log_probs.append(uid_old_log_prob)

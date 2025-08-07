@@ -242,19 +242,11 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             
             uids = batch.non_tensor_batch.get("uid", [])
             # Get responses from batch.batch, not non_tensor_batch
-            responses_tensor = batch.batch.get("responses")
+            responses = batch.batch.get("responses")
             
-            if len(uids) == 0 or responses_tensor is None:
+            if len(uids) == 0 or responses is None:
                 print("No UIDs or responses found for JEPO buffer check")
                 return
-            
-            # Convert responses tensor to strings using tokenizer
-            responses = []
-            for i in range(responses_tensor.shape[0]):
-                response_ids = responses_tensor[i]
-                # Decode the response, skip special tokens
-                response_str = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-                responses.append(response_str)
                 
             unique_uids = np.unique(uids)
             buffered_count = 0
