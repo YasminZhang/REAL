@@ -63,7 +63,7 @@ gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 # Use JEPO-DAPO recipe
-python3 recipe/dapo/main_jepo_dapo.py \
+python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \

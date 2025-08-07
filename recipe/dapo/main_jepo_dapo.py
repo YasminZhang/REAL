@@ -25,10 +25,10 @@ from omegaconf import OmegaConf
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 
-from .jepo_dapo_ray_trainer import RayJEPODAPOTrainer
+from recipe.dapo.jepo_dapo_ray_trainer import RayJEPODAPOTrainer
 
 
-@hydra.main(config_path="config", config_name="jepo_dapo_trainer", version_base=None)
+@hydra.main(config_path="/home/aiscuser/jepo/recipe/dapo/config", config_name="jepo_dapo_trainer", version_base=None)
 def main(config):
     run_jepo_dapo(config)
 
