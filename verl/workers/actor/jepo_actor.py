@@ -58,7 +58,16 @@ class JEPOActor(DataParallelPPOActor):
         format_penalty = jepo_config.get("format_penalty", 1.0)
         beta_supp = jepo_config.get("beta_supp", 1.0)
         beta_kl = jepo_config.get("beta_kl", 0.1)
+        
+        # Check if this is JEPO mode with pre-computed data
+        use_jepo = data.meta_info.get("use_jepo", False)
+        jepo_data = data.meta_info.get("jepo_data", None)
+        
+        if use_jepo and jepo_data is not None:
+            # JEPO mode: work directly with buffered data
+            return self._update_policy_jepo_mode(jepo_data, temperature, delimiter, format_penalty, beta_supp, beta_kl)
 
+        # Standard PPO mode
         select_keys = [
             "responses",
             "response_mask",
@@ -258,3 +267,111 @@ class JEPOActor(DataParallelPPOActor):
 
         self.actor_optimizer.zero_grad()
         return metrics
+    
+    def _update_policy_jepo_mode(self, jepo_data: dict, temperature: float, delimiter: str, 
+                                 format_penalty: float, beta_supp: float, beta_kl: float):
+        """
+        Handle JEPO training with pre-computed buffered data
+        """
+        try:
+            # Extract data from the buffer
+            responses = jepo_data.get('responses', [])
+            prompt = jepo_data.get('prompt', '')
+            answer = jepo_data.get('answer', '')
+            
+            if not responses:
+                logger.warning("No responses found in JEPO data")
+                return {"jepo_actor/no_responses": 1}
+            
+            # Extract tokenizer
+            tokenizer = getattr(self.actor_module, 'tokenizer', None) or getattr(self.config, 'tokenizer', None)
+            if tokenizer is None:
+                logger.error("Tokenizer not found for JEPO mode")
+                return {"jepo_actor/no_tokenizer": 1}
+            
+            # Prepare inputs for the model
+            # Create input prompts for each response to compute log probs
+            full_texts = [prompt + response for response in responses]
+            
+            # Tokenize all texts
+            tokenized_inputs = tokenizer(full_texts, return_tensors='pt', padding=True, truncation=True)
+            input_ids = tokenized_inputs['input_ids'].to(self.actor_module.device)
+            attention_mask = tokenized_inputs['attention_mask'].to(self.actor_module.device)
+            
+            # Get log probabilities from the model
+            with torch.no_grad():
+                outputs = self.actor_module(input_ids=input_ids, attention_mask=attention_mask)
+                logits = outputs.logits
+            
+            # Convert logits to log probabilities
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            
+            # Extract response tokens and their log probs
+            prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+            prompt_len = len(prompt_tokens)
+            
+            response_tokens_list = []
+            response_log_probs_list = []
+            
+            for i, response in enumerate(responses):
+                response_tokens = tokenizer.encode(response, add_special_tokens=False)
+                response_tokens_list.append(response_tokens)
+                
+                # Extract log probs for this response (after prompt)
+                seq_len = attention_mask[i].sum().item()
+                response_start = min(prompt_len, seq_len - len(response_tokens))
+                response_end = min(seq_len, response_start + len(response_tokens))
+                
+                # Get log probs for the response tokens
+                if response_end > response_start:
+                    response_log_probs = log_probs[i, response_start:response_end-1]  # Shift by 1 for next token prediction
+                    response_log_probs_list.append(response_log_probs.sum())
+                else:
+                    response_log_probs_list.append(torch.tensor(0.0, device=log_probs.device))
+            
+            # Stack log probs into tensor
+            response_log_probs_tensor = torch.stack(response_log_probs_list)
+            
+            # Call JEPO algorithm
+            from jepo_core_algos import compute_jepo_advantages, jepo_loss
+            
+            tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_jepo_advantages(
+                log_probs=response_log_probs_tensor.unsqueeze(-1),  # Add sequence dimension
+                response_tokens=response_tokens_list,
+                tokenizer=tokenizer,
+                delimiter=delimiter,
+                format_penalty=format_penalty,
+                ground_truth_answer=answer,
+                model=self.actor_module,
+                question=prompt,
+                device=self.actor_module.device,
+                responses=responses
+            )
+            
+            # Compute JEPO loss (simplified version)
+            total_loss = jepo_loss(
+                cot_log_probs=cot_log_probs,
+                answer_log_probs=answer_log_probs,
+                tilde_A_i=tilde_A_i,
+                tilde_A_i_ref=tilde_A_i_ref,
+                beta_supp=beta_supp,
+                beta_kl=beta_kl
+            )
+            
+            # Backward pass
+            self.actor_optimizer.zero_grad()
+            total_loss.backward()
+            grad_norm = self._optimizer_step()
+            
+            # Return metrics
+            return {
+                "jepo_actor/total_loss": total_loss.detach().item(),
+                "jepo_actor/grad_norm": grad_norm.detach().item(),
+                "jepo_actor/num_responses": len(responses)
+            }
+            
+        except Exception as e:
+            logger.error(f"JEPO mode training failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"jepo_actor/jepo_mode_failed": 1}

@@ -139,44 +139,30 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         Returns:
             Dictionary of training metrics
         """
-        # Reconstruct batch from buffered data
-        if 'batch_data' in batch_data and 'non_tensor_data' in batch_data:
-            # Use the stored batch data
-            from verl import DataProto
-            
-            # Reconstruct the batch
-            reconstructed_batch = DataProto(
-                batch=batch_data['batch_data'],
-                non_tensor_batch=batch_data['non_tensor_data']
-            )
-        else:
-            # Fallback: create minimal batch from stored data
-            from verl import DataProto
-            responses = batch_data['responses']
-            
-            # Create minimal batch structure
-            reconstructed_batch = DataProto(
-                batch={},  # Will be populated by actor if needed
-                non_tensor_batch={
-                    'responses': responses,
-                    'uid': [batch_data.get('uid', 'unknown')] * len(responses)
-                }
-            )
+        # Create a minimal DataProto just for metadata and JEPO configuration
+        from verl import DataProto
         
-        # Create JEPO-specific batch metadata
-        if not hasattr(reconstructed_batch, 'meta_info'):
-            reconstructed_batch.meta_info = {}
-            
-        reconstructed_batch.meta_info["jepo_config"] = {
-            "delimiter": self.jepo_config.delimiter,
-            "format_penalty": self.jepo_config.format_penalty,
-            "beta_supp": self.jepo_config.beta_supp,
-            "beta_kl": self.jepo_config.beta_kl,
+        # Create minimal batch structure without complex reconstruction
+        minimal_batch = DataProto(
+            batch={},  # Empty - JEPO actor will get data from meta_info
+            non_tensor_batch={}  # Empty - JEPO actor will get data from meta_info
+        )
+        
+        # Add JEPO-specific metadata with all necessary data
+        minimal_batch.meta_info = {
+            "jepo_config": {
+                "delimiter": self.jepo_config.delimiter,
+                "format_penalty": self.jepo_config.format_penalty,
+                "beta_supp": self.jepo_config.beta_supp,
+                "beta_kl": self.jepo_config.beta_kl,
+            },
+            "use_jepo": True,
+            "jepo_data": batch_data,  # Pass the raw buffered data
+            "temperature": 1.0,  # Default temperature for JEPO
         }
-        reconstructed_batch.meta_info["use_jepo"] = True
         
         # Call the JEPO-specific actor update
-        actor_output = self.actor_rollout_wg.jepo_update_actor(reconstructed_batch)
+        actor_output = self.actor_rollout_wg.jepo_update_actor(minimal_batch)
         
         # Extract metrics
         metrics = {}
@@ -259,7 +245,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                 uid_mask = np.array(uids) == uid
                 uid_acc = np.array(acc_list)[uid_mask]  # Get accuracy values for this UID
                 
-                print(f"UID: {uid}, Accuracies: {uid_acc.tolist()}")
+                #print(f"UID: {uid}, Accuracies: {uid_acc.tolist()}")
 
                 # Check if all responses are incorrect (all False in acc_list)
                 if not uid_acc.any():  # All False - all responses are incorrect
@@ -579,6 +565,17 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             # if traj_from_prompt_uid in all_incorrect_uids:
                             #     all_incorrect_traj_idxs.append(idx)
 
+                        # Add to JEPO buffer for each generation batch before continuing
+                        if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
+                            self._check_and_buffer_incorrect_responses(new_batch)
+                            added_to_jepo_buffer = True
+                            
+                            # Perform JEPO training if buffer is full
+                            if len(self.jepo_buffer.buffer) >= self.jepo_config.buffer_size:
+                                jepo_metrics = self._run_jepo_training()
+                                if jepo_metrics:
+                                    print(f"JEPO training completed with metrics: {jepo_metrics}")
+
                         new_batch = new_batch[kept_traj_idxs]
                         #all_incorrect_batch = new_batch[all_incorrect_traj_idxs]
 
@@ -590,17 +587,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
                             if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
                                 print(f"{num_gen_batches=}. Keep generating...")
-                                
-                                # Add to JEPO buffer for each generation batch before continuing
-                                if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
-                                    self._check_and_buffer_incorrect_responses(new_batch)
-                                    added_to_jepo_buffer = True
-                                    
-                                    # Perform JEPO training if buffer is full
-                                    if len(self.jepo_buffer.buffer) >= self.jepo_config.buffer_size:
-                                        jepo_metrics = self._run_jepo_training()
-                                        if jepo_metrics:
-                                            print(f"JEPO training completed with metrics: {jepo_metrics}")
                                 
                                 progress_bar.update(1)
                                 self.gen_steps += 1

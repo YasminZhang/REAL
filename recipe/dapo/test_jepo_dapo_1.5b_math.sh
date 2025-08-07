@@ -38,9 +38,9 @@ jepo_delimiter="Answer:"
 jepo_format_penalty=0.1
 jepo_beta_supp=1.0
 jepo_beta_kl=0.1
-jepo_buffer_size=1
+jepo_buffer_size=128
 jepo_steps=1
-jepo_update_frequency=1
+jepo_update_frequency=10000
 
 # Ray - single node setup for 1.5B
 NNODES=1
@@ -88,6 +88,9 @@ python3 -m recipe.dapo.main_jepo_dapo \
     algorithm.jepo_buffer_size=${jepo_buffer_size} \
     algorithm.jepo_steps=${jepo_steps} \
     algorithm.jepo_update_frequency=${jepo_update_frequency} \
+    algorithm.filter_groups.enable=${enable_filter_groups} \
+    algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
+    algorithm.filter_groups.metric=${filter_groups_metric} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
