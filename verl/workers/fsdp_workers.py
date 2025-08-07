@@ -641,10 +641,47 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
-            # Initialize JEPO actor as well
+            # Initialize JEPO actor with separate optimizer
             from verl.workers.actor.jepo_actor import JEPOActor
+            
+            # Create separate optimizer for JEPO
+            if self.config.actor.optim is not None:
+                import torch.optim as optim
+                jepo_optim_config = self.config.actor.optim
+                self.jepo_actor_optimizer = optim.AdamW(
+                    self.actor_module_fsdp.parameters(),
+                    lr=jepo_optim_config.lr,
+                    betas=jepo_optim_config.get("betas", (0.9, 0.999)),
+                    weight_decay=jepo_optim_config.get("weight_decay", 0.01),
+                )
+                
+                # Create separate LR scheduler for JEPO
+                warmup_style = jepo_optim_config.get("warmup_style", "constant")
+                warmup_ratio = jepo_optim_config.get("warmup_ratio", 0.03)
+                num_warmup_steps = int(warmup_ratio * jepo_optim_config.get("total_training_steps", 1000))
+                total_steps = jepo_optim_config.get("total_training_steps", 1000)
+                min_lr_ratio = jepo_optim_config.get("min_lr_ratio", 0.1)
+                
+                from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+                if warmup_style == "constant":
+                    self.jepo_actor_lr_scheduler = get_constant_schedule_with_warmup(
+                        optimizer=self.jepo_actor_optimizer, num_warmup_steps=num_warmup_steps
+                    )
+                elif warmup_style == "cosine":
+                    self.jepo_actor_lr_scheduler = get_cosine_schedule_with_warmup(
+                        optimizer=self.jepo_actor_optimizer,
+                        num_warmup_steps=num_warmup_steps,
+                        num_training_steps=total_steps,
+                        min_lr_ratio=min_lr_ratio,
+                    )
+                else:
+                    raise ValueError(f"Unknown warmup_style: {warmup_style}")
+            else:
+                self.jepo_actor_optimizer = None
+                self.jepo_actor_lr_scheduler = None
+            
             self.jepo_actor = JEPOActor(
-                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.jepo_actor_optimizer
             )
 
         if self._is_rollout:
@@ -680,6 +717,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
+            # NOTE: Currently only checkpointing main DAPO optimizer, not JEPO optimizer
+            # Future work: Consider separate checkpoint management for JEPO optimizer
             self.checkpoint_manager = FSDPCheckpointManager(
                 model=self.actor_module_fsdp,
                 optimizer=self.actor.actor_optimizer,
@@ -756,7 +795,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
+            load_fsdp_optimizer(optimizer=self.jepo_actor_optimizer, device_id=get_device_id())
 
         with self.ulysses_sharding_manager:
             # perform JEPO training
@@ -772,9 +811,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
-            lr = self.actor_lr_scheduler.get_last_lr()[0]
+            lr = self.jepo_actor_lr_scheduler.get_last_lr()[0] if self.jepo_actor_lr_scheduler else 0.0
             metrics["jepo_actor/lr"] = lr
-            self.actor_lr_scheduler.step()
+            if self.jepo_actor_lr_scheduler:
+                self.jepo_actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={"metrics": metrics})
@@ -785,7 +825,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during jepo_update_actor", logger=logger)
         if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+            offload_fsdp_optimizer(optimizer=self.jepo_actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during jepo_update_actor", logger=logger)
 
         return output

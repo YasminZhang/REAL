@@ -81,6 +81,7 @@ def compute_jepo_advantages(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute JEPO advantages based on the algorithm described in jepo.md
+    For each single question with n responses
     
     Args:
         responses: List of n response strings
@@ -106,13 +107,15 @@ def compute_jepo_advantages(
     cot_log_probs = []  # Log probs for chain-of-thought tokens only
     answer_log_probs = []  # Log probs for answer tokens only
     
+    # Vectorized preprocessing - find delimiter positions for all responses
+    delimiter_tokens = tokenizer.encode(delimiter, add_special_tokens=False)
+    
     for i, (response, tokens) in enumerate(zip(responses, response_tokens)):
         if delimiter in response:
             # Find delimiter position in the response string
             cot_text = response.split(delimiter)[0]
             
             # Find delimiter token positions
-            delimiter_tokens = tokenizer.encode(delimiter, add_special_tokens=False)
             delimiter_start_pos = None
             
             # Search for delimiter token sequence in the response tokens
@@ -145,48 +148,45 @@ def compute_jepo_advantages(
         cot_log_probs.append(cot_log_prob)
         answer_log_probs.append(answer_log_prob)
     
-    # Step 2: Calculate A_i for each response using chain-of-thought log probs
-    A_values = []
-    
-    # Convert to tensors for easier computation
+    # Convert to tensors for vectorized computation
     cot_log_probs_tensor = torch.stack(cot_log_probs)  # [n]
     answer_log_probs_tensor = torch.stack(answer_log_probs)  # [n]
     
-    for i in range(n):
-        # Calculate log(1/n * sum_j pi_theta(a|x,c_j)) using chain-of-thought log probs
-        log_mean_prob = torch.logsumexp(cot_log_probs_tensor, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
-        
-        # Calculate v_i = log(1/(n-1) * sum_{j!=i} pi_theta(a|x,c_j))
-        other_cot_log_probs = torch.cat([cot_log_probs_tensor[:i], cot_log_probs_tensor[i+1:]], dim=0)
-        if len(other_cot_log_probs) > 0:
-            v_i = torch.logsumexp(other_cot_log_probs, dim=0) - torch.log(torch.tensor(n-1, dtype=torch.float32))
-        else:
-            v_i = torch.tensor(float('-inf'))
-        
-        # A_i = log(1/n * sum_j pi_theta(a|x,c_j)) - v_i
-        A_i = log_mean_prob - v_i
-        A_values.append(A_i)
+    # Step 2: Vectorized advantage computation
+    # Calculate log(1/n * sum_j pi_theta(a|x,c_j)) - same for all i
+    log_mean_prob = torch.logsumexp(cot_log_probs_tensor, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32, device=device))
     
-    A_tensor = torch.stack(A_values)
+    # Calculate v_i = log(1/(n-1) * sum_{j!=i} pi_theta(a|x,c_j)) for all i
+    # Use broadcasting to compute all v_i values efficiently
+    if n > 1:
+        # Create mask to exclude each i-th element
+        indices = torch.arange(n, device=device)
+        mask = indices.unsqueeze(1) != indices.unsqueeze(0)  # [n, n]
+        
+        # Broadcast cot_log_probs_tensor and apply mask
+        masked_log_probs = cot_log_probs_tensor.unsqueeze(0).expand(n, -1)  # [n, n]
+        masked_log_probs = torch.where(mask, masked_log_probs, torch.tensor(float('-inf'), device=device))
+        
+        # Compute logsumexp for each row (excluding i-th element)
+        v_i = torch.logsumexp(masked_log_probs, dim=1) - torch.log(torch.tensor(n-1, dtype=torch.float32, device=device))  # [n]
+    else:
+        v_i = torch.tensor(float('-inf'), device=device).expand(n)
     
-    # Step 3: Calculate tilde_A_i = clip(A_i / std(A), -1, 1)
+    # A_i = log(1/n * sum_j pi_theta(a|x,c_j)) - v_i (vectorized)
+    A_tensor = log_mean_prob - v_i  # [n]
+    
+    # Step 3: Calculate tilde_A_i = clip(A_i / std(A), -1, 1) (vectorized)
     A_std = torch.std(A_tensor)
     if A_std > 1e-8:  # Avoid division by zero
         tilde_A_i = torch.clamp(A_tensor / A_std, -1.0, 1.0)
     else:
         tilde_A_i = torch.zeros_like(A_tensor)
     
-    # Step 4: Calculate format advantages
-    A_i_format = []
-    for has_delim in has_delimiter:
-        if has_delim:
-            A_i_format.append(0.0)
-        else:
-            A_i_format.append(-format_penalty)
+    # Step 4: Vectorized format advantages computation
+    has_delimiter_tensor = torch.tensor(has_delimiter, dtype=torch.bool, device=device)
+    A_i_format_tensor = torch.where(has_delimiter_tensor, 0.0, -format_penalty)
     
-    A_i_format_tensor = torch.tensor(A_i_format, device=device, dtype=torch.float32)
-    
-    # Step 5: Normalize format advantages
+    # Step 5: Vectorized format advantages normalization
     format_mean = torch.mean(A_i_format_tensor)
     format_std = torch.std(A_i_format_tensor)
     
@@ -278,7 +278,7 @@ def jepo_loss_batched(
     beta_kl: float
 ) -> Dict[str, torch.Tensor]:
     """
-    Batched version of jepo_loss for multiple questions
+    Batched version of jepo_loss for multiple questions using vectorized operations
     
     Args:
         questions_*: Lists of tensors for each question
@@ -288,50 +288,71 @@ def jepo_loss_batched(
     Returns:
         Dictionary with aggregated loss components
     """
-    num_questions = len(questions_cot_log_probs)
+    if not questions_cot_log_probs:
+        return {
+            "total_loss": torch.tensor(0.0),
+            "pg_loss": torch.tensor(0.0),
+            "supp_loss": torch.tensor(0.0),
+            "kl_loss": torch.tensor(0.0),
+            "advantages_mean": torch.tensor(0.0),
+            "advantages_std": torch.tensor(0.0),
+            "tilde_A_i_mean": torch.tensor(0.0),
+            "tilde_A_i_ref_mean": torch.tensor(0.0)
+        }
     
-    total_grad1_loss = 0.0
-    total_grad2_loss = 0.0  
-    total_grad3_loss = 0.0
-    total_samples = 0
+    # Stack all tensors for vectorized computation
+    all_cot_log_probs = torch.cat(questions_cot_log_probs, dim=0)  # [total_samples, cot_seq_len]
+    all_tilde_A_i = torch.cat(questions_tilde_A_i, dim=0)  # [total_samples]
+    all_tilde_A_i_ref = torch.cat(questions_tilde_A_i_ref, dim=0)  # [total_samples]
+    all_ref_log_probs = torch.cat(questions_ref_log_probs, dim=0)  # [total_samples, seq_len]
+    all_current_log_probs = torch.cat(questions_current_log_probs, dim=0)  # [total_samples, seq_len]
     
-    for q_idx in range(num_questions):
-        # Compute loss for this question
-        question_loss = jepo_loss(
-            chain_of_thought_log_probs=questions_cot_log_probs[q_idx],
-            answer_log_probs=questions_answer_log_probs[q_idx],
-            tilde_A_i=questions_tilde_A_i[q_idx],
-            tilde_A_i_ref=questions_tilde_A_i_ref[q_idx],
-            ref_log_probs=questions_ref_log_probs[q_idx],
-            current_log_probs=questions_current_log_probs[q_idx],
-            beta_supp=beta_supp,
-            beta_kl=beta_kl
-        )
-        
-        # Weight by number of responses in this question
-        num_responses = len(questions_tilde_A_i[q_idx])
-        total_grad1_loss += question_loss["grad1_loss"] * num_responses
-        total_grad2_loss += question_loss["grad2_loss"] * num_responses
-        total_grad3_loss += question_loss["grad3_loss"] * num_responses
-        total_samples += num_responses
+    # Vectorized computation of combined advantages
+    combined_advantages = all_tilde_A_i + all_tilde_A_i_ref
+    combined_advantages = combined_advantages.detach()  # Detach to avoid backprop through advantages
     
-    # Average across all samples
-    if total_samples > 0:
-        avg_grad1_loss = total_grad1_loss / total_samples
-        avg_grad2_loss = total_grad2_loss / total_samples  
-        avg_grad3_loss = total_grad3_loss / total_samples
-        total_loss = avg_grad1_loss + beta_supp * avg_grad2_loss - beta_kl * avg_grad3_loss
+    # Vectorized policy gradient loss (grad1 component)
+    # Handle different sequence lengths by using masked_mean if needed
+    if all_cot_log_probs.dim() == 1:
+        # If already summed per response
+        pg_loss = -torch.mean(combined_advantages * all_cot_log_probs)
     else:
-        avg_grad1_loss = torch.tensor(0.0)
-        avg_grad2_loss = torch.tensor(0.0)
-        avg_grad3_loss = torch.tensor(0.0)
-        total_loss = torch.tensor(0.0)
+        # If per-token log probs, sum across sequence dimension first
+        cot_log_probs_summed = torch.sum(all_cot_log_probs, dim=-1)  # [total_samples]
+        pg_loss = -torch.mean(combined_advantages * cot_log_probs_summed)
+    
+    # Vectorized suppression loss (grad2 component) 
+    # Compute per-question suppression terms
+    supp_losses = []
+    for answer_log_probs in questions_answer_log_probs:
+        if answer_log_probs.dim() == 1:
+            # Already summed per response
+            mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(len(answer_log_probs), dtype=torch.float32))
+        else:
+            # Sum across sequence dimension first, then compute mean
+            answer_log_probs_summed = torch.sum(answer_log_probs, dim=-1)
+            mean_answer_log_prob = torch.logsumexp(answer_log_probs_summed, dim=0) - torch.log(torch.tensor(len(answer_log_probs_summed), dtype=torch.float32))
+        supp_losses.append(mean_answer_log_prob)
+    
+    supp_loss = -beta_supp * torch.mean(torch.stack(supp_losses))
+    
+    # Vectorized KL divergence loss (grad3 component) using PPO-style computation
+    from verl.trainer.ppo import core_algos
+    kl_div = core_algos.kl_penalty(all_current_log_probs, all_ref_log_probs, kl_penalty="kl")
+    kl_loss = beta_kl * torch.mean(kl_div)
+    
+    # Total loss
+    total_loss = pg_loss + supp_loss + kl_loss
     
     return {
-        "grad1_loss": avg_grad1_loss,
-        "grad2_loss": avg_grad2_loss, 
-        "grad3_loss": avg_grad3_loss,
-        "total_loss": total_loss
+        "total_loss": total_loss,
+        "pg_loss": pg_loss,
+        "supp_loss": supp_loss,
+        "kl_loss": kl_loss,
+        "advantages_mean": torch.mean(combined_advantages),
+        "advantages_std": torch.std(combined_advantages),
+        "tilde_A_i_mean": torch.mean(all_tilde_A_i),
+        "tilde_A_i_ref_mean": torch.mean(all_tilde_A_i_ref)
     }
 
 
@@ -346,7 +367,7 @@ def compute_jepo_gradients(
     beta_kl: float
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute JEPO gradients according to the algorithm
+    Compute JEPO gradients using vectorized operations like PPO
     
     Args:
         chain_of_thought_log_probs: Log probs for chain-of-thought tokens [n, cot_seq_len]
@@ -366,22 +387,33 @@ def compute_jepo_gradients(
     # grad1: 1/n * sum_i ((tilde_A_i + tilde_A_i_ref) * grad_theta log pi_theta(c_i|x))
     combined_advantages = tilde_A_i + tilde_A_i_ref
     
-    # Compute gradient for chain-of-thought terms
-    grad1_terms = []
-    for i in range(n):
-        cot_grad = combined_advantages[i] * chain_of_thought_log_probs[i]
-        grad1_terms.append(cot_grad)
-    
-    grad1 = torch.mean(torch.stack(grad1_terms), dim=0)
+    # Vectorized computation for chain-of-thought gradients
+    # Broadcast advantages to match log_probs shape and compute weighted gradients
+    if chain_of_thought_log_probs.dim() == 2:
+        # [n, seq_len] case
+        expanded_advantages = combined_advantages.unsqueeze(-1)  # [n, 1]
+        weighted_cot_grads = expanded_advantages * chain_of_thought_log_probs  # [n, seq_len]
+        grad1 = torch.mean(weighted_cot_grads, dim=0)  # [seq_len]
+    else:
+        # [n] case (already summed)
+        grad1 = torch.mean(combined_advantages * chain_of_thought_log_probs)
     
     # grad2: grad_theta log(1/n * sum_i pi_theta(a|x,c_i))
     # This is the gradient of the log of the mean probability
-    mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
+    if answer_log_probs.dim() == 1:
+        # Already summed per response
+        mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
+    else:
+        # Sum across sequence dimension first
+        answer_log_probs_summed = torch.sum(answer_log_probs, dim=-1)
+        mean_answer_log_prob = torch.logsumexp(answer_log_probs_summed, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
+    
     grad2 = mean_answer_log_prob
     
-    # grad3: KL divergence gradient
-    kl_div = current_log_probs - ref_log_probs
-    grad3 = torch.mean(kl_div, dim=0)
+    # grad3: KL divergence gradient using PPO-style computation
+    from verl.trainer.ppo import core_algos
+    kl_div = core_algos.kl_penalty(current_log_probs, ref_log_probs, kl_penalty="kl")
+    grad3 = torch.mean(kl_div, dim=0 if kl_div.dim() > 1 else None)
     
     # Combine gradients: grad1 + beta_supp * grad2 - beta_kl * grad3
     total_gradient = grad1 + beta_supp * grad2 - beta_kl * grad3
@@ -406,7 +438,7 @@ def jepo_loss(
     beta_kl: float
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute JEPO loss components
+    Compute JEPO loss components using PPO-style vectorized operations
     
     Returns:
         Dictionary with loss components and metrics
@@ -415,14 +447,32 @@ def jepo_loss(
     
     # Policy gradient loss for chain-of-thought (grad1 component)
     combined_advantages = tilde_A_i + tilde_A_i_ref
-    pg_loss = -torch.mean(combined_advantages.unsqueeze(-1) * chain_of_thought_log_probs)
+    combined_advantages = combined_advantages.detach()  # Detach to avoid backprop through advantages
+    
+    # Handle different tensor shapes for log probs
+    if chain_of_thought_log_probs.dim() == 1:
+        # Already summed per response
+        pg_loss = -torch.mean(combined_advantages * chain_of_thought_log_probs)
+    else:
+        # Per-token log probs, sum across sequence dimension first
+        cot_log_probs_summed = torch.sum(chain_of_thought_log_probs, dim=-1)
+        pg_loss = -torch.mean(combined_advantages * cot_log_probs_summed)
     
     # Suppression loss (grad2 component)
-    mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
-    supp_loss = -beta_supp * torch.mean(mean_answer_log_prob)
+    if answer_log_probs.dim() == 1:
+        # Already summed per response
+        mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
+    else:
+        # Sum across sequence dimension first
+        answer_log_probs_summed = torch.sum(answer_log_probs, dim=-1)
+        mean_answer_log_prob = torch.logsumexp(answer_log_probs_summed, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
     
-    # KL divergence loss (grad3 component)
-    kl_loss = beta_kl * F.kl_div(current_log_probs, ref_log_probs, log_target=True, reduction='batchmean')
+    supp_loss = -beta_supp * mean_answer_log_prob
+    
+    # KL divergence loss (grad3 component) using PPO-style computation
+    from verl.trainer.ppo import core_algos
+    kl_div = core_algos.kl_penalty(current_log_probs, ref_log_probs, kl_penalty="kl")
+    kl_loss = beta_kl * torch.mean(kl_div)
     
     # Total loss
     total_loss = pg_loss + supp_loss + kl_loss
