@@ -103,7 +103,8 @@ def compute_jepo_advantages(
         cot_log_probs_tensor: Chain-of-thought log probabilities [n]
         answer_log_probs_tensor: Ground truth answer log probabilities [n]
     """
-    n = len(responses)
+    # Use response_tokens length since responses is optional
+    n = len(response_tokens)
     
     # Step 1: Split responses and find token boundaries for CoT, delimiter, and answer
     chain_of_thoughts = []
@@ -116,7 +117,7 @@ def compute_jepo_advantages(
     
     # Handle case where responses are None (working with tokens only)
     if responses is None:
-        responses = [None] * len(response_tokens)
+        responses = [None] * n
     
     for i, (response, tokens) in enumerate(zip(responses, response_tokens)):
         # Search for delimiter token sequence directly in the response tokens (no string decoding needed)
