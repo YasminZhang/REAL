@@ -51,7 +51,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jepo'))
 
 from jepo_core_algos import (
     JEPOConfig,
-    JEPOBuffer,
     compute_jepo_advantages,
     jepo_loss
 )
@@ -85,7 +84,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             jepo_steps=getattr(self.config.algorithm, 'jepo_steps', 5)
         )
         
-        self.jepo_buffer = JEPOBuffer(self.jepo_config.buffer_size)
         self.jepo_metrics = defaultdict(list)
         
         # Enable JEPO mode
@@ -107,6 +105,14 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         Returns:
             Dictionary of training metrics
         """
+        # Add JEPO config to the batch meta_info
+        jepo_batch.meta_info["jepo_config"] = {
+            "delimiter": self.jepo_config.delimiter,
+            "format_penalty": self.jepo_config.format_penalty,
+            "beta_supp": self.jepo_config.beta_supp,
+            "beta_kl": self.jepo_config.beta_kl
+        }
+        
         # Call the JEPO-specific actor update with the properly formatted DataProto
         actor_output = self.actor_rollout_wg.jepo_update_actor(jepo_batch)
         

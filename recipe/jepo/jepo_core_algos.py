@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+from copy import deepcopy
 
 
 @dataclass
@@ -28,38 +29,7 @@ class JEPOConfig:
     jepo_steps: int = 5
 
 
-class JEPOBuffer:
-    
-    def __init__(self, max_size: int):
-        self.max_size = max_size
-        self.buffer = []
-    
-    def add(self, prompt: str, answer: str, responses: List[str], extra_data: Dict[str, Any] = None):
-        if len(self.buffer) >= self.max_size:
-            self.buffer.pop(0)
-        
-        entry = {
-            'prompt': prompt,
-            'answer': answer,
-            'responses': responses
-        }
-        
-        if extra_data:
-            entry.update(extra_data)
-            
-        self.buffer.append(entry)
-    
-    def is_full(self) -> bool:
-        return len(self.buffer) >= self.max_size
-    
-    def clear(self):
-        self.buffer.clear()
-    
-    def get_batch(self) -> List[Dict[str, Any]]:
-        return self.buffer.copy()
-
-
-def compute_jepo_advantages_batched_optimized(
+def compute_jepo_advantages(
     response_tokens: List[List[int]],
     prompt_tokens: List[int],
     ground_truth_answer_tokens: List[int],
@@ -67,7 +37,9 @@ def compute_jepo_advantages_batched_optimized(
     format_penalty: float,
     model,
     device: torch.device,
+    pad_token: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # compute jepo adv for a single question
     
     n = len(response_tokens)
     
@@ -77,6 +49,7 @@ def compute_jepo_advantages_batched_optimized(
     delimiter_positions = []
     
     for tokens in response_tokens:
+        tokens = tokens.detach().clone()
         delimiter_start_pos = None
         
         for j in range(len(tokens) - len(delimiter_tokens) + 1):
@@ -99,13 +72,18 @@ def compute_jepo_advantages_batched_optimized(
     batch_input_tokens = []
     cot_start_positions = []
     answer_start_positions = []
-    
     for cot_tokens in cot_tokens_list:
-        prompt_with_cot_tokens = prompt_tokens + cot_tokens + delimiter_tokens
-        full_input_tokens = prompt_with_cot_tokens + ground_truth_answer_tokens
+        # Convert all to tensors if they aren't already
+        prompt_tokens_tensor = torch.tensor(prompt_tokens, device=device) if not isinstance(prompt_tokens, torch.Tensor) else prompt_tokens
+        cot_tokens_tensor = torch.tensor(cot_tokens, device=device) if not isinstance(cot_tokens, torch.Tensor) else cot_tokens
+        delimiter_tokens_tensor = torch.tensor(delimiter_tokens, device=device) if not isinstance(delimiter_tokens, torch.Tensor) else delimiter_tokens
+        ground_truth_tokens_tensor = torch.tensor(ground_truth_answer_tokens, device=device) if not isinstance(ground_truth_answer_tokens, torch.Tensor) else ground_truth_answer_tokens
+
+        prompt_with_cot_tokens = torch.cat([prompt_tokens_tensor, cot_tokens_tensor, delimiter_tokens_tensor])
+        full_input_tokens = torch.cat([prompt_with_cot_tokens, ground_truth_tokens_tensor])
         
         batch_input_tokens.append(full_input_tokens)
-        cot_start_positions.append(len(prompt_tokens))
+        cot_start_positions.append(len(prompt_tokens_tensor))
         answer_start_positions.append(len(prompt_with_cot_tokens))
     
     # Pad sequences to same length for batching
@@ -114,13 +92,15 @@ def compute_jepo_advantages_batched_optimized(
     attention_masks = []
     
     for tokens in batch_input_tokens:
-        padded = tokens + [0] * (max_len - len(tokens))  # Assuming 0 is pad token
-        mask = [1] * len(tokens) + [0] * (max_len - len(tokens))
+        pad_length = max_len - len(tokens)
+        padding = torch.full((pad_length,), pad_token, dtype=tokens.dtype, device=tokens.device)
+        padded = torch.cat([tokens, padding])
+        mask = [1] * len(tokens) + [0] * pad_length
         padded_tokens.append(padded)
         attention_masks.append(mask)
     
     # Single batched forward pass
-    batch_input_ids = torch.tensor(padded_tokens, dtype=torch.long, device=device)
+    batch_input_ids = torch.stack(padded_tokens).to(dtype=torch.long, device=device)
     attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=device)
     
     outputs = model(batch_input_ids, attention_mask=attention_mask)
@@ -135,17 +115,15 @@ def compute_jepo_advantages_batched_optimized(
         cot_tokens = cot_tokens_list[i]
         cot_start = cot_start_positions[i]
         answer_start = answer_start_positions[i]
-        
         # CoT log probabilities - keep gradients
-        cot_log_prob_sum = 0.0
+        cot_log_prob_sum = torch.tensor(0.0, device=device, dtype=torch.float32)
         for j, token_id in enumerate(cot_tokens):
             pos = cot_start + j
             if pos > 0 and pos < log_probs_batch.shape[1]:
                 token_log_prob = log_probs_batch[i, pos - 1, token_id]
                 cot_log_prob_sum += token_log_prob
-        
         # Answer log probabilities - detach for advantage calculation
-        answer_log_prob_sum = 0.0
+        answer_log_prob_sum = torch.tensor(0.0, device=device, dtype=torch.float32)
         for j, token_id in enumerate(ground_truth_answer_tokens):
             pos = answer_start + j
             if pos > 0 and pos < log_probs_batch.shape[1]:
@@ -204,22 +182,6 @@ def compute_jepo_advantages_batched_optimized(
     )
 
 
-def compute_jepo_advantages(
-    response_tokens: List[List[int]],
-    prompt_tokens: List[int],
-    ground_truth_answer_tokens: List[int],
-    delimiter_tokens: List[int],
-    format_penalty: float,
-    model,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    
-    # Use the optimized batched version
-    return compute_jepo_advantages_batched_optimized(
-        response_tokens, prompt_tokens, ground_truth_answer_tokens,
-        delimiter_tokens, format_penalty, model, device
-    )
-
 
 def compute_jepo_advantages_batched(
     questions_response_tokens: List[List[List[int]]],
@@ -232,8 +194,9 @@ def compute_jepo_advantages_batched(
     device: torch.device,
 ) -> tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     
+    # note that questions_response_tokens contain pad tokens
+
     delimiter_tokens = tokenizer.encode(delimiter, add_special_tokens=False)
-    
     tilde_A_i_list = []
     tilde_A_i_ref_list = []
     cot_log_probs_list = []
@@ -241,11 +204,11 @@ def compute_jepo_advantages_batched(
     
     for q_idx in range(len(questions_response_tokens)):
         response_tokens = questions_response_tokens[q_idx]
-        prompt = questions_prompts[q_idx]
+        prompt_tokens = questions_prompts[q_idx]
         ground_truth = ground_truth_answers[q_idx]
         
-        prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
         ground_truth_tokens = tokenizer.encode(ground_truth, add_special_tokens=False)
+        pad_token = tokenizer.pad_token_id # get the pad token
         
         tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_jepo_advantages(
             response_tokens=response_tokens,
@@ -254,7 +217,8 @@ def compute_jepo_advantages_batched(
             delimiter_tokens=delimiter_tokens,
             format_penalty=format_penalty,
             model=model,
-            device=device
+            device=device,
+            pad_token=pad_token
         )
         
         tilde_A_i_list.append(tilde_A_i)

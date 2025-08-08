@@ -127,22 +127,14 @@ class JEPOActor(DataParallelPPOActor):
                 'total_samples': 1
             }
         
-        try:
-            loss_components = self._compute_jepo_by_uid_groups(
-                uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config
-            )
-            return {
-                'loss': loss_components.get("total_loss", torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)),
-                'total_samples': response_tokens_tensor.shape[0]
-            }
+        loss_components = self._compute_jepo_by_uid_groups(
+            uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config
+        )
+        return {
+            'loss': loss_components.get("total_loss", torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)),
+            'total_samples': response_tokens_tensor.shape[0]
+        }
             
-        except Exception as e:
-            logger.error(f"JEPO computation failed: {e}")
-            return {
-                'loss': torch.tensor(0.0, device=self.actor_module.device, requires_grad=True),
-                'total_samples': 1
-            }
-
     def _compute_jepo_loss(self, model_inputs, jepo_config):
         response_tokens_tensor = model_inputs.get("responses")
         uids = model_inputs.get("uid", [])
@@ -167,7 +159,6 @@ class JEPOActor(DataParallelPPOActor):
 
     def _compute_jepo_by_uid_groups(self, uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config):
         unique_uids = np.unique(uids)
-        breakpoint()
         
         questions_response_tokens = []
         questions_prompts = []
@@ -175,14 +166,7 @@ class JEPOActor(DataParallelPPOActor):
         
         # Handle reward_model data - it might be a numpy array or dict
         reward_model_data = model_inputs.get("reward_model", {})
-        if isinstance(reward_model_data, np.ndarray):
-            # If it's a numpy array, assume it contains ground truth data directly
-            ground_truths = reward_model_data.tolist() if hasattr(reward_model_data, 'tolist') else list(reward_model_data)
-        elif isinstance(reward_model_data, dict):
-            ground_truths = reward_model_data.get("ground_truth", [])
-        else:
-            ground_truths = []
-            
+        ground_truths = [x.get('ground_truth') for x in reward_model_data]
         prompts = model_inputs.get("prompts", [])
         
         for uid in unique_uids:
@@ -191,19 +175,17 @@ class JEPOActor(DataParallelPPOActor):
             
             if len(uid_indices) <= 1:
                 continue
-                
-            uid_response_tokens = self._extract_response_tokens(
-                response_tokens_tensor[uid_mask], tokenizer
-            )
+
+            # response_tokens contain pad tokens 
+            uid_response_tokens = response_tokens_tensor[uid_mask]
+            uid_prompt = prompts[uid_indices[0]] if len(prompts) > 0 else ""
+            uid_ground_truth = ground_truths[uid_indices[0]] if len(ground_truths) > 0 else ""
             
-            uid_prompt = prompts[uid_indices[0]] if prompts else ""
-            uid_ground_truth = ground_truths[uid_indices[0]] if ground_truths else ""
-            
-            questions_response_tokens.append(uid_response_tokens)
+            questions_response_tokens.append(uid_response_tokens) # uid responses tokens are having pad tokens
             questions_prompts.append(uid_prompt)
             questions_ground_truths.append(uid_ground_truth)
-        
-        if not questions_response_tokens:
+
+        if len(questions_response_tokens) == 0:
             return {"total_loss": torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)}
             
         return self._compute_batched_jepo_loss(
@@ -224,7 +206,7 @@ class JEPOActor(DataParallelPPOActor):
                                    questions_ground_truths, tokenizer, jepo_config):
         
         delimiter = jepo_config.get("delimiter", "\n\n")
-        format_penalty = jepo_config.get("format_penalty", 1.0)
+        format_penalty = jepo_config.get("format_penalty", 0.1)
         beta_supp = jepo_config.get("beta_supp", 1.0)
         beta_kl = jepo_config.get("beta_kl", 0.1)
         
