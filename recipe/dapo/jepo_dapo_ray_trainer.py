@@ -51,9 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jepo'))
 
 from jepo_core_algos import (
     JEPOConfig,
-    JEPOBuffer,
-    compute_jepo_advantages,
-    jepo_loss
+    JEPOBuffer
 )
 
 
@@ -94,159 +92,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         
         print(f"JEPO-DAPO Trainer initialized with buffer_size={self.jepo_config.buffer_size}, use_jepo={self.use_jepo}")
     
-    def _extract_responses_from_batch(self, data_batch) -> List[str]:
-        """Extract response strings from data batch"""
-        responses = []
-        for i in range(len(data_batch)):
-            response_ids = data_batch[i].batch["responses"]
-            # Get the valid response length using attention mask
-            prompt_length = data_batch[i].batch["prompts"].shape[-1]
-            full_length = data_batch[i].batch["attention_mask"].shape[-1]
-            response_length = full_length - prompt_length
-            valid_response_length = data_batch[i].batch["attention_mask"][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
-            
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            eos_token = self.tokenizer.eos_token
-            if eos_token and response_str.endswith(eos_token):
-                response_str = response_str[:-len(eos_token)]
-            responses.append(response_str)
-        
-        return responses
     
-    def _extract_prompt_and_answer(self, data_batch) -> tuple[str, str]:
-        """Extract prompt and ground truth answer from first item in batch"""
-        first_item = data_batch[0]
-        
-        # Extract prompt
-        prompt_ids = first_item.batch["prompts"]
-        valid_prompt_length = first_item.batch["attention_mask"][:prompt_ids.shape[-1]].sum()
-        valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-        prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-        
-        # Extract ground truth answer
-        answer = first_item.non_tensor_batch["reward_model"]["ground_truth"]
-        
-        return prompt_str, answer
-    
-    def _perform_jepo_training_step(self, jepo_batch: DataProto) -> Dict[str, float]:
-        """
-        Perform one JEPO training step using the worker group
-        
-        Args:
-            jepo_batch: DataProto containing buffered data with all-incorrect responses
-                      - prompts are under batch.batch["prompts"] (tokens)
-                      - responses are under batch.batch["responses"] (tokens)  
-                      - ground_truth_answer is under batch.non_tensor_batch["reward_model"]["ground_truth"] (str)
-            
-        Returns:
-            Dictionary of training metrics
-        """
-        # Call the JEPO-specific actor update with the properly formatted DataProto
-        actor_output = self.actor_rollout_wg.jepo_update_actor(jepo_batch)
-        
-        # Extract metrics
-        metrics = {}
-        if "metrics" in actor_output.meta_info:
-            actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-            for key, value in actor_metrics.items():
-                metrics[f"jepo_{key}"] = value
-        
-        return metrics
-    
-    def _group_by_uid_and_compute_metrics(self, batch, metric_name: str = "token_level_scores"):
-        """
-        Reusable UID grouping logic adapted from standard DAPO
-        Groups data by UID and computes metrics for each group
-        """
-        from collections import defaultdict
-        import numpy as np
-        
-        uids = batch.non_tensor_batch.get("uid", None)
-        if uids is None:
-            return {}, {}
-            
-        # Extract the specified metric (rewards by default)
-        if metric_name in batch.batch:
-            metric_data = batch.batch[metric_name]
-            if metric_data.dim() > 1:  # Token-level rewards
-                metric_vals = metric_data.sum(-1).cpu().numpy()
-            else:
-                metric_vals = metric_data.cpu().numpy()
-        else:
-            print(f"Warning: {metric_name} not found in batch")
-            return {}, {}
-        
-        # Group metric values by UID (adapted from DAPO logic)
-        uid_to_metric_vals = defaultdict(list)
-        for uid, metric_val in zip(uids, metric_vals):
-            uid_to_metric_vals[uid].append(metric_val)
-        
-        # Compute statistics for each UID group
-        uid_to_stats = {}
-        for uid, vals in uid_to_metric_vals.items():
-            uid_to_stats[uid] = {
-                'values': vals,
-                'mean': np.mean(vals),
-                'std': np.std(vals),
-                'all_zero': np.all(np.array(vals) == 0),
-                'all_nonzero': np.all(np.array(vals) != 0),
-                'count': len(vals)
-            }
-        
-        return uid_to_metric_vals, uid_to_stats
-    
-    def _extract_prompt_and_answer_from_uid_data(self, batch_data: Dict, non_tensor_data: Dict) -> tuple[str, str]:
-        """Extract prompt and answer from UID-specific data"""
-        try:
-            # Try to get from non-tensor data first
-            if 'prompts' in non_tensor_data and len(non_tensor_data['prompts']) > 0:
-                prompt = non_tensor_data['prompts'][0]  # Take first prompt (should be same for all responses)
-            else:
-                prompt = "Unknown prompt"
-                
-            if 'answers' in non_tensor_data and len(non_tensor_data['answers']) > 0:
-                answer = non_tensor_data['answers'][0]  # Take first answer (should be same for all responses)
-            else:
-                answer = "Unknown answer"
-                
-            return prompt, answer
-        except Exception as e:
-            print(f"Error extracting prompt/answer from UID data: {e}")
-            return "Unknown prompt", "Unknown answer"
 
-    def _run_jepo_training(self, all_incorrect_batch: DataProto) -> Dict[str, float]:
-        """
-        Run JEPO training on DataProto batch object
-        
-        Args:
-            all_incorrect_batch: DataProto containing all incorrect responses
-        
-        Returns:
-            Aggregated training metrics
-        """
-
-        batch_size = len(all_incorrect_batch.batch["prompts"])
-        print(f"Running JEPO training with {batch_size} samples...")
-
-        all_metrics = defaultdict(list)
-        
-        # Perform JEPO steps on the provided batch
-        for step in range(self.jepo_config.jepo_steps):
-            metrics = self._perform_jepo_training_step(all_incorrect_batch)
-            
-            # Store metrics for this step
-            for key, value in metrics.items():
-                all_metrics[f'{key}_step_{step}'].append(value)
-                all_metrics[key].append(value)
-        
-        # Return averaged metrics
-        final_metrics = {}
-        for key, values in all_metrics.items():
-            if values:
-                final_metrics[key] = np.mean(values)
-        
-        return final_metrics
     
     def fit(self):
         """
@@ -401,10 +248,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
                         
-                        # Add to JEPO buffer when filtering is disabled
-                        if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps:
-                            self._check_and_buffer_incorrect_responses(new_batch)
-                            added_to_jepo_buffer = True
+                        # JEPO buffer integration disabled (incomplete implementation)
+                        added_to_jepo_buffer = True
                     else:  # Filtering logic (same as original DAPO)
                         metric_name = self.config.algorithm.filter_groups.metric
                         if metric_name == "seq_final_reward":
@@ -458,13 +303,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
                             added_to_jepo_buffer = True
                             
-                            # Perform JEPO training if buffer is full
-                            if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
-                                jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size])
-                                all_incorrect_batch = None # clear the jepo batch
-                                num_prompt_in_jepo_buffer = 0
-                                if jepo_metrics:
-                                    print(f"JEPO training completed with metrics: {jepo_metrics}")
+                            # JEPO training logic disabled (incomplete implementation)
 
                         new_batch = new_batch[kept_traj_idxs]
                         #all_incorrect_batch = new_batch[all_incorrect_traj_idxs]
@@ -548,28 +387,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    # === JEPO Buffer Management ===
-                    # Check for all-incorrect UIDs and add to JEPO buffer for the final batch (if not already added)
-                    if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
-                        self._check_and_buffer_incorrect_responses(batch)
-
-                    # === JEPO Training Step ===
-                    
-                    # Perform JEPO training when buffer conditions are met
-                    buffer_size_met = len(self.jepo_buffer.buffer) >= self.jepo_config.buffer_size
-                    frequency_met = self.global_steps % self.jepo_update_frequency == 0
-                    
-                    print(f"JEPO Training Check - Step {self.global_steps}: Buffer={len(self.jepo_buffer.buffer)}/{self.jepo_config.buffer_size}, Buffer_size_met={buffer_size_met}, Frequency_met={frequency_met}")
-                    
-                    if (self.use_jepo and 
-                        len(self.jepo_buffer.buffer) > 0 and 
-                        (buffer_size_met or frequency_met)):
-                        
-                        print(f"🚀 STARTING JEPO TRAINING at step {self.global_steps} with {len(self.jepo_buffer.buffer)} buffered samples")
-                        with marked_timer("jepo_training", timing_raw, "purple"):
-                            jepo_metrics = self._run_jepo_training()
-                            metrics.update(jepo_metrics)
-                        print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
+                    # === JEPO Training ===
+                    # JEPO integration disabled (incomplete implementation)
 
                     # validation
                     if (

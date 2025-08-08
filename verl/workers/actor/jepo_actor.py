@@ -40,7 +40,6 @@ class JEPOActor(DataParallelPPOActor):
     def update_policy(self, data: DataProto):
         self.actor_module.train()
         
-        temperature = data.meta_info["temperature"]
         jepo_config = data.meta_info.get("jepo_config", {})
         
         select_keys = [
@@ -50,21 +49,20 @@ class JEPOActor(DataParallelPPOActor):
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
             
-        has_multi_modal = "multi_modal_inputs" in data.non_tensor_batch.keys()
-        non_tensor_keys = ["multi_modal_inputs"] if has_multi_modal else []
+        non_tensor_keys = ["multi_modal_inputs"] if "multi_modal_inputs" in data.non_tensor_batch.keys() else []
         
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_keys)
         mini_batches = data.split(self.config.ppo_mini_batch_size)
         
         metrics = {}
         for _ in range(self.config.ppo_epochs):
-            for batch_idx, mini_batch in enumerate(mini_batches):
-                metrics.update(self._process_mini_batch(mini_batch, temperature, jepo_config))
+            for mini_batch in mini_batches:
+                metrics.update(self._process_mini_batch(mini_batch, jepo_config))
                 
         self.actor_optimizer.zero_grad()
         return metrics
 
-    def _process_mini_batch(self, mini_batch, temperature, jepo_config):
+    def _process_mini_batch(self, mini_batch, jepo_config):
         if self.config.use_dynamic_bsz:
             max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
             from verl.utils.seqlen_balancing import prepare_dynamic_batch
@@ -79,14 +77,14 @@ class JEPOActor(DataParallelPPOActor):
         metrics = {}
         
         for micro_batch in micro_batches:
-            batch_metrics = self._process_micro_batch(micro_batch, temperature, jepo_config)
+            batch_metrics = self._process_micro_batch(micro_batch, jepo_config)
             append_to_dict(metrics, batch_metrics)
             
         grad_norm = self._optimizer_step()
         metrics.update({"jepo_actor/grad_norm": grad_norm.detach().item()})
         return metrics
 
-    def _process_micro_batch(self, micro_batch, temperature, jepo_config):
+    def _process_micro_batch(self, micro_batch, jepo_config):
         model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
         response_mask = model_inputs["response_mask"]
         
