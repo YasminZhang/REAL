@@ -30,6 +30,11 @@ __all__ = ["JEPOActor"]
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+def compute_response_mask(data: DataProto):
+    responses = data.batch["responses"]
+    response_length = responses.size(1)
+    attention_mask = data.batch["attention_mask"]
+    return attention_mask[:, -response_length:]
 
 class JEPOActor(DataParallelPPOActor):
     
@@ -41,17 +46,8 @@ class JEPOActor(DataParallelPPOActor):
         self.actor_module.train()
         
         jepo_config = data.meta_info.get("jepo_config", {})
-        
-        select_keys = [
-            "responses", "response_mask", "input_ids", "attention_mask", 
-            "position_ids", "old_log_probs", "advantages"
-        ]
-        if self.config.use_kl_loss:
-            select_keys.append("ref_log_prob")
-            
-        non_tensor_keys = ["multi_modal_inputs"] if "multi_modal_inputs" in data.non_tensor_batch.keys() else []
-        
-        data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_keys)
+
+        data.batch["response_mask"] = compute_response_mask(data)
         mini_batches = data.split(self.config.ppo_mini_batch_size)
         
         metrics = {}
