@@ -683,6 +683,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.jepo_actor = JEPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.jepo_actor_optimizer
             )
+            # Pass the tokenizer to JEPO actor
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                self.jepo_actor._cached_tokenizer = self.tokenizer
+            elif hasattr(self, 'processor') and self.processor is not None:
+                self.jepo_actor._cached_tokenizer = self.processor
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(

@@ -40,6 +40,7 @@ class JEPOActor(DataParallelPPOActor):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._cached_tokenizer = None
         logger.info("Initialized JEPO Actor")
 
     def update_policy(self, data: DataProto):
@@ -48,17 +49,21 @@ class JEPOActor(DataParallelPPOActor):
         jepo_config = data.meta_info.get("jepo_config", {})
 
         data.batch["response_mask"] = compute_response_mask(data)
+        
+        # Compute JEPO losses for the full batch BEFORE splitting to preserve UID grouping
+        full_batch_jepo_loss = self._compute_full_batch_jepo_loss(data, jepo_config)
+        
         mini_batches = data.split(self.config.ppo_mini_batch_size)
         
         metrics = {}
         for _ in range(self.config.ppo_epochs):
             for mini_batch in mini_batches:
-                metrics.update(self._process_mini_batch(mini_batch, jepo_config))
+                metrics.update(self._process_mini_batch(mini_batch, jepo_config, full_batch_jepo_loss))
                 
         self.actor_optimizer.zero_grad()
         return metrics
 
-    def _process_mini_batch(self, mini_batch, jepo_config):
+    def _process_mini_batch(self, mini_batch, jepo_config, full_batch_jepo_loss=None):
         if self.config.use_dynamic_bsz:
             max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
             from verl.utils.seqlen_balancing import prepare_dynamic_batch
@@ -73,14 +78,14 @@ class JEPOActor(DataParallelPPOActor):
         metrics = {}
         
         for micro_batch in micro_batches:
-            batch_metrics = self._process_micro_batch(micro_batch, jepo_config)
+            batch_metrics = self._process_micro_batch(micro_batch, jepo_config, full_batch_jepo_loss)
             append_to_dict(metrics, batch_metrics)
             
         grad_norm = self._optimizer_step()
         metrics.update({"jepo_actor/grad_norm": grad_norm.detach().item()})
         return metrics
 
-    def _process_micro_batch(self, micro_batch, jepo_config):
+    def _process_micro_batch(self, micro_batch, jepo_config, full_batch_jepo_loss=None):
         model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
         response_mask = model_inputs["response_mask"]
         
@@ -89,12 +94,54 @@ class JEPOActor(DataParallelPPOActor):
         else:
             loss_scale_factor = 1 / self.gradient_accumulation
 
-        policy_loss = self._compute_jepo_loss(model_inputs, jepo_config)
+        # Use pre-computed full batch JEPO loss if available, otherwise compute for this micro batch
+        if full_batch_jepo_loss is not None:
+            # Scale the full batch loss by the proportion of this micro batch
+            batch_size_ratio = response_mask.shape[0] / full_batch_jepo_loss.get('total_samples', 1)
+            policy_loss = full_batch_jepo_loss['loss'] * batch_size_ratio
+        else:
+            policy_loss = self._compute_jepo_loss(model_inputs, jepo_config)
         
         loss = policy_loss * loss_scale_factor
         loss.backward()
         
         return {"jepo_actor/policy_loss": policy_loss.detach().item() * loss_scale_factor}
+
+    def _compute_full_batch_jepo_loss(self, data: DataProto, jepo_config):
+        """Compute JEPO loss for the full batch to preserve UID grouping"""
+        model_inputs = {**data.batch, **data.non_tensor_batch}
+        response_tokens_tensor = model_inputs.get("responses")
+        uids = model_inputs.get("uid", [])
+        
+        if response_tokens_tensor is None or len(uids) == 0:
+            return {
+                'loss': torch.tensor(0.0, device=self.actor_module.device, requires_grad=True),
+                'total_samples': 1
+            }
+        
+        tokenizer = self._get_tokenizer()
+        if tokenizer is None:
+            logger.error("Tokenizer not found")
+            return {
+                'loss': torch.tensor(0.0, device=self.actor_module.device, requires_grad=True),
+                'total_samples': 1
+            }
+        
+        try:
+            loss_components = self._compute_jepo_by_uid_groups(
+                uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config
+            )
+            return {
+                'loss': loss_components.get("total_loss", torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)),
+                'total_samples': response_tokens_tensor.shape[0]
+            }
+            
+        except Exception as e:
+            logger.error(f"JEPO computation failed: {e}")
+            return {
+                'loss': torch.tensor(0.0, device=self.actor_module.device, requires_grad=True),
+                'total_samples': 1
+            }
 
     def _compute_jepo_loss(self, model_inputs, jepo_config):
         response_tokens_tensor = model_inputs.get("responses")
@@ -120,12 +167,22 @@ class JEPOActor(DataParallelPPOActor):
 
     def _compute_jepo_by_uid_groups(self, uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config):
         unique_uids = np.unique(uids)
+        breakpoint()
         
         questions_response_tokens = []
         questions_prompts = []
         questions_ground_truths = []
         
-        ground_truths = model_inputs.get("reward_model", {}).get("ground_truth", [])
+        # Handle reward_model data - it might be a numpy array or dict
+        reward_model_data = model_inputs.get("reward_model", {})
+        if isinstance(reward_model_data, np.ndarray):
+            # If it's a numpy array, assume it contains ground truth data directly
+            ground_truths = reward_model_data.tolist() if hasattr(reward_model_data, 'tolist') else list(reward_model_data)
+        elif isinstance(reward_model_data, dict):
+            ground_truths = reward_model_data.get("ground_truth", [])
+        else:
+            ground_truths = []
+            
         prompts = model_inputs.get("prompts", [])
         
         for uid in unique_uids:
@@ -192,4 +249,56 @@ class JEPOActor(DataParallelPPOActor):
         )
 
     def _get_tokenizer(self):
-        return getattr(self.actor_module, 'tokenizer', None) or getattr(self.config, 'tokenizer', None)
+        if self._cached_tokenizer is not None:
+            return self._cached_tokenizer
+        
+        # Try to get tokenizer from various locations
+        tokenizer = None
+        
+        # Method 1: Direct attribute access
+        tokenizer = getattr(self.actor_module, 'tokenizer', None)
+        if tokenizer is not None:
+            logger.info("Found tokenizer via direct attribute access")
+            self._cached_tokenizer = tokenizer
+            return tokenizer
+        
+        # Method 2: From config
+        tokenizer = getattr(self.config, 'tokenizer', None)
+        if tokenizer is not None:
+            logger.info("Found tokenizer in config")
+            self._cached_tokenizer = tokenizer
+            return tokenizer
+        
+        # Method 3: Try to access the underlying model if FSDP wrapped
+        if hasattr(self.actor_module, 'module'):
+            inner_module = self.actor_module.module
+            tokenizer = getattr(inner_module, 'tokenizer', None)
+            if tokenizer is not None:
+                logger.info("Found tokenizer in FSDP wrapped module")
+                self._cached_tokenizer = tokenizer
+                return tokenizer
+        
+        # Method 4: Try to get from the model's transformer/model attribute
+        for attr_name in ['transformer', 'model', 'bert', 'roberta', 'language_model', 'lm_head', 'base_model']:
+            if hasattr(self.actor_module, attr_name):
+                sub_module = getattr(self.actor_module, attr_name)
+                tokenizer = getattr(sub_module, 'tokenizer', None)
+                if tokenizer is not None:
+                    logger.info(f"Found tokenizer in {attr_name}")
+                    self._cached_tokenizer = tokenizer
+                    return tokenizer
+        
+        # Method 5: Check if there's a config that has tokenizer info
+        if hasattr(self.actor_module, 'config'):
+            module_config = self.actor_module.config
+            if hasattr(module_config, 'tokenizer'):
+                tokenizer = module_config.tokenizer
+                if tokenizer is not None:
+                    logger.info("Found tokenizer in module config")
+                    self._cached_tokenizer = tokenizer
+                    return tokenizer
+        
+        logger.error("Could not find tokenizer in actor_module or config")
+        logger.error(f"Actor module type: {type(self.actor_module)}")
+        logger.error(f"Config type: {type(self.config)}")
+        return None
