@@ -51,7 +51,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jepo'))
 
 from jepo_core_algos import (
     JEPOConfig,
-    JEPOBuffer
+    JEPOBuffer,
+    compute_jepo_advantages,
+    jepo_loss
 )
 
 
@@ -92,8 +94,64 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         
         print(f"JEPO-DAPO Trainer initialized with buffer_size={self.jepo_config.buffer_size}, use_jepo={self.use_jepo}")
     
-    
+    def _perform_jepo_training_step(self, jepo_batch: DataProto) -> Dict[str, float]:
+        """
+        Perform one JEPO training step using the worker group
+        
+        Args:
+            jepo_batch: DataProto containing buffered data with all-incorrect responses
+                      - prompts are under batch.batch["prompts"] (tokens)
+                      - responses are under batch.batch["responses"] (tokens)  
+                      - ground_truth_answer is under batch.non_tensor_batch["reward_model"]["ground_truth"] (str)
+            
+        Returns:
+            Dictionary of training metrics
+        """
+        # Call the JEPO-specific actor update with the properly formatted DataProto
+        actor_output = self.actor_rollout_wg.jepo_update_actor(jepo_batch)
+        
+        # Extract metrics
+        metrics = {}
+        if "metrics" in actor_output.meta_info:
+            actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            for key, value in actor_metrics.items():
+                metrics[f"jepo_{key}"] = value
+        
+        return metrics
 
+
+    def _run_jepo_training(self, all_incorrect_batch: DataProto) -> Dict[str, float]:
+        """
+        Run JEPO training on DataProto batch object
+        
+        Args:
+            all_incorrect_batch: DataProto containing all incorrect responses
+        
+        Returns:
+            Aggregated training metrics
+        """
+
+        batch_size = len(all_incorrect_batch.batch["prompts"])
+        print(f"Running JEPO training with {batch_size} samples...")
+
+        all_metrics = defaultdict(list)
+        
+        # Perform JEPO steps on the provided batch
+        for step in range(self.jepo_config.jepo_steps):
+            metrics = self._perform_jepo_training_step(all_incorrect_batch)
+            
+            # Store metrics for this step
+            for key, value in metrics.items():
+                all_metrics[f'{key}_step_{step}'].append(value)
+                all_metrics[key].append(value)
+        
+        # Return averaged metrics
+        final_metrics = {}
+        for key, values in all_metrics.items():
+            if values:
+                final_metrics[key] = np.mean(values)
+        
+        return final_metrics
     
     def fit(self):
         """
@@ -248,8 +306,10 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
                         
-                        # JEPO buffer integration disabled (incomplete implementation)
-                        added_to_jepo_buffer = True
+                        # Add to JEPO buffer when filtering is disabled
+                        if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps:
+                            self._check_and_buffer_incorrect_responses(new_batch)
+                            added_to_jepo_buffer = True
                     else:  # Filtering logic (same as original DAPO)
                         metric_name = self.config.algorithm.filter_groups.metric
                         if metric_name == "seq_final_reward":
@@ -267,13 +327,13 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
                         ):
                             prompt_uid2metric_vals[uid].append(metric_val)
-
+                        
                         prompt_uid2metric_std = {}
                         prompt_uid2metric_mean = {}
                         for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
                             prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
                             prompt_uid2metric_mean[prompt_uid] = np.mean(metric_vals)
-
+                        
                         kept_prompt_uids = [
                             uid
                             for uid, std in prompt_uid2metric_std.items()
@@ -284,6 +344,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             for uid, mean in prompt_uid2metric_mean.items()
                             if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
                         ]
+                        
                         num_prompt_in_batch += len(kept_prompt_uids)
                         num_prompt_in_jepo_buffer += len(all_incorrect_uids)
 
@@ -297,13 +358,22 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
 
                         # Add to JEPO buffer for each generation batch before continuing
                         if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
-                            print(f"Solve None: {len(all_incorrect_traj_idxs)}")
-                            print(f"Solve Partial: {len(kept_traj_idxs)}")
+                            print(f"Solve None: {len(all_incorrect_uids)}")
+                            print(f"Solve Partial: {len(num_prompt_in_batch)}")
+                            print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
                             all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
                             all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
                             added_to_jepo_buffer = True
                             
-                            # JEPO training logic disabled (incomplete implementation)
+                            # Perform JEPO training if buffer is full
+                            if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
+                                jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size])
+                                metrics.update(jepo_metrics)
+                                print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
+                                all_incorrect_batch = None # clear the jepo batch
+                                num_prompt_in_jepo_buffer = 0
+                                if jepo_metrics:
+                                    print(f"JEPO training completed with metrics: {jepo_metrics}")
 
                         new_batch = new_batch[kept_traj_idxs]
                         #all_incorrect_batch = new_batch[all_incorrect_traj_idxs]
@@ -387,8 +457,20 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    # === JEPO Training ===
-                    # JEPO integration disabled (incomplete implementation)
+                    
+                    # Perform JEPO training when frequency is hit
+                    frequency_met = self.global_steps % self.jepo_update_frequency == 0
+                    if (self.use_jepo and 
+                        len(all_incorrect_batch) > 0 and 
+                        frequency_met):
+
+                        jepo_metrics = self._run_jepo_training(all_incorrect_batch)
+                        metrics.update(jepo_metrics)
+                        print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
+                        all_incorrect_batch = None # clear the jepo batch
+                        num_prompt_in_jepo_buffer = 0
+                        if jepo_metrics:
+                            print(f"JEPO training completed with metrics: {jepo_metrics}")
 
                     # validation
                     if (
