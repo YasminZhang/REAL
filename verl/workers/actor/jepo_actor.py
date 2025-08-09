@@ -170,9 +170,11 @@ class JEPOActor(DataParallelPPOActor):
         supp_loss = (log_mean_answer_probs * beta_supp).mean()
         
         loss = jepo_loss + supp_loss
-        
+        print("Finish calculate JEPO loss:", loss.item())
         loss.backward()
+        print("Finish backward JEPO loss")
         grad_norm = self._optimizer_step()
+        print("Finish doing gradient descent")
         
         # Collect metrics
         metrics = {
