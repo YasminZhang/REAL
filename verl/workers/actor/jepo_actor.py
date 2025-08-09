@@ -47,7 +47,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_advantages_from_logprobs
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_advantages_from_logprobs, compute_jepo_from_logprobs_fast_with_grad_mean
 
 __all__ = ["JEPOActor"]
 
@@ -134,7 +134,7 @@ class JEPOActor(DataParallelPPOActor):
             # for every single question
             with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
                 output = self.actor_module(
-                    input_ids=data_dict['batch_input_ids'],
+                    input_ids=data_dict['batch_input_ids'].detach(),
                     attention_mask=data_dict['attention_mask'],
                     position_ids=data_dict['position_ids'],
                     use_cache=False,
@@ -144,26 +144,22 @@ class JEPOActor(DataParallelPPOActor):
                 log_probs_batch = torch.log_softmax(logits, dim=-1)
             # Compute JEPO advantages from log probabilities
             print("Finish computing log probabilities")
-            advantages, cot_log_probs, _, log_mean_answer_prob = compute_jepo_advantages_from_logprobs(
-                log_probs_batch=log_probs_batch,
-                data_dict=data_dict,
-                format_penalty=format_penalty,
-                has_delimiter=data_dict['has_delimiter'],
-                device=self.actor_module.device
-            )
+            jepo_advs, cot_log_probs, _, log_mean = compute_jepo_from_logprobs_fast_with_grad_mean(
+                log_probs_batch, data_dict, format_penalty, data_dict['has_delimiter'])
+
             print("Finish computing JEPO advantages")
-            all_advantages.append(advantages)
+            all_advantages.append(jepo_advs)
             all_cot_log_probs.append(cot_log_probs) 
-            all_log_mean_answer_probs.append(log_mean_answer_prob)
+            all_log_mean_answer_probs.append(log_mean)
         
         # Concatenate results
         jepo_advs = torch.cat(all_advantages, dim=0)
         cot_log_probs = torch.cat(all_cot_log_probs, dim=0)
-        log_mean_answer_probs = torch.cat(all_log_mean_answer_probs, dim=0)
+        log_mean_answer_probs = torch.stack(all_log_mean_answer_probs)
 
-        data.batch["jepo_advs"] = jepo_advs
-        data.batch["cot_log_probs"] = cot_log_probs
-        data.batch["log_mean_answer_probs"] = log_mean_answer_probs
+        # data.batch["jepo_advs"] = jepo_advs
+        # data.batch["cot_log_probs"] = cot_log_probs
+        # data.batch["log_mean_answer_probs"] = log_mean_answer_probs
 
         # Compute individual loss components
         jepo_loss = (jepo_advs * cot_log_probs).mean()

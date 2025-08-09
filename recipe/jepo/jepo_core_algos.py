@@ -214,6 +214,82 @@ def compute_jepo_advantages_from_logprobs(
     return (jepo_advantage.to(device), cot_log_probs_tensor, answer_log_probs_tensor, log_mean_answer_prob)
 
 
+import math
+import torch
+import torch.nn.functional as F
+def compute_jepo_from_logprobs_fast_with_grad_mean(
+    log_probs_batch, data_dict, format_penalty, has_delimiter
+):
+    device, dtype = log_probs_batch.device, log_probs_batch.dtype
+    B, T, V = log_probs_batch.shape
+
+    cot_start = data_dict['cot_start_positions']
+    ans_start = data_dict['answer_start_positions']
+    cot_tok_list = data_dict['cot_tokens_list']
+    ans_tok_list = data_dict['ground_truth_answer_tokens']
+
+    # --- Gather CoT token log-probs (keeps grad) ---
+    b_c, t_c, v_c = [], [], []
+    for i, (s, toks) in enumerate(zip(cot_start, cot_tok_list)):
+        if len(toks)==0: continue
+        t = torch.arange(s, s+len(toks), device=device) - 1
+        m = (t >= 0) & (t < T)
+        if m.any():
+            b_c.append(torch.full((m.sum(),), i, device=device, dtype=torch.long))
+            t_c.append(t[m].long())
+            v_c.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
+    if b_c:
+        b_c = torch.cat(b_c); t_c = torch.cat(t_c); v_c = torch.cat(v_c)
+        cot_lp_flat = log_probs_batch[b_c, t_c, v_c]                 # grad flows
+        cot_log_probs = torch.zeros(B, device=device, dtype=dtype).index_add_(0, b_c, cot_lp_flat)
+    else:
+        cot_log_probs = torch.zeros(B, device=device, dtype=dtype)
+
+    # --- Gather ANSWER token log-probs (keep grad for mean term) ---
+    b_a, t_a, v_a = [], [], []
+    for i, (s, toks) in enumerate(zip(ans_start, ans_tok_list)):
+        if len(toks)==0: continue
+        t = torch.arange(s, s+len(toks), device=device) - 1
+        m = (t >= 0) & (t < T)
+        if m.any():
+            b_a.append(torch.full((m.sum(),), i, device=device, dtype=torch.long))
+            t_a.append(t[m].long())
+            v_a.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
+    if b_a:
+        b_a = torch.cat(b_a); t_a = torch.cat(t_a); v_a = torch.cat(v_a)
+        ans_lp_flat = log_probs_batch[b_a, t_a, v_a]                 # <-- NO detach
+        answer_log_probs = torch.zeros(B, device=device, dtype=dtype).index_add_(0, b_a, ans_lp_flat)
+    else:
+        answer_log_probs = torch.zeros(B, device=device, dtype=dtype)
+
+    # ---- log-mean over answers (WITH grad) ----
+    lse_all = torch.logsumexp(answer_log_probs, dim=0)               # scalar, has grad
+    log_mean_prob = lse_all - math.log(max(B, 1))                    # scalar, has grad
+
+    # ---- JEPO advantage parts OUTSIDE the graph ----
+    with torch.no_grad():
+        # exclude-self in O(B) using stable trick, done on detached copy
+        ans_det = answer_log_probs.detach()
+        lse_all_d = torch.logsumexp(ans_det, dim=0)
+        d = ans_det - lse_all_d
+        if B > 1:
+            lse_others = lse_all_d + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+            v_i = lse_others - math.log(B - 1)
+        else:
+            v_i = ans_det.new_full((B,), float("-inf"))
+        A = (log_mean_prob.detach() - v_i)                           # no grad path
+        A = (A / (A.std(unbiased=False) + 1e-8)).clamp(-1.0, 1.0)
+
+        has_delim = torch.as_tensor(has_delimiter, device=device, dtype=torch.bool)
+        fmt = torch.where(has_delim, torch.zeros(B, device=device, dtype=dtype),
+                          torch.tensor(-format_penalty, device=device, dtype=dtype))
+        fmt = (fmt - fmt.mean()) / (fmt.std(unbiased=False) + 1e-8)
+
+        jepo_advantage = A #+ fmt                                     # detached
+
+    return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob
+
+
 def compute_jepo_advantages(
     response_tokens,
     prompt_tokens,
