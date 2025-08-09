@@ -97,7 +97,7 @@ class JEPOActor(DataParallelPPOActor):
         jepo_config = data.meta_info.get("jepo_config", {})
         model_inputs = {**data.batch, **data.non_tensor_batch}
         ground_truths = model_inputs.get("reward_model", {})
-        ground_truths_tokens = np.array([self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths])
+        ground_truths_tokens = np.array([self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths], dtype=object)
         delimiter = jepo_config.get("delimiter", "\n\n")
         print(f"Using delimiter: {delimiter}")
         delimiter_tokens = self._cached_tokenizer.encode(delimiter)

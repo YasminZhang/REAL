@@ -15,8 +15,8 @@ clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=1024
-max_response_length=1024
-enable_overlong_buffer=True
+max_response_length=3072
+enable_overlong_buffer=False
 overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
@@ -38,7 +38,7 @@ jepo_delimiter="Answer:"
 jepo_format_penalty=0.0
 jepo_beta_supp=0.1
 jepo_beta_kl=0.1
-jepo_buffer_size=64
+jepo_buffer_size=128
 jepo_steps=1
 jepo_update_frequency=10000
 
