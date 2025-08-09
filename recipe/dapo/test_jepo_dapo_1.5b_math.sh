@@ -15,7 +15,7 @@ clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=1024
-max_response_length=3072
+max_response_length=512
 enable_overlong_buffer=False
 overlong_buffer_len=1024
 overlong_penalty_factor=1.0

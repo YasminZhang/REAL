@@ -77,12 +77,14 @@ def compute_single_jepo_advantages(
     batch_input_tokens = []
     cot_start_positions = []
     answer_start_positions = []
+    ground_truth_answer_tokens = np.array(ground_truth_answer_tokens.tolist(), dtype=np.int64)
+
     for i,cot_tokens in enumerate(cot_tokens_list):
         # Convert all to tensors if they aren't already
         prompt_tokens_tensor = torch.tensor(prompt_tokens[i], device=device) if not isinstance(prompt_tokens[i], torch.Tensor) else prompt_tokens[i]
         cot_tokens_tensor = torch.tensor(cot_tokens, device=device) if not isinstance(cot_tokens, torch.Tensor) else cot_tokens
         delimiter_tokens_tensor = torch.tensor(delimiter_tokens, device=device) if not isinstance(delimiter_tokens, torch.Tensor) else delimiter_tokens
-        ground_truth_tokens_tensor = torch.tensor(ground_truth_answer_tokens[i], device=device) if not isinstance(ground_truth_answer_tokens[i], torch.Tensor) else ground_truth_answer_tokens[i]
+        ground_truth_tokens_tensor = torch.tensor(ground_truth_answer_tokens[i], device=device, dtype=torch.long) if not isinstance(ground_truth_answer_tokens[i], torch.Tensor) else ground_truth_tokens_tensor
 
         prompt_with_cot_tokens = torch.cat([prompt_tokens_tensor, cot_tokens_tensor, delimiter_tokens_tensor])
         full_input_tokens = torch.cat([prompt_with_cot_tokens, ground_truth_tokens_tensor])
@@ -318,7 +320,6 @@ def compute_jepo_advantages(
         
         if len(response_tokens_uid) == 0:
             continue
-        
         data_dict = compute_single_jepo_advantages(
             response_tokens=response_tokens_uid,
             prompt_tokens=prompt_tokens_uid,
