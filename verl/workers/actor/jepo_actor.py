@@ -39,12 +39,14 @@ from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
+from verl.workers.actor.dp_actor import DataParallelPPOActor
 
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
-from jepo_core_algos import compute_jepo_advantage
+
+from jepo_core_algos import compute_jepo_advantages
 
 __all__ = ["JEPOActor"]
 
@@ -63,7 +65,7 @@ class JEPOActor(DataParallelPPOActor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         logger.info("Initialized JEPO Actor")
-        self.cached_tokenizer = None
+        self._cached_tokenizer = None
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -93,24 +95,26 @@ class JEPOActor(DataParallelPPOActor):
         
         jepo_config = data.meta_info.get("jepo_config", {})
         model_inputs = {**data.batch, **data.non_tensor_batch}
-        ground_truths = model_inputs.get("reward_model", {}).get("ground_truth", [])
-        ground_truths_tokens = [self.cached_tokenizer.encode(gt) for gt in ground_truths]
+        ground_truths = model_inputs.get("reward_model", {})
+        ground_truths_tokens = np.array([self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths])
         delimiter = jepo_config.get("delimiter", "\n\n")
-        delimiter_tokens = self.cached_tokenizer.encode(delimiter)
+        print(f"Using delimiter: {delimiter}")
+        delimiter_tokens = self._cached_tokenizer.encode(delimiter)
         format_penalty = jepo_config.get("format_penalty", 1.0)
         beta_supp = jepo_config.get("beta_supp", 1.0)
         beta_kl = jepo_config.get("beta_kl", 0.1)
-        pad_token = self.cached_tokenizer.pad_token_id
+        pad_token = self._cached_tokenizer.pad_token_id
 
-        jepo_advs, cot_log_probs, _, log_mean_answer_probs = compute_jepo_advantage(
+        jepo_advs, cot_log_probs, _, log_mean_answer_probs = compute_jepo_advantages(
             response_tokens=data.batch["responses"],
             prompt_tokens=data.batch["prompts"],
             ground_truth_answer_tokens=ground_truths_tokens,
             delimiter_tokens=delimiter_tokens,
             format_penalty=format_penalty,
             model=self.actor_module,
-            device=self.device,
-            pad_token=pad_token
+            device=self.actor_module.device,
+            pad_token=pad_token,
+            index=data.non_tensor_batch["uid"]
         )
 
         data.batch["jepo_advs"] = jepo_advs
