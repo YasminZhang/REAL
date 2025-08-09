@@ -181,3 +181,56 @@ def compute_single_jepo_advantages(
     log_mean_answer_prob = log_mean_prob.repeat(n)
 
     return (jepo_advantage.to(device), cot_log_probs_tensor, answer_log_probs_tensor, log_mean_answer_prob)
+
+
+def compute_jepo_advantages(
+    response_tokens,
+    prompt_tokens,
+    ground_truth_answer_tokens,
+    delimiter_tokens,
+    format_penalty,
+    model,
+    device,
+    pad_token,
+    index
+):
+
+    # response_tokens has shape [bsz, max_response_length]
+    # prompt_tokens has shape [bsz, max_prompt_length]
+    # ground_truth_answer_tokens is a list with shape bsz, np.ndarray
+    # delimiter_tokens is a lift of tokens
+    # index is a list of uid
+
+    uuid = np.unique(index)
+
+    for uid in uuid:
+        uid_mask = (index == uid)
+        response_tokens_uid = response_tokens[uid_mask]
+        prompt_tokens_uid = prompt_tokens[uid_mask]
+        ground_truth_answer_tokens_uid = ground_truth_answer_tokens[uid_mask]
+        
+        if len(response_tokens_uid) == 0:
+            continue
+        
+        advantages, cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_single_jepo_advantages(
+            response_tokens=response_tokens_uid,
+            prompt_tokens=prompt_tokens_uid,
+            ground_truth_answer_tokens=ground_truth_answer_tokens_uid,
+            delimiter_tokens=delimiter_tokens,
+            format_penalty=format_penalty,
+            model=model,
+            device=device,
+            pad_token=pad_token
+        )
+        
+        if 'advantages' not in locals():
+            advantages_all = advantages.unsqueeze(0)
+            cot_log_probs_all = cot_log_probs.unsqueeze(0)
+            answer_log_probs_all = answer_log_probs.unsqueeze(0)
+            log_mean_answer_prob_all = log_mean_answer_prob.unsqueeze(0)
+        else:
+            advantages_all = torch.cat([advantages_all, advantages.unsqueeze(0)], dim=0)
+            cot_log_probs_all = torch.cat([cot_log_probs_all, cot_log_probs.unsqueeze(0)], dim=0)
+            answer_log_probs_all = torch.cat([answer_log_probs_all, answer_log_probs.unsqueeze(0)], dim=0)
+            log_mean_answer_prob_all = torch.cat([log_mean_answer_prob_all, log_mean_answer_prob.unsqueeze(0)], dim=0)
+        return advantages_all, cot_log_probs_all, answer_log_probs_all, log_mean_answer_prob_all
