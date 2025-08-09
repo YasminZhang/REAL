@@ -20,10 +20,30 @@ import numpy as np
 
 sys.path.append('/home/aiscuser/jepo/recipe/jepo')
 
+import logging
+import os
+
+import torch
+from torch import nn
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
+from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import prepare_dynamic_batch
-from verl.workers.actor.dp_actor import DataParallelPPOActor
+from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
+from verl.utils.torch_functional import logprobs_from_logits
+from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.workers.actor import BasePPOActor
+from verl.workers.config import ActorConfig
+
+if is_cuda_available:
+    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+elif is_npu_available:
+    from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 from jepo_core_algos import compute_jepo_advantage
 
 __all__ = ["JEPOActor"]
@@ -45,9 +65,28 @@ class JEPOActor(DataParallelPPOActor):
         logger.info("Initialized JEPO Actor")
         self.cached_tokenizer = None
 
+    def _optimizer_step(self):
+        assert self.config.grad_clip is not None
+
+        if isinstance(self.actor_module, FSDP):
+            grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
+        elif isinstance(self.actor_module, FSDPModule):
+            grad_norm = fsdp2_clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
+
+        # if grad_norm is not finite, skip the update
+        if not torch.isfinite(grad_norm):
+            print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
+            self.actor_optimizer.zero_grad()
+        else:
+            self.actor_optimizer.step()
+        return grad_norm
+
     def update_policy(self, data: DataProto):
         self.actor_module.train()
-        
+        self.actor_optimizer.zero_grad()
+
         # Compute response mask and JEPO advantages for the whole batch first
         if "response_mask" not in data.batch:
             data.batch["response_mask"] = compute_response_mask(data)
@@ -78,6 +117,28 @@ class JEPOActor(DataParallelPPOActor):
         data.batch["cot_log_probs"] = cot_log_probs
         data.batch["log_mean_answer_probs"] = log_mean_answer_probs
 
-        loss = (jepo_advs * cot_log_probs).mean() + (log_mean_answer_probs * beta_supp) # not implement kl here.
-
+        # Compute individual loss components
+        jepo_loss = (jepo_advs * cot_log_probs).mean()
+        supp_loss = (log_mean_answer_probs * beta_supp).mean()
+        
+        loss = jepo_loss + supp_loss
+        
         loss.backward()
+        grad_norm = self._optimizer_step()
+        
+        # Collect metrics
+        metrics = {
+            "jepo_actor/jepo_loss": jepo_loss.detach().item(),
+            "jepo_actor/supp_loss": supp_loss.detach().item(),
+            "jepo_actor/total_loss": loss.detach().item(),
+            "jepo_actor/grad_norm": grad_norm.detach().item(),
+            "jepo_actor/jepo_advs_mean": jepo_advs.mean().detach().item(),
+            "jepo_actor/jepo_advs_std": jepo_advs.std().detach().item(),
+            "jepo_actor/cot_log_probs_mean": cot_log_probs.mean().detach().item(),
+            "jepo_actor/log_mean_answer_probs_mean": log_mean_answer_probs.mean().detach().item(),
+            "jepo_actor/beta_supp": beta_supp,
+            "jepo_actor/format_penalty": format_penalty,
+        }
+        
+        self.actor_optimizer.zero_grad()
+        return metrics
