@@ -51,8 +51,8 @@ def compute_single_jepo_advantages(
     has_delimiter = []
     cot_tokens_list = []
     delimiter_positions = []
-    
-    for tokens in response_tokens:
+
+    for i, tokens in enumerate(response_tokens):
         tokens = tokens.detach().clone()
         delimiter_start_pos = None
         
@@ -66,9 +66,10 @@ def compute_single_jepo_advantages(
             has_delimiter.append(True)
             delimiter_positions.append(delimiter_start_pos)
         else:
-            cot_tokens = tokens
+            len_cot = len(tokens) - len(ground_truth_answer_tokens[i]) - len(delimiter_tokens)
+            cot_tokens = tokens[:len_cot]
             has_delimiter.append(False)
-            delimiter_positions.append(len(tokens))
+            delimiter_positions.append(len_cot)
         
         cot_tokens_list.append(cot_tokens)
     
@@ -89,7 +90,6 @@ def compute_single_jepo_advantages(
         batch_input_tokens.append(full_input_tokens)
         cot_start_positions.append(len(prompt_tokens_tensor))
         answer_start_positions.append(len(prompt_with_cot_tokens))
-    
     # Pad sequences to same length for batching
     max_len = max(len(tokens) for tokens in batch_input_tokens)
     padded_tokens = []
@@ -102,14 +102,43 @@ def compute_single_jepo_advantages(
         mask = [1] * len(tokens) + [0] * pad_length
         padded_tokens.append(padded)
         attention_masks.append(mask)
-    
-    # Single batched forward pass
+    # Prepare data for DataProto creation
     batch_input_ids = torch.stack(padded_tokens).to(dtype=torch.long, device=device)
     attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=device)
     
-    outputs = model(batch_input_ids, attention_mask=attention_mask)
-    logits = outputs.logits
-    log_probs_batch = torch.log_softmax(logits, dim=-1)
+    # Create position_ids (assuming standard sequential positions)
+    position_ids = torch.arange(max_len, dtype=torch.long, device=device).unsqueeze(0).repeat(n, 1)
+    # Mask out positions for padded tokens
+    for i, tokens in enumerate(batch_input_tokens):
+        position_ids[i, len(tokens):] = 0
+    
+    # Return data needed for DataProto instead of doing model forward here
+    return {
+        'batch_input_ids': batch_input_ids,
+        'attention_mask': attention_mask, 
+        'position_ids': position_ids,
+        'cot_start_positions': cot_start_positions,
+        'answer_start_positions': answer_start_positions,
+        'cot_tokens_list': cot_tokens_list,
+        'ground_truth_answer_tokens': ground_truth_answer_tokens,
+        'has_delimiter': has_delimiter,
+        'max_len': max_len
+    }
+
+def compute_jepo_advantages_from_logprobs(
+    log_probs_batch: torch.Tensor,
+    data_dict: dict,
+    format_penalty: float,
+    has_delimiter: list,
+    device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute JEPO advantages from log probabilities tensor"""
+    
+    n = log_probs_batch.shape[0]
+    cot_start_positions = data_dict['cot_start_positions']
+    answer_start_positions = data_dict['answer_start_positions']
+    cot_tokens_list = data_dict['cot_tokens_list']
+    ground_truth_answer_tokens = data_dict['ground_truth_answer_tokens']
     
     # Extract log probabilities for CoT and answers using positions
     cot_log_probs = []
@@ -119,6 +148,7 @@ def compute_single_jepo_advantages(
         cot_tokens = cot_tokens_list[i]
         cot_start = cot_start_positions[i]
         answer_start = answer_start_positions[i]
+        
         # CoT log probabilities - keep gradients
         cot_log_prob_sum = torch.tensor(0.0, device=device, dtype=torch.float32)
         for j, token_id in enumerate(cot_tokens):
@@ -126,9 +156,10 @@ def compute_single_jepo_advantages(
             if pos > 0 and pos < log_probs_batch.shape[1]:
                 token_log_prob = log_probs_batch[i, pos - 1, token_id]
                 cot_log_prob_sum += token_log_prob
+        
         # Answer log probabilities - detach for advantage calculation
         answer_log_prob_sum = torch.tensor(0.0, device=device, dtype=torch.float32)
-        for j, token_id in enumerate(ground_truth_answer_tokens):
+        for j, token_id in enumerate(ground_truth_answer_tokens[i]):
             pos = answer_start + j
             if pos > 0 and pos < log_probs_batch.shape[1]:
                 token_log_prob = log_probs_batch[i, pos - 1, token_id].detach()
@@ -212,7 +243,7 @@ def compute_jepo_advantages(
         if len(response_tokens_uid) == 0:
             continue
         
-        advantages, cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_single_jepo_advantages(
+        data_dict = compute_single_jepo_advantages(
             response_tokens=response_tokens_uid,
             prompt_tokens=prompt_tokens_uid,
             ground_truth_answer_tokens=ground_truth_answer_tokens_uid,
@@ -223,14 +254,9 @@ def compute_jepo_advantages(
             pad_token=pad_token
         )
         
-        if 'advantages' not in locals():
-            advantages_all = advantages.unsqueeze(0)
-            cot_log_probs_all = cot_log_probs.unsqueeze(0)
-            answer_log_probs_all = answer_log_probs.unsqueeze(0)
-            log_mean_answer_prob_all = log_mean_answer_prob.unsqueeze(0)
+        if 'data_dicts' not in locals():
+            data_dicts = [data_dict]
         else:
-            advantages_all = torch.cat([advantages_all, advantages.unsqueeze(0)], dim=0)
-            cot_log_probs_all = torch.cat([cot_log_probs_all, cot_log_probs.unsqueeze(0)], dim=0)
-            answer_log_probs_all = torch.cat([answer_log_probs_all, answer_log_probs.unsqueeze(0)], dim=0)
-            log_mean_answer_prob_all = torch.cat([log_mean_answer_prob_all, log_mean_answer_prob.unsqueeze(0)], dim=0)
-        return advantages_all, cot_log_probs_all, answer_log_probs_all, log_mean_answer_prob_all
+            data_dicts.append(data_dict)
+    
+    return data_dicts

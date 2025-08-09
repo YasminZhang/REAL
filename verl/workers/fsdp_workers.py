@@ -795,7 +795,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """JEPO-specific actor update method"""
         # Support all hardwares
         data = data.to(get_device_id())
-
+        data.meta_info["temperature"] = self.config.rollout.temperature
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)

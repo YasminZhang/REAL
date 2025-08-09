@@ -40,13 +40,14 @@ from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pa
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 from verl.workers.actor.dp_actor import DataParallelPPOActor
+from tqdm import tqdm
 
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_advantages_from_logprobs
 
 __all__ = ["JEPOActor"]
 
@@ -105,7 +106,9 @@ class JEPOActor(DataParallelPPOActor):
         beta_kl = jepo_config.get("beta_kl", 0.1)
         pad_token = self._cached_tokenizer.pad_token_id
 
-        jepo_advs, cot_log_probs, _, log_mean_answer_probs = compute_jepo_advantages(
+        # Get data dictionaries for creating DataProto objects
+        # data_dicts contains all questions.
+        data_dicts = compute_jepo_advantages(
             response_tokens=data.batch["responses"],
             prompt_tokens=data.batch["prompts"],
             ground_truth_answer_tokens=ground_truths_tokens,
@@ -116,6 +119,47 @@ class JEPOActor(DataParallelPPOActor):
             pad_token=pad_token,
             index=data.non_tensor_batch["uid"]
         )
+        
+        # Process each data dict to compute log probabilities using parent's _forward_micro_batch
+        all_advantages = []
+        all_cot_log_probs = []
+        all_log_mean_answer_probs = []
+        
+        temperature = data.meta_info["temperature"]
+        
+        for data_dict in tqdm(data_dicts):
+            # Use the model directly with the optimized padded inputs
+            # The _forward_micro_batch only gives us log_probs for specific tokens, 
+            # but JEPO needs the full vocabulary distribution
+            # for every single question
+            with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                output = self.actor_module(
+                    input_ids=data_dict['batch_input_ids'],
+                    attention_mask=data_dict['attention_mask'],
+                    position_ids=data_dict['position_ids'],
+                    use_cache=False,
+                )
+                logits = output.logits
+                logits.div_(temperature)
+                log_probs_batch = torch.log_softmax(logits, dim=-1)
+            # Compute JEPO advantages from log probabilities
+            print("Finish computing log probabilities")
+            advantages, cot_log_probs, _, log_mean_answer_prob = compute_jepo_advantages_from_logprobs(
+                log_probs_batch=log_probs_batch,
+                data_dict=data_dict,
+                format_penalty=format_penalty,
+                has_delimiter=data_dict['has_delimiter'],
+                device=self.actor_module.device
+            )
+            print("Finish computing JEPO advantages")
+            all_advantages.append(advantages)
+            all_cot_log_probs.append(cot_log_probs) 
+            all_log_mean_answer_probs.append(log_mean_answer_prob)
+        
+        # Concatenate results
+        jepo_advs = torch.cat(all_advantages, dim=0)
+        cot_log_probs = torch.cat(all_cot_log_probs, dim=0)
+        log_mean_answer_probs = torch.cat(all_log_mean_answer_probs, dim=0)
 
         data.batch["jepo_advs"] = jepo_advs
         data.batch["cot_log_probs"] = cot_log_probs
