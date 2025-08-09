@@ -22,8 +22,9 @@ sys.path.append('/home/aiscuser/jepo/recipe/jepo')
 
 from verl import DataProto
 from verl.utils.py_functional import append_to_dict
+from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.workers.actor.dp_actor import DataParallelPPOActor
-from jepo_core_algos import compute_jepo_advantages_batched, jepo_loss_batched
+from jepo_core_algos import compute_jepo_advantage
 
 __all__ = ["JEPOActor"]
 
@@ -36,251 +37,133 @@ def compute_response_mask(data: DataProto):
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 
+
 class JEPOActor(DataParallelPPOActor):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._cached_tokenizer = None
         logger.info("Initialized JEPO Actor")
 
     def update_policy(self, data: DataProto):
         self.actor_module.train()
         
-        jepo_config = data.meta_info.get("jepo_config", {})
-
+        temperature = data.meta_info["temperature"]
+        
+        # Compute response mask and JEPO advantages for the whole batch first
         data.batch["response_mask"] = compute_response_mask(data)
         
-        # Compute JEPO losses for the full batch BEFORE splitting to preserve UID grouping
-        full_batch_jepo_loss = self._compute_full_batch_jepo_loss(data, jepo_config)
+        uids = data.non_tensor_batch.get("uid", [])
+        if len(uids) > 0:
+            uid_index = np.array(uids)
+            token_level_rewards = data.batch.get("token_level_scores", torch.zeros_like(data.batch["responses"], dtype=torch.float))
+            response_mask = data.batch["response_mask"]
+            advantages, _ = compute_jepo_advantage(
+                token_level_rewards=token_level_rewards,
+                response_mask=response_mask, 
+                index=uid_index
+            )
+            data.batch["jepo_advantages"] = advantages
+        else:
+            # Fallback if no UIDs
+            # data.batch["jepo_advantages"] = torch.zeros_like(data.batch["responses"], dtype=torch.float)
+            raise ValueError("JEPO requires UIDs in the data batch for advantage computation.")
+        
+        select_keys = [
+            "responses", 
+            "response_mask",
+            "input_ids",
+            "attention_mask", 
+            "position_ids",
+            "old_log_probs",
+            "jepo_advantages"
+        ]
+        
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+        
+        data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
         
         mini_batches = data.split(self.config.ppo_mini_batch_size)
         
         metrics = {}
         for _ in range(self.config.ppo_epochs):
             for mini_batch in mini_batches:
-                metrics.update(self._process_mini_batch(mini_batch, jepo_config, full_batch_jepo_loss))
+                if self.config.use_dynamic_bsz:
+                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                else:
+                    self.gradient_accumulation = (
+                        self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    )
+                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+
+                self.actor_optimizer.zero_grad()
+
+                for micro_batch in micro_batches:
+                    micro_batch_metrics = self._process_jepo_micro_batch(micro_batch, temperature)
+                    append_to_dict(metrics, micro_batch_metrics)
+
+                grad_norm = self._optimizer_step()
+                mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                append_to_dict(metrics, mini_batch_metrics)
                 
         self.actor_optimizer.zero_grad()
         return metrics
 
-    def _process_mini_batch(self, mini_batch, jepo_config, full_batch_jepo_loss=None):
-        if self.config.use_dynamic_bsz:
-            max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-            from verl.utils.seqlen_balancing import prepare_dynamic_batch
-            micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
-        else:
-            self.gradient_accumulation = (
-                self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
-            )
-            micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
-
-        self.actor_optimizer.zero_grad()
-        metrics = {}
-        
-        for micro_batch in micro_batches:
-            batch_metrics = self._process_micro_batch(micro_batch, jepo_config, full_batch_jepo_loss)
-            append_to_dict(metrics, batch_metrics)
-            
-        grad_norm = self._optimizer_step()
-        metrics.update({"jepo_actor/grad_norm": grad_norm.detach().item()})
-        return metrics
-
-    def _process_micro_batch(self, micro_batch, jepo_config, full_batch_jepo_loss=None):
+    def _process_jepo_micro_batch(self, micro_batch, temperature):
+        """Process a single JEPO micro batch and return metrics"""
+        micro_batch_metrics = {}
         model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+        
         response_mask = model_inputs["response_mask"]
+        old_log_prob = model_inputs["old_log_probs"]
+        jepo_advantages = model_inputs["jepo_advantages"]
+        
+        entropy_coeff = self.config.entropy_coeff
+        loss_agg_mode = self.config.loss_agg_mode
         
         if self.config.use_dynamic_bsz:
             loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
         else:
             loss_scale_factor = 1 / self.gradient_accumulation
-
-        # Use pre-computed full batch JEPO loss if available, otherwise compute for this micro batch
-        if full_batch_jepo_loss is not None:
-            # Scale the full batch loss by the proportion of this micro batch
-            batch_size_ratio = response_mask.shape[0] / full_batch_jepo_loss.get('total_samples', 1)
-            policy_loss = full_batch_jepo_loss['loss'] * batch_size_ratio
-        else:
-            policy_loss = self._compute_jepo_loss(model_inputs, jepo_config)
         
-        loss = policy_loss * loss_scale_factor
+        # Calculate entropy if needed
+        calculate_entropy = entropy_coeff != 0
+        entropy, log_prob = self._forward_micro_batch(
+            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+        )
+        
+        # Compute JEPO policy loss using advantages (similar to policy gradient loss)
+        pg_losses = -jepo_advantages * log_prob
+        from verl.trainer.ppo.core_algos import agg_loss
+        pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+        
+        # Add entropy loss if configured
+        if entropy_coeff != 0:
+            entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+            jepo_loss = pg_loss - entropy_loss * entropy_coeff
+            micro_batch_metrics["actor/entropy_loss"] = entropy_loss.detach().item() * loss_scale_factor
+        else:
+            jepo_loss = pg_loss
+        
+        # Add KL loss if configured
+        if self.config.use_kl_loss:
+            ref_log_prob = model_inputs["ref_log_prob"]
+            from verl.trainer.ppo.core_algos import kl_penalty
+            kld = kl_penalty(
+                logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
+            )
+            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+            jepo_loss = jepo_loss + kl_loss * self.config.kl_loss_coef
+            micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
+            micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+        
+        loss = jepo_loss * loss_scale_factor
         loss.backward()
         
-        return {"jepo_actor/policy_loss": policy_loss.detach().item() * loss_scale_factor}
-
-    def _compute_full_batch_jepo_loss(self, data: DataProto, jepo_config):
-        """Compute JEPO loss for the full batch to preserve UID grouping"""
-        model_inputs = {**data.batch, **data.non_tensor_batch}
-        response_tokens_tensor = model_inputs.get("responses")
-        uids = model_inputs.get("uid", [])
+        micro_batch_metrics.update({
+            "actor/jepo_loss": jepo_loss.detach().item() * loss_scale_factor,
+            "actor/pg_loss": pg_loss.detach().item() * loss_scale_factor,
+        })
         
-        if response_tokens_tensor is None or len(uids) == 0:
-            return {
-                'loss': torch.tensor(0.0, device=self.actor_module.device, requires_grad=True),
-                'total_samples': 1
-            }
-        
-        tokenizer = self._get_tokenizer()
-        if tokenizer is None:
-            logger.error("Tokenizer not found")
-            return {
-                'loss': torch.tensor(0.0, device=self.actor_module.device, requires_grad=True),
-                'total_samples': 1
-            }
-        
-        loss_components = self._compute_jepo_by_uid_groups(
-            uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config
-        )
-        return {
-            'loss': loss_components.get("total_loss", torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)),
-            'total_samples': response_tokens_tensor.shape[0]
-        }
-            
-    def _compute_jepo_loss(self, model_inputs, jepo_config):
-        response_tokens_tensor = model_inputs.get("responses")
-        uids = model_inputs.get("uid", [])
-        
-        if response_tokens_tensor is None or len(uids) == 0:
-            return torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)
-        
-        tokenizer = self._get_tokenizer()
-        if tokenizer is None:
-            logger.error("Tokenizer not found")
-            return torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)
-        
-        try:
-            loss_components = self._compute_jepo_by_uid_groups(
-                uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config
-            )
-            return loss_components.get("total_loss", torch.tensor(0.0, device=self.actor_module.device, requires_grad=True))
-            
-        except Exception as e:
-            logger.error(f"JEPO computation failed: {e}")
-            return torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)
-
-    def _compute_jepo_by_uid_groups(self, uids, response_tokens_tensor, model_inputs, tokenizer, jepo_config):
-        unique_uids = np.unique(uids)
-        
-        questions_response_tokens = []
-        questions_prompts = []
-        questions_ground_truths = []
-        
-        # Handle reward_model data - it might be a numpy array or dict
-        reward_model_data = model_inputs.get("reward_model", {})
-        ground_truths = [x.get('ground_truth') for x in reward_model_data]
-        prompts = model_inputs.get("prompts", [])
-        
-        for uid in unique_uids:
-            uid_mask = torch.tensor([u == uid for u in uids], dtype=torch.bool, device=response_tokens_tensor.device)
-            uid_indices = torch.where(uid_mask)[0]
-            
-            if len(uid_indices) <= 1:
-                continue
-
-            # response_tokens contain pad tokens 
-            uid_response_tokens = response_tokens_tensor[uid_mask]
-            uid_prompt = prompts[uid_indices[0]] if len(prompts) > 0 else ""
-            uid_ground_truth = ground_truths[uid_indices[0]] if len(ground_truths) > 0 else ""
-            
-            questions_response_tokens.append(uid_response_tokens) # uid responses tokens are having pad tokens
-            questions_prompts.append(uid_prompt)
-            questions_ground_truths.append(uid_ground_truth)
-
-        if len(questions_response_tokens) == 0:
-            return {"total_loss": torch.tensor(0.0, device=self.actor_module.device, requires_grad=True)}
-            
-        return self._compute_batched_jepo_loss(
-            questions_response_tokens, questions_prompts, questions_ground_truths, 
-            tokenizer, jepo_config
-        )
-
-    def _extract_response_tokens(self, response_tensor, tokenizer):
-        response_tokens = []
-        for i in range(response_tensor.shape[0]):
-            tokens = response_tensor[i].cpu().tolist()
-            if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
-                tokens = [t for t in tokens if t != tokenizer.pad_token_id]
-            response_tokens.append(tokens)
-        return response_tokens
-
-    def _compute_batched_jepo_loss(self, questions_response_tokens, questions_prompts, 
-                                   questions_ground_truths, tokenizer, jepo_config):
-        
-        delimiter = jepo_config.get("delimiter", "\n\n")
-        format_penalty = jepo_config.get("format_penalty", 0.1)
-        beta_supp = jepo_config.get("beta_supp", 1.0)
-        beta_kl = jepo_config.get("beta_kl", 0.1)
-        
-        tilde_A_i_list, tilde_A_i_ref_list, cot_log_probs_list, answer_log_probs_list = compute_jepo_advantages_batched(
-            questions_response_tokens=questions_response_tokens,
-            questions_prompts=questions_prompts,
-            ground_truth_answers=questions_ground_truths,
-            tokenizer=tokenizer,
-            delimiter=delimiter,
-            format_penalty=format_penalty,
-            model=self.actor_module,
-            device=self.actor_module.device
-        )
-        
-        return jepo_loss_batched(
-            questions_cot_log_probs=cot_log_probs_list,
-            questions_answer_log_probs=answer_log_probs_list,
-            questions_tilde_A_i=tilde_A_i_list,
-            questions_tilde_A_i_ref=tilde_A_i_ref_list,
-            beta_supp=beta_supp,
-            beta_kl=beta_kl
-        )
-
-    def _get_tokenizer(self):
-        if self._cached_tokenizer is not None:
-            return self._cached_tokenizer
-        
-        # Try to get tokenizer from various locations
-        tokenizer = None
-        
-        # Method 1: Direct attribute access
-        tokenizer = getattr(self.actor_module, 'tokenizer', None)
-        if tokenizer is not None:
-            logger.info("Found tokenizer via direct attribute access")
-            self._cached_tokenizer = tokenizer
-            return tokenizer
-        
-        # Method 2: From config
-        tokenizer = getattr(self.config, 'tokenizer', None)
-        if tokenizer is not None:
-            logger.info("Found tokenizer in config")
-            self._cached_tokenizer = tokenizer
-            return tokenizer
-        
-        # Method 3: Try to access the underlying model if FSDP wrapped
-        if hasattr(self.actor_module, 'module'):
-            inner_module = self.actor_module.module
-            tokenizer = getattr(inner_module, 'tokenizer', None)
-            if tokenizer is not None:
-                logger.info("Found tokenizer in FSDP wrapped module")
-                self._cached_tokenizer = tokenizer
-                return tokenizer
-        
-        # Method 4: Try to get from the model's transformer/model attribute
-        for attr_name in ['transformer', 'model', 'bert', 'roberta', 'language_model', 'lm_head', 'base_model']:
-            if hasattr(self.actor_module, attr_name):
-                sub_module = getattr(self.actor_module, attr_name)
-                tokenizer = getattr(sub_module, 'tokenizer', None)
-                if tokenizer is not None:
-                    logger.info(f"Found tokenizer in {attr_name}")
-                    self._cached_tokenizer = tokenizer
-                    return tokenizer
-        
-        # Method 5: Check if there's a config that has tokenizer info
-        if hasattr(self.actor_module, 'config'):
-            module_config = self.actor_module.config
-            if hasattr(module_config, 'tokenizer'):
-                tokenizer = module_config.tokenizer
-                if tokenizer is not None:
-                    logger.info("Found tokenizer in module config")
-                    self._cached_tokenizer = tokenizer
-                    return tokenizer
-        
-        logger.error("Could not find tokenizer in actor_module or config")
-        logger.error(f"Actor module type: {type(self.actor_module)}")
-        logger.error(f"Config type: {type(self.config)}")
-        return None
+        return micro_batch_metrics

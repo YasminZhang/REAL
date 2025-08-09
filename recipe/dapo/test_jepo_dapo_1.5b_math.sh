@@ -38,7 +38,7 @@ jepo_delimiter="Answer:"
 jepo_format_penalty=0.1
 jepo_beta_supp=1.0
 jepo_beta_kl=0.1
-jepo_buffer_size=8
+jepo_buffer_size=64
 jepo_steps=1
 jepo_update_frequency=10000
 

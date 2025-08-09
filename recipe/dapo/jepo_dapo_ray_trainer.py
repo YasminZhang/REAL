@@ -50,11 +50,8 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jepo'))
 
 from jepo_core_algos import (
-    JEPOConfig,
-    compute_jepo_advantages,
-    jepo_loss
+    JEPOConfig
 )
-
 
 class RayJEPODAPOTrainer(RayDAPOTrainer):
     """

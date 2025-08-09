@@ -17,6 +17,9 @@ import torch.nn.functional as F
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from copy import deepcopy
+import numpy as np
+from collections import defaultdict
+import verl.utils.torch_functional as verl_F
 
 
 @dataclass
@@ -29,7 +32,7 @@ class JEPOConfig:
     jepo_steps: int = 5
 
 
-def compute_jepo_advantages(
+def compute_single_jepo_advantages(
     response_tokens: List[List[int]],
     prompt_tokens: List[int],
     ground_truth_answer_tokens: List[int],
@@ -39,6 +42,7 @@ def compute_jepo_advantages(
     device: torch.device,
     pad_token: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # return shape [n],[n],[n],[n]
     # compute jepo adv for a single question
     
     n = len(response_tokens)
@@ -173,133 +177,7 @@ def compute_jepo_advantages(
     # Detach advantages but keep gradients for CoT log probs
     tilde_A_i = tilde_A_i.detach()
     tilde_A_i_ref = tilde_A_i_ref.detach()
-    
-    return (
-        tilde_A_i.to(device), 
-        tilde_A_i_ref.to(device), 
-        cot_log_probs_tensor.to(device), 
-        answer_log_probs_tensor.to(device)
-    )
+    jepo_advantage = tilde_A_i + tilde_A_i_ref
+    log_mean_answer_prob = log_mean_prob.repeat(n)
 
-
-
-def compute_jepo_advantages_batched(
-    questions_response_tokens: List[List[List[int]]],
-    questions_prompts: List[str],
-    ground_truth_answers: List[str],
-    tokenizer,
-    delimiter: str,
-    format_penalty: float,
-    model,
-    device: torch.device,
-) -> tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
-    
-    # note that questions_response_tokens contain pad tokens
-
-    delimiter_tokens = tokenizer.encode(delimiter, add_special_tokens=False)
-    tilde_A_i_list = []
-    tilde_A_i_ref_list = []
-    cot_log_probs_list = []
-    answer_log_probs_list = []
-    
-    for q_idx in range(len(questions_response_tokens)):
-        response_tokens = questions_response_tokens[q_idx]
-        prompt_tokens = questions_prompts[q_idx]
-        ground_truth = ground_truth_answers[q_idx]
-        
-        ground_truth_tokens = tokenizer.encode(ground_truth, add_special_tokens=False)
-        pad_token = tokenizer.pad_token_id # get the pad token
-        
-        tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_jepo_advantages(
-            response_tokens=response_tokens,
-            prompt_tokens=prompt_tokens,
-            ground_truth_answer_tokens=ground_truth_tokens,
-            delimiter_tokens=delimiter_tokens,
-            format_penalty=format_penalty,
-            model=model,
-            device=device,
-            pad_token=pad_token
-        )
-        
-        tilde_A_i_list.append(tilde_A_i)
-        tilde_A_i_ref_list.append(tilde_A_i_ref)
-        cot_log_probs_list.append(cot_log_probs)
-        answer_log_probs_list.append(answer_log_probs)
-    
-    return tilde_A_i_list, tilde_A_i_ref_list, cot_log_probs_list, answer_log_probs_list
-
-
-def jepo_loss_batched(
-    questions_cot_log_probs: List[torch.Tensor],
-    questions_answer_log_probs: List[torch.Tensor], 
-    questions_tilde_A_i: List[torch.Tensor],
-    questions_tilde_A_i_ref: List[torch.Tensor],
-    beta_supp: float,
-    beta_kl: float = 0.0
-) -> Dict[str, torch.Tensor]:
-    
-    if not questions_cot_log_probs:
-        return {
-            "total_loss": torch.tensor(0.0, requires_grad=True),
-            "pg_loss": torch.tensor(0.0),
-            "supp_loss": torch.tensor(0.0),
-            "kl_loss": torch.tensor(0.0),
-        }
-    
-    all_cot_log_probs = torch.cat(questions_cot_log_probs, dim=0)
-    all_tilde_A_i = torch.cat(questions_tilde_A_i, dim=0)
-    all_tilde_A_i_ref = torch.cat(questions_tilde_A_i_ref, dim=0)
-    
-    combined_advantages = all_tilde_A_i + all_tilde_A_i_ref
-    combined_advantages = combined_advantages.detach()
-    
-    pg_loss = -torch.mean(combined_advantages * all_cot_log_probs)
-    
-    supp_losses = []
-    for answer_log_probs in questions_answer_log_probs:
-        mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(len(answer_log_probs), dtype=torch.float32))
-        supp_losses.append(mean_answer_log_prob)
-    
-    supp_loss = -beta_supp * torch.mean(torch.stack(supp_losses))
-    
-    kl_loss = torch.tensor(0.0, requires_grad=True)
-    
-    total_loss = pg_loss + supp_loss + kl_loss
-    
-    return {
-        "total_loss": total_loss,
-        "pg_loss": pg_loss,
-        "supp_loss": supp_loss,
-        "kl_loss": kl_loss,
-    }
-
-
-def jepo_loss(
-    chain_of_thought_log_probs: torch.Tensor,
-    answer_log_probs: torch.Tensor,
-    tilde_A_i: torch.Tensor,
-    tilde_A_i_ref: torch.Tensor,
-    beta_supp: float,
-    beta_kl: float = 0.0
-) -> Dict[str, torch.Tensor]:
-    
-    n = tilde_A_i.shape[0]
-    
-    combined_advantages = tilde_A_i + tilde_A_i_ref
-    combined_advantages = combined_advantages.detach()
-    
-    pg_loss = -torch.mean(combined_advantages * chain_of_thought_log_probs)
-    
-    mean_answer_log_prob = torch.logsumexp(answer_log_probs, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32))
-    supp_loss = -beta_supp * mean_answer_log_prob
-    
-    kl_loss = torch.tensor(0.0, requires_grad=True)
-    
-    total_loss = pg_loss + supp_loss + kl_loss
-    
-    return {
-        'total_loss': total_loss,
-        'pg_loss': pg_loss,
-        'supp_loss': supp_loss,
-        'kl_loss': kl_loss,
-    }
+    return (jepo_advantage.to(device), cot_log_probs_tensor, answer_log_probs_tensor, log_mean_answer_prob)
