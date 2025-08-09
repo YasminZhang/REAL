@@ -34,8 +34,8 @@ class JEPOConfig:
 
 def compute_single_jepo_advantages(
     response_tokens: List[List[int]],
-    prompt_tokens: List[int],
-    ground_truth_answer_tokens: List[int],
+    prompt_tokens: List[List[int]],
+    ground_truth_answer_tokens: List[List[int]],
     delimiter_tokens: List[int],
     format_penalty: float,
     model,
@@ -76,12 +76,12 @@ def compute_single_jepo_advantages(
     batch_input_tokens = []
     cot_start_positions = []
     answer_start_positions = []
-    for cot_tokens in cot_tokens_list:
+    for i,cot_tokens in enumerate(cot_tokens_list):
         # Convert all to tensors if they aren't already
-        prompt_tokens_tensor = torch.tensor(prompt_tokens, device=device) if not isinstance(prompt_tokens, torch.Tensor) else prompt_tokens
+        prompt_tokens_tensor = torch.tensor(prompt_tokens[i], device=device) if not isinstance(prompt_tokens[i], torch.Tensor) else prompt_tokens[i]
         cot_tokens_tensor = torch.tensor(cot_tokens, device=device) if not isinstance(cot_tokens, torch.Tensor) else cot_tokens
         delimiter_tokens_tensor = torch.tensor(delimiter_tokens, device=device) if not isinstance(delimiter_tokens, torch.Tensor) else delimiter_tokens
-        ground_truth_tokens_tensor = torch.tensor(ground_truth_answer_tokens, device=device) if not isinstance(ground_truth_answer_tokens, torch.Tensor) else ground_truth_answer_tokens
+        ground_truth_tokens_tensor = torch.tensor(ground_truth_answer_tokens[i], device=device) if not isinstance(ground_truth_answer_tokens[i], torch.Tensor) else ground_truth_answer_tokens[i]
 
         prompt_with_cot_tokens = torch.cat([prompt_tokens_tensor, cot_tokens_tensor, delimiter_tokens_tensor])
         full_input_tokens = torch.cat([prompt_with_cot_tokens, ground_truth_tokens_tensor])
