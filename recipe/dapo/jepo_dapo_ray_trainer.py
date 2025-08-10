@@ -453,10 +453,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     
                     # Perform JEPO training when frequency is hit
                     frequency_met = self.global_steps % self.jepo_update_frequency == 0
-                    if (self.use_jepo and 
-                        len(all_incorrect_batch) > 0 and 
-                        frequency_met):
-
+                    if (self.use_jepo and all_incorrect_batch is not None and frequency_met):
                         jepo_metrics = self._run_jepo_training(all_incorrect_batch)
                         metrics.update(jepo_metrics)
                         print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")

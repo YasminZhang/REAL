@@ -40,7 +40,7 @@ jepo_beta_supp=0.1
 jepo_beta_kl=0.1
 jepo_buffer_size=64
 jepo_steps=1
-jepo_update_frequency=10000
+jepo_update_frequency=100000
 
 # Ray - single node setup for 1.5B
 NNODES=1
