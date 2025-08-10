@@ -303,80 +303,73 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
-                    # Track whether we've added this generation batch to JEPO buffer
-                    added_to_jepo_buffer = False
+                    # Collect the sequence reward for each trajectory
+                    metric_name = self.config.algorithm.filter_groups.metric
+                    if metric_name == "seq_final_reward":
+                        new_batch.non_tensor_batch["seq_final_reward"] = (
+                            new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
+                        )
+                    elif metric_name == "seq_reward":
+                        new_batch.non_tensor_batch["seq_reward"] = (
+                            new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                        )
+                    prompt_uid2metric_vals = defaultdict(list)
+                    for uid, metric_val in zip(
+                        new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
+                    ):
+                        prompt_uid2metric_vals[uid].append(metric_val)
+                    
+                    prompt_uid2metric_std = {}
+                    prompt_uid2metric_mean = {}
+                    for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                        prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                        prompt_uid2metric_mean[prompt_uid] = np.mean(metric_vals)
+                    
+                    kept_prompt_uids = [
+                        uid
+                        for uid, std in prompt_uid2metric_std.items()
+                        if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                    ]
+                    all_incorrect_uids = [
+                        uid
+                        for uid, mean in prompt_uid2metric_mean.items()
+                        if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
+                    ]
+                    
+                    num_prompt_in_batch += len(kept_prompt_uids)
+                    num_prompt_in_jepo_buffer += len(all_incorrect_uids)
+
+                    kept_traj_idxs = []
+                    all_incorrect_traj_idxs = []
+                    for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
+                        if traj_from_prompt_uid in kept_prompt_uids:
+                            kept_traj_idxs.append(idx)
+                        if traj_from_prompt_uid in all_incorrect_uids:
+                            all_incorrect_traj_idxs.append(idx)
+
+                    # Add to JEPO buffer for each generation batch before continuing
+                    if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
+                        print(f"Solve None: {len(all_incorrect_uids)}")
+                        print(f"Solve Partial: {len(kept_prompt_uids)}")
+                        print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
+                        all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
+                        all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
+                        added_to_jepo_buffer = True
+                        
+                        # Perform JEPO training if buffer is full
+                        if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
+                            jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size])
+                            metrics.update(jepo_metrics)
+                            print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
+                            all_incorrect_batch = None # clear the jepo batch
+                            num_prompt_in_jepo_buffer = 0
+                            if jepo_metrics:
+                                print(f"JEPO training completed with metrics: {jepo_metrics}")
                     
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
-                        
-                        # Add to JEPO buffer when filtering is disabled
-                        if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps:
-                            self._check_and_buffer_incorrect_responses(new_batch)
-                            added_to_jepo_buffer = True
                     else:  # Filtering logic (same as original DAPO)
-                        metric_name = self.config.algorithm.filter_groups.metric
-                        if metric_name == "seq_final_reward":
-                            new_batch.non_tensor_batch["seq_final_reward"] = (
-                                new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
-                            )
-                        elif metric_name == "seq_reward":
-                            new_batch.non_tensor_batch["seq_reward"] = (
-                                new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
-                            )
-
-                        # Collect the sequence reward for each trajectory
-                        prompt_uid2metric_vals = defaultdict(list)
-                        for uid, metric_val in zip(
-                            new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
-                        ):
-                            prompt_uid2metric_vals[uid].append(metric_val)
                         
-                        prompt_uid2metric_std = {}
-                        prompt_uid2metric_mean = {}
-                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
-                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
-                            prompt_uid2metric_mean[prompt_uid] = np.mean(metric_vals)
-                        
-                        kept_prompt_uids = [
-                            uid
-                            for uid, std in prompt_uid2metric_std.items()
-                            if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
-                        ]
-                        all_incorrect_uids = [
-                            uid
-                            for uid, mean in prompt_uid2metric_mean.items()
-                            if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
-                        ]
-                        
-                        num_prompt_in_batch += len(kept_prompt_uids)
-                        num_prompt_in_jepo_buffer += len(all_incorrect_uids)
-
-                        kept_traj_idxs = []
-                        all_incorrect_traj_idxs = []
-                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
-                            if traj_from_prompt_uid in kept_prompt_uids:
-                                kept_traj_idxs.append(idx)
-                            if traj_from_prompt_uid in all_incorrect_uids:
-                                all_incorrect_traj_idxs.append(idx)
-
-                        # Add to JEPO buffer for each generation batch before continuing
-                        if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
-                            print(f"Solve None: {len(all_incorrect_uids)}")
-                            print(f"Solve Partial: {len(kept_prompt_uids)}")
-                            print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
-                            all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
-                            all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
-                            added_to_jepo_buffer = True
-                            
-                            # Perform JEPO training if buffer is full
-                            if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
-                                jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size])
-                                metrics.update(jepo_metrics)
-                                print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
-                                all_incorrect_batch = None # clear the jepo batch
-                                num_prompt_in_jepo_buffer = 0
-                                if jepo_metrics:
-                                    print(f"JEPO training completed with metrics: {jepo_metrics}")
 
                         new_batch = new_batch[kept_traj_idxs]
                         #all_incorrect_batch = new_batch[all_incorrect_traj_idxs]
