@@ -118,7 +118,8 @@ class JEPOActor(DataParallelPPOActor):
             model=self.actor_module,
             device=self.actor_module.device,
             pad_token=pad_token,
-            index=data.non_tensor_batch["uid"]
+            index=data.non_tensor_batch["uid"],
+            tokenizer=self._cached_tokenizer
         )
         
         # Process each data dict to compute log probabilities using parent's _forward_micro_batch

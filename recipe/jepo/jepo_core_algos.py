@@ -36,48 +36,43 @@ def compute_single_jepo_advantages(
     response_tokens: List[List[int]],
     prompt_tokens: List[List[int]],
     ground_truth_answer_tokens: List[List[int]],
-    delimiter_tokens: List[int],
+    delimiter_str: str,
     format_penalty: float,
     model,
     device: torch.device,
-    pad_token: int
+    pad_token: int,
+    tokenizer
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # return shape [n],[n],[n],[n]
     # compute jepo adv for a single question
     
     n = len(response_tokens)
+    max_response_length = response_tokens.shape[1]
     
     # Parse CoT and delimiter positions
     has_delimiter = []
     cot_tokens_list = []
-    delimiter_positions = []
+    delimiter_tokens = tokenizer.encode(delimiter_str, add_special_tokens=False, return_tensors='pt').squeeze(0).to(device)
+    delimiter_token_length = len(delimiter_tokens)
+    ground_truth_answer_tokens = np.array(ground_truth_answer_tokens.tolist(), dtype=np.int64)
 
     for i, tokens in enumerate(response_tokens):
         tokens = tokens.detach().clone()
-        delimiter_start_pos = None
-        
-        for j in range(len(tokens) - len(delimiter_tokens) + 1):
-            if tokens[j:j+len(delimiter_tokens)] == delimiter_tokens:
-                delimiter_start_pos = j
-                break
-        
-        if delimiter_start_pos is not None:
-            cot_tokens = tokens[:delimiter_start_pos]
+        response_str = tokenizer.decode(tokens, skip_special_tokens=True)
+        if delimiter_str in response_str:
             has_delimiter.append(True)
-            delimiter_positions.append(delimiter_start_pos)
-        else:
-            len_cot = len(tokens) - len(ground_truth_answer_tokens[i]) - len(delimiter_tokens)
-            cot_tokens = tokens[:len_cot]
-            has_delimiter.append(False)
-            delimiter_positions.append(len_cot)
-        
+        cot_str = response_str.split(delimiter_str)[0].strip()
+        cot_tokens = tokenizer.encode(cot_str, add_special_tokens=False)
+        if len(cot_tokens) >= max_response_length:
+            gt_length = len(ground_truth_answer_tokens[i])
+            cot_tokens = cot_tokens[:(max_response_length - gt_length - delimiter_token_length)]
         cot_tokens_list.append(cot_tokens)
     #breakpoint()
     # Prepare batch input: prompt + cot + delimiter + ground_truth for all responses
     batch_input_tokens = []
     cot_start_positions = []
     answer_start_positions = []
-    ground_truth_answer_tokens = np.array(ground_truth_answer_tokens.tolist(), dtype=np.int64)
+    
 
     for i,cot_tokens in enumerate(cot_tokens_list):
         # Convert all to tensors if they aren't already
@@ -296,18 +291,19 @@ def compute_jepo_advantages(
     response_tokens,
     prompt_tokens,
     ground_truth_answer_tokens,
-    delimiter_tokens,
+    delimiter_str,
     format_penalty,
     model,
     device,
     pad_token,
-    index
+    index,
+    tokenizer,
 ):
 
     # response_tokens has shape [bsz, max_response_length]
     # prompt_tokens has shape [bsz, max_prompt_length]
     # ground_truth_answer_tokens is a list with shape bsz, np.ndarray
-    # delimiter_tokens is a lift of tokens
+    # delimiter_str is a str
     # index is a list of uid
 
     uuid = np.unique(index)
@@ -324,11 +320,12 @@ def compute_jepo_advantages(
             response_tokens=response_tokens_uid,
             prompt_tokens=prompt_tokens_uid,
             ground_truth_answer_tokens=ground_truth_answer_tokens_uid,
-            delimiter_tokens=delimiter_tokens,
+            delimiter_str=delimiter_str,
             format_penalty=format_penalty,
             model=model,
             device=device,
-            pad_token=pad_token
+            pad_token=pad_token,
+            tokenizer=tokenizer
         )
         
         if 'data_dicts' not in locals():
