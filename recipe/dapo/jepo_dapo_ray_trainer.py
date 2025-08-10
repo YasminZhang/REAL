@@ -348,13 +348,12 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             all_incorrect_traj_idxs.append(idx)
 
                     # Add to JEPO buffer for each generation batch before continuing
-                    if self.use_jepo and self.config.trainer.critic_warmup <= self.global_steps and not added_to_jepo_buffer:
+                    if self.use_jepo:
                         print(f"Solve None: {len(all_incorrect_uids)}")
                         print(f"Solve Partial: {len(kept_prompt_uids)}")
                         print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
                         all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
-                        added_to_jepo_buffer = True
                         
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:

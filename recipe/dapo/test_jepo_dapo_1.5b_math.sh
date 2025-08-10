@@ -23,7 +23,7 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=32
+train_prompt_bsz=64
 n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 
@@ -34,11 +34,11 @@ max_num_gen_batches=10
 
 # JEPO specific parameters
 use_jepo=True
-jepo_delimiter="boxed{"
+jepo_delimiter="boxed\{"
 jepo_format_penalty=0.0
 jepo_beta_supp=0.1
 jepo_beta_kl=0.1
-jepo_buffer_size=128
+jepo_buffer_size=64
 jepo_steps=1
 jepo_update_frequency=10000
 
