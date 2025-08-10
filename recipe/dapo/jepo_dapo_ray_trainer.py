@@ -369,8 +369,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
                     else:  # Filtering logic (same as original DAPO)
-                        
-
                         new_batch = new_batch[kept_traj_idxs]
                         #all_incorrect_batch = new_batch[all_incorrect_traj_idxs]
 

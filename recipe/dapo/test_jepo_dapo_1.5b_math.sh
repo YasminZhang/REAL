@@ -49,8 +49,8 @@ NGPUS_PER_NODE=8
 # Use 1.5B model
 MODEL_PATH="Qwen/Qwen2.5-Math-1.5B"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=/home/aiscuser/verl/data/dapo-math-17k.parquet
-TEST_FILE=/home/aiscuser/verl/data/aime-2024.parquet
+TRAIN_FILE=data/dsr_sub.parquet
+TEST_FILE=data/aime.parquet
 
 # Algorithm
 temperature=1.0
