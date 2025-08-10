@@ -72,6 +72,7 @@ def compute_single_jepo_advantages(
             delimiter_positions.append(len_cot)
         
         cot_tokens_list.append(cot_tokens)
+    #breakpoint()
     # Prepare batch input: prompt + cot + delimiter + ground_truth for all responses
     batch_input_tokens = []
     cot_start_positions = []

@@ -108,6 +108,7 @@ class JEPOActor(DataParallelPPOActor):
 
         # Get data dictionaries for creating DataProto objects
         # data_dicts contains all questions.
+        #breakpoint()
         data_dicts = compute_jepo_advantages(
             response_tokens=data.batch["responses"],
             prompt_tokens=data.batch["prompts"],

@@ -139,6 +139,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
 
         # Get micro batch size from config, fallback to full batch if not specified
         micro_batch_size = getattr(self.config.data, 'jepo_micro_batch_size', batch_size)
+        micro_batch_size *= self.config.actor_rollout_ref.rollout.n  # Adjust for rollout n
         
         all_metrics = defaultdict(list)
         
@@ -349,7 +350,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     all_incorrect_uids = [
                         uid
                         for uid, mean in prompt_uid2metric_mean.items()
-                        if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
+                        if mean > 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
                     ]
                     
                     num_prompt_in_batch += len(kept_prompt_uids)
