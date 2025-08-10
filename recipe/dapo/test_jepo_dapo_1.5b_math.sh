@@ -9,21 +9,21 @@ adv_estimator=grpo
 use_kl_in_reward=False
 kl_coef=0.0
 use_kl_loss=True
-kl_loss_coef=1.0
+kl_loss_coef=0.001
 
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=1024
-max_response_length=512
+max_response_length=3072
 enable_overlong_buffer=False
-overlong_buffer_len=1024
+overlong_buffer_len=3072
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=128
+train_prompt_bsz=32
 n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 
@@ -34,7 +34,7 @@ max_num_gen_batches=10
 
 # JEPO specific parameters
 use_jepo=True
-jepo_delimiter="Answer:"
+jepo_delimiter="boxed{"
 jepo_format_penalty=0.0
 jepo_beta_supp=0.1
 jepo_beta_kl=0.1
