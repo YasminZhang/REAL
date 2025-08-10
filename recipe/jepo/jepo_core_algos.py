@@ -52,7 +52,7 @@ def compute_single_jepo_advantages(
     # Parse CoT and delimiter positions
     has_delimiter = []
     cot_tokens_list = []
-    delimiter_tokens = tokenizer.encode(delimiter_str, add_special_tokens=False, return_tensors='pt').squeeze(0).to(device)
+    delimiter_tokens = tokenizer.encode(delimiter_str, add_special_tokens=False)
     delimiter_token_length = len(delimiter_tokens)
     ground_truth_answer_tokens = np.array(ground_truth_answer_tokens.tolist(), dtype=np.int64)
 
@@ -61,6 +61,8 @@ def compute_single_jepo_advantages(
         response_str = tokenizer.decode(tokens, skip_special_tokens=True)
         if delimiter_str in response_str:
             has_delimiter.append(True)
+        else:
+            has_delimiter.append(False)
         cot_str = response_str.split(delimiter_str)[0].strip()
         cot_tokens = tokenizer.encode(cot_str, add_special_tokens=False)
         if len(cot_tokens) >= max_response_length:

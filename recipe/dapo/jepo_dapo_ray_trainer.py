@@ -350,7 +350,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     all_incorrect_uids = [
                         uid
                         for uid, mean in prompt_uid2metric_mean.items()
-                        if mean > 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
+                        if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
                     ]
                     
                     num_prompt_in_batch += len(kept_prompt_uids)

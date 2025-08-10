@@ -100,7 +100,6 @@ class JEPOActor(DataParallelPPOActor):
         ground_truths_tokens = np.array([self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths], dtype=object)
         delimiter = jepo_config.get("delimiter", "\n\n")
         print(f"Using delimiter: {delimiter}")
-        delimiter_tokens = self._cached_tokenizer.encode(delimiter)
         format_penalty = jepo_config.get("format_penalty", 1.0)
         beta_supp = jepo_config.get("beta_supp", 1.0)
         beta_kl = jepo_config.get("beta_kl", 0.1)
@@ -113,7 +112,7 @@ class JEPOActor(DataParallelPPOActor):
             response_tokens=data.batch["responses"],
             prompt_tokens=data.batch["prompts"],
             ground_truth_answer_tokens=ground_truths_tokens,
-            delimiter_tokens=delimiter_tokens,
+            delimiter_str=delimiter,
             format_penalty=format_penalty,
             model=self.actor_module,
             device=self.actor_module.device,
