@@ -55,7 +55,7 @@ class Tracking:
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
-            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
+            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings,id=wandb.util.generate_id())
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:

@@ -645,9 +645,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             from verl.workers.actor.jepo_actor import JEPOActor
             
             # Create separate optimizer for JEPO
-            if self.config.actor.optim is not None:
+            if self.config.jepo_actor.optim is not None:
                 import torch.optim as optim
-                jepo_optim_config = self.config.actor.optim
+                print("Using JEPO separate optimizer config")
+                jepo_optim_config = self.config.jepo_actor.optim
                 self.jepo_actor_optimizer = optim.AdamW(
                     self.actor_module_fsdp.parameters(),
                     lr=jepo_optim_config.lr,
@@ -677,6 +678,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     raise ValueError(f"Unknown warmup_style: {warmup_style}")
             else:
+                raise ValueError("Can not find jepo actor optim config.")
                 self.jepo_actor_optimizer = None
                 self.jepo_actor_lr_scheduler = None
             

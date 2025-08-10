@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='JEPO-DAPO'
-exp_name='JEPO-DAPO-Qwen2.5-1.5b-MATH-test'
+project_name='JEPO'
+#exp_name='JEPO-DAPO-Qwen2.5-1.5b-MATH-True-val8'
+exp_name="test1"
 
 adv_estimator=grpo
 
@@ -36,7 +37,7 @@ max_num_gen_batches=10
 use_jepo=True
 jepo_delimiter="boxed\{"
 jepo_format_penalty=0.0
-jepo_beta_supp=0.1
+jepo_beta_supp=0.0
 jepo_beta_kl=0.1
 jepo_buffer_size=64
 jepo_steps=1
@@ -110,6 +111,9 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
+    +actor_rollout_ref.jepo_actor.optim.lr=4e-7 \
+    +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
+    +actor_rollout_ref.jepo_actor.optim.weight_decay=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
@@ -128,7 +132,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.n=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
