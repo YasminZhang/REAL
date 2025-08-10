@@ -126,12 +126,13 @@ class JEPOActor(DataParallelPPOActor):
         all_log_mean_answer_probs = []
         
         temperature = data.meta_info["temperature"]
-        
+        num_delimiter = 0
         for data_dict in tqdm(data_dicts):
             # Use the model directly with the optimized padded inputs
             # The _forward_micro_batch only gives us log_probs for specific tokens, 
             # but JEPO needs the full vocabulary distribution
             # for every single question
+            num_delimiter += np.sum(data_dict['has_delimiter'])
             with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
                 output = self.actor_module(
                     input_ids=data_dict['batch_input_ids'].detach(),
@@ -151,7 +152,7 @@ class JEPOActor(DataParallelPPOActor):
             all_advantages.append(jepo_advs)
             all_cot_log_probs.append(cot_log_probs) 
             all_log_mean_answer_probs.append(log_mean)
-        
+        print("number of responses has delimiter:", num_delimiter)
         # Concatenate results
         jepo_advs = torch.cat(all_advantages, dim=0)
         cot_log_probs = torch.cat(all_cot_log_probs, dim=0)

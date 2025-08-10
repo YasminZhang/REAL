@@ -137,16 +137,32 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         batch_size = len(all_incorrect_batch.batch["prompts"])
         print(f"Running JEPO training with {batch_size} samples...")
 
+        # Get micro batch size from config, fallback to full batch if not specified
+        micro_batch_size = getattr(self.config.data, 'jepo_micro_batch_size', batch_size)
+        
         all_metrics = defaultdict(list)
         
         # Perform JEPO steps on the provided batch
         for step in range(self.jepo_config.jepo_steps):
-            metrics = self._perform_jepo_training_step(all_incorrect_batch)
+            # Process batch in micro batches to avoid OOM
+            step_metrics = defaultdict(list)
             
-            # Store metrics for this step
-            for key, value in metrics.items():
-                all_metrics[f'{key}_step_{step}'].append(value)
-                all_metrics[key].append(value)
+            for start_idx in range(0, batch_size, micro_batch_size):
+                end_idx = min(start_idx + micro_batch_size, batch_size)
+                micro_batch = all_incorrect_batch[start_idx:end_idx]
+                
+                metrics = self._perform_jepo_training_step(micro_batch)
+                
+                # Collect metrics from this micro batch
+                for key, value in metrics.items():
+                    step_metrics[key].append(value)
+            
+            # Average metrics across all micro batches for this step
+            for key, values in step_metrics.items():
+                if values:
+                    step_avg = np.mean(values)
+                    all_metrics[f'{key}_step_{step}'].append(step_avg)
+                    all_metrics[key].append(step_avg)
         
         # Return averaged metrics
         final_metrics = {}
@@ -357,7 +373,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
-                            jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size])
+                            jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size*self.config.actor_rollout_ref.rollout.n])
                             metrics.update(jepo_metrics)
                             print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
                             all_incorrect_batch = None # clear the jepo batch

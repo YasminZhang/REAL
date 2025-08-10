@@ -35,11 +35,12 @@ max_num_gen_batches=10
 
 # JEPO specific parameters
 use_jepo=True
-jepo_delimiter="boxed\{"
+jepo_delimiter="\\boxed\{"
 jepo_format_penalty=0.0
 jepo_beta_supp=0.0
 jepo_beta_kl=0.1
 jepo_buffer_size=64
+jepo_micro_batch_size=8
 jepo_steps=1
 jepo_update_frequency=100000
 
@@ -77,6 +78,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
+    +data.jepo_micro_batch_size=${jepo_micro_batch_size} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
