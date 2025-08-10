@@ -814,6 +814,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
             lr = self.jepo_actor_lr_scheduler.get_last_lr()[0] if self.jepo_actor_lr_scheduler else 0.0
+            print("jepo optim lr:", lr*1e7)
             metrics["jepo_actor/lr"] = lr
             if self.jepo_actor_lr_scheduler:
                 self.jepo_actor_lr_scheduler.step()

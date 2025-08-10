@@ -112,8 +112,6 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     +actor_rollout_ref.jepo_actor.optim.lr=4e-7 \
-    +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
-    +actor_rollout_ref.jepo_actor.optim.weight_decay=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
@@ -147,7 +145,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.test_freq=5 \
     trainer.save_freq=10 \
     trainer.total_epochs=5 \
