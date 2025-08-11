@@ -29,8 +29,12 @@ class JEPOConfig:
     beta_supp: float = 1.0
     beta_kl: float = 0.1
     buffer_size: int = 1000
-    jepo_steps: int = 5
-
+    jepo_steps: int = 5,
+    epochs: int = 1,
+    mini_batch_size_per_gpu: int = 8,  # questions per optimizer step per rank
+    micro_batch_size_per_gpu: int = 1,  # questions per backward pass per rank
+    responses_micro_batch_size: int = 8  # responses per question when calculating loss
+    
 
 def compute_single_jepo_advantages(
     response_tokens: List[List[int]],

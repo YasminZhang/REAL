@@ -39,10 +39,13 @@ jepo_delimiter="\\boxed\{"
 jepo_format_penalty=0.0
 jepo_beta_supp=0.0
 jepo_beta_kl=0.1
-jepo_buffer_size=64 # number of prompts
-jepo_micro_batch_size=8 # number of prompts
+jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
+jepo_epochs=1
+jepo_mini_batch_size_per_gpu=8. # question per optimization step
+jepo_micro_batch_size_per_gpu=1 # question per backward
+jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
 
 # Ray - single node setup for 1.5B
 NNODES=1
@@ -78,7 +81,6 @@ python3 -m recipe.dapo.main_jepo_dapo \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
-    +data.jepo_micro_batch_size=${jepo_micro_batch_size} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
@@ -91,6 +93,10 @@ python3 -m recipe.dapo.main_jepo_dapo \
     algorithm.jepo_buffer_size=${jepo_buffer_size} \
     algorithm.jepo_steps=${jepo_steps} \
     algorithm.jepo_update_frequency=${jepo_update_frequency} \
+    +algorithm.jepo_epochs=${jepo_epochs} \
+    +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
+    +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
+    +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \

@@ -100,11 +100,11 @@ class JEPOActor(DataParallelPPOActor):
         # -------- config --------
         jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
         epochs = int(jepo_cfg.get("epochs", 1))
-        mini_bs = int(jepo_cfg.get("mini_batch_size", 1))                # questions per optimizer step
+        mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))        # questions per optimizer step per rank
         micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 1))      # questions per backward call
-        resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 4))  # responses per backward inside a question
-        format_penalty = float(jepo_cfg.get("format_penalty", 1.0))
-        beta_supp = float(jepo_cfg.get("beta_supp", 1.0))
+        resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))  # responses per backward inside a question
+        format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
+        beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
         temperature = float(data.meta_info["temperature"])
 
         # -------- prepare data_dicts (one per question) --------
