@@ -2,8 +2,8 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-#exp_name='JEPO-DAPO-Qwen2.5-1.5b-MATH-True-val8'
-exp_name="test1"
+exp_name='JEPO-DAPO-Qwen2.5-1.5b-MATH-True-val8-math500'
+#exp_name="test1"
 
 adv_estimator=grpo
 
