@@ -35,7 +35,7 @@ max_num_gen_batches=10
 
 # JEPO specific parameters
 use_jepo=True
-jepo_delimiter="boxed\{"
+jepo_delimiter="\\boxed\{"
 jepo_format_penalty=0.0
 jepo_beta_supp=0.0
 jepo_beta_kl=0.1
@@ -52,7 +52,7 @@ NGPUS_PER_NODE=8
 MODEL_PATH="Qwen/Qwen2.5-Math-1.5B"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=data/dsr_sub.parquet
-TEST_FILE=data/aime.parquet
+TEST_FILE=data/math.parquet
 
 # Algorithm
 temperature=1.0
