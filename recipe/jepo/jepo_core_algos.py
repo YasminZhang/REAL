@@ -482,3 +482,143 @@ def compute_jepo_from_logits_sparse(
         jepo_advantage = jepo_advantage.to(dtype)
 
     return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob
+
+import math
+import numpy as np
+import torch
+from contextlib import nullcontext
+
+# --- helper: slice a single question's data_dict by response indices ---
+def _slice_data_dict(dd, idxs):
+    def take_list(lst): return [lst[i] for i in idxs]
+    return {
+        "batch_input_ids": dd["batch_input_ids"][idxs],
+        "attention_mask": dd["attention_mask"][idxs],
+        "position_ids": dd["position_ids"][idxs],
+        "cot_start_positions": take_list(dd["cot_start_positions"]),
+        "answer_start_positions": take_list(dd["answer_start_positions"]),
+        "cot_tokens_list": take_list(dd["cot_tokens_list"]),
+        "ground_truth_answer_tokens": take_list(dd["ground_truth_answer_tokens"]),
+        "has_delimiter": take_list(dd["has_delimiter"]),
+    }
+
+def _chunk_list(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
+# --- Two-pass step for ONE question (internally micro-batches responses) ---
+def jepo_two_pass_step_for_one_question(
+    model,
+    data_dict,
+    temperature: float,
+    beta_supp: float,
+    format_penalty: float,
+    responses_micro_bs: int = 16,
+    vocab_chunk: int = 8192,
+    device_name: str = "cuda",
+    accum_scale: float = 1.0,
+):
+    """
+    Returns detached metrics and does backward() internally (per response chunk).
+    """
+    dev = data_dict["batch_input_ids"].device
+    B = len(data_dict["cot_start_positions"])
+    all_idx = torch.arange(B, device=dev)
+
+    # ---- PASS 1: no-grad -> detached answer log-probs for ALL responses ----
+    ans_det_chunks = []
+    with torch.no_grad():
+        for s in range(0, B, responses_micro_bs):
+            idxs = all_idx[s:s+responses_micro_bs]
+            dd = _slice_data_dict(data_dict, idxs.tolist())
+            with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+                out = model(
+                    input_ids=dd["batch_input_ids"].detach(),
+                    attention_mask=dd["attention_mask"],
+                    position_ids=dd["position_ids"],
+                    use_cache=False,
+                )
+                logits = out.logits
+                logits.div_(temperature)
+            # only need detached answer_log_probs here
+            _, _, answer_lp, _ = compute_jepo_from_logits_sparse(
+                logits, dd, format_penalty, dd["has_delimiter"], vocab_chunk=vocab_chunk
+            )
+            ans_det_chunks.append(answer_lp.detach().float().cpu())
+            del out, logits
+    ans_det = torch.cat(ans_det_chunks, dim=0)               # [B] on CPU
+    lse_all = torch.logsumexp(ans_det, dim=0)                # scalar
+    d = ans_det - lse_all
+    if B > 1:
+        lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+        v_i = lse_others - math.log(B - 1)
+    else:
+        v_i = ans_det.new_full((B,), float("-inf"))
+    log_mean_det = lse_all - math.log(B)                     # scalar
+    # JEPO advantage A_i (detached)
+    A = (log_mean_det - v_i)
+    A = (A - A.mean()) / (A.std(unbiased=False) + 1e-8)
+    A = A.clamp(-1.0, 1.0)
+    # softmax weights for exact grad of logsumexp
+    w = torch.softmax(ans_det, dim=0)
+
+    # move small vectors back to GPU
+    A = A.to(dev)
+    w = w.to(dev)
+
+    # ---- PASS 2: with-grad -> stream response chunks and backprop per chunk ----
+    total_loss_val = 0.0
+    jepo_loss_tot = 0.0
+    supp_loss_tot = 0.0
+    cot_lp_tot = 0.0
+    ans_lp_tot = 0.0
+
+    for s in range(0, B, responses_micro_bs):
+        idxs = all_idx[s:s+responses_micro_bs]
+        dd = _slice_data_dict(data_dict, idxs.tolist())
+
+        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+            out = model(
+                input_ids=dd["batch_input_ids"].detach(),
+                attention_mask=dd["attention_mask"],
+                position_ids=dd["position_ids"],
+                use_cache=False,
+            )
+            logits = out.logits
+            logits.div_(temperature)
+
+        jepo_advs_chunk, cot_lp_chunk, ans_lp_chunk, _ = compute_jepo_from_logits_sparse(
+            logits, dd, format_penalty, dd["has_delimiter"], vocab_chunk=vocab_chunk
+        )
+        # Use *global* detached A and w for exact first-order gradient, avoid keeping big graphs
+        A_chunk = A[idxs]
+        w_chunk = w[idxs]
+
+        # loss decomposition (values for logging; gradient via current chunk tensors)
+        jepo_loss_part = (A_chunk * cot_lp_chunk).sum() / B
+        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk).sum()
+        loss_chunk = (jepo_loss_part + supp_loss_part) * accum_scale
+
+        loss_chunk.backward()  # free activations after each chunk
+
+        # detach for metrics
+        total_loss_val += float(loss_chunk.detach())
+        jepo_loss_tot += float(jepo_loss_part.detach())
+        supp_loss_tot += float(supp_loss_part.detach())
+        cot_lp_tot += float(cot_lp_chunk.detach().sum())
+        ans_lp_tot += float(ans_lp_chunk.detach().sum())
+
+        del out, logits, jepo_advs_chunk, cot_lp_chunk, ans_lp_chunk, dd
+        torch.cuda.empty_cache()
+
+    # Aggregate per-question metrics
+    metrics_q = {
+        "total_loss": total_loss_val,
+        "jepo_loss": jepo_loss_tot,
+        "supp_loss": supp_loss_tot,
+        "jepo_advs_mean": float(A.mean().item()),
+        "jepo_advs_std": float(A.std(unbiased=False).item()),
+        "cot_log_probs_mean": float(cot_lp_tot / max(1, B)),
+        "log_mean_answer_probs_mean": float(log_mean_det.item()),
+    }
+    return metrics_q

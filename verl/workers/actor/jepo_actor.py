@@ -47,7 +47,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question
 
 __all__ = ["JEPOActor"]
 
@@ -60,9 +60,16 @@ def compute_response_mask(data: DataProto):
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 
+from contextlib import nullcontext
+import math
+import numpy as np
+import torch
+
+def _chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 
 class JEPOActor(DataParallelPPOActor):
-    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         logger.info("Initialized JEPO Actor")
@@ -78,7 +85,6 @@ class JEPOActor(DataParallelPPOActor):
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
 
-        # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
@@ -86,28 +92,31 @@ class JEPOActor(DataParallelPPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
+    @GPUMemoryLogger(role="jepo actor", logger=logger)
     def update_policy(self, data: DataProto):
         self.actor_module.train()
         self.actor_optimizer.zero_grad()
 
-        # Compute response mask and JEPO advantages for the whole batch first
-        if "response_mask" not in data.batch:
-            data.batch["response_mask"] = compute_response_mask(data)
-        
-        jepo_config = data.meta_info.get("jepo_config", {})
+        # -------- config --------
+        jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
+        epochs = int(jepo_cfg.get("epochs", 1))
+        mini_bs = int(jepo_cfg.get("mini_batch_size", 1))                # questions per optimizer step
+        micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 1))      # questions per backward call
+        resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 4))  # responses per backward inside a question
+        format_penalty = float(jepo_cfg.get("format_penalty", 1.0))
+        beta_supp = float(jepo_cfg.get("beta_supp", 1.0))
+        temperature = float(data.meta_info["temperature"])
+
+        # -------- prepare data_dicts (one per question) --------
         model_inputs = {**data.batch, **data.non_tensor_batch}
         ground_truths = model_inputs.get("reward_model", {})
-        ground_truths_tokens = np.array([self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths], dtype=object)
-        delimiter = jepo_config.get("delimiter", "\n\n")
-        print(f"Using delimiter: {delimiter}")
-        format_penalty = jepo_config.get("format_penalty", 1.0)
-        beta_supp = jepo_config.get("beta_supp", 1.0)
-        beta_kl = jepo_config.get("beta_kl", 0.1)
+        ground_truths_tokens = np.array(
+            [self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths],
+            dtype=object,
+        )
+        delimiter = jepo_cfg.get("delimiter", "\n\n")
         pad_token = self._cached_tokenizer.pad_token_id
 
-        # Get data dictionaries for creating DataProto objects
-        # data_dicts contains all questions.
-        #breakpoint()
         data_dicts = compute_jepo_advantages(
             response_tokens=data.batch["responses"],
             prompt_tokens=data.batch["prompts"],
@@ -118,77 +127,89 @@ class JEPOActor(DataParallelPPOActor):
             device=self.actor_module.device,
             pad_token=pad_token,
             index=data.non_tensor_batch["uid"],
-            tokenizer=self._cached_tokenizer
+            tokenizer=self._cached_tokenizer,
         )
-        
-        # Process each data dict to compute log probabilities using parent's _forward_micro_batch
-        all_advantages = []
-        all_cot_log_probs = []
-        all_log_mean_answer_probs = []
-        
-        temperature = data.meta_info["temperature"]
-        num_delimiter = 0
-        for data_dict in tqdm(data_dicts):
-            # Use the model directly with the optimized padded inputs
-            # The _forward_micro_batch only gives us log_probs for specific tokens, 
-            # but JEPO needs the full vocabulary distribution
-            # for every single question
-            num_delimiter += np.sum(data_dict['has_delimiter'])
-            with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
-                output = self.actor_module(
-                    input_ids=data_dict['batch_input_ids'].detach(),
-                    attention_mask=data_dict['attention_mask'],
-                    position_ids=data_dict['position_ids'],
-                    use_cache=False,
-                )
-                logits = output.logits
-                logits.div_(temperature)
 
-            # Compute JEPO advantages from log probabilities
-            # No full log_softmax here.
-            print("Finish forward; computing sparse log-probs")
-            jepo_advs, cot_log_probs, _, log_mean = compute_jepo_from_logits_sparse(
-                logits, data_dict, format_penalty, data_dict['has_delimiter'], vocab_chunk=8192
-            )
+        # -------- meters --------
+        meters = dict(
+            jepo_loss=0.0,
+            supp_loss=0.0,
+            total_loss=0.0,
+            grad_norm=0.0,
+            jepo_advs_mean=0.0,
+            jepo_advs_std=0.0,
+            cot_log_probs_mean=0.0,
+            log_mean_answer_probs_mean=0.0,
+        )
+        meter_count = 0
+        num_delim = 0
 
-            print("Finish computing JEPO advantages")
-            all_advantages.append(jepo_advs)
-            all_cot_log_probs.append(cot_log_probs) 
-            all_log_mean_answer_probs.append(log_mean)
-        print("number of responses has delimiter:", num_delimiter)
-        # Concatenate results
-        jepo_advs = torch.cat(all_advantages, dim=0)
-        cot_log_probs = torch.cat(all_cot_log_probs, dim=0)
-        log_mean_answer_probs = torch.stack(all_log_mean_answer_probs)
+        # -------- training loop (mini/micro/accum) --------
+        for _ in range(epochs):
+            for mini in _chunk_list(data_dicts, mini_bs):
+                N_q = len(mini)  # number of questions in this optimizer step
+                accum_steps = math.ceil(N_q / micro_bs)
+                self.actor_optimizer.zero_grad()
 
-        # data.batch["jepo_advs"] = jepo_advs
-        # data.batch["cot_log_probs"] = cot_log_probs
-        # data.batch["log_mean_answer_probs"] = log_mean_answer_probs
+                for k, micro in enumerate(_chunk_list(mini, micro_bs)):
+                    # FSDP: delay allreduce until last accum step
+                    sync_ctx = (
+                        self.actor_module.no_sync()
+                        if isinstance(self.actor_module, (FSDP, FSDPModule)) and (k < accum_steps - 1)
+                        else nullcontext()
+                    )
+                    with sync_ctx:
+                        # process a few questions; each question internally micro-batches its responses
+                        for dd in micro:
+                            num_delim += int(np.sum(dd["has_delimiter"]))
 
-        # Compute individual loss components
-        jepo_loss = (jepo_advs * cot_log_probs).mean()
-        supp_loss = (log_mean_answer_probs * beta_supp).mean()
-        
-        loss = jepo_loss + supp_loss
-        print("Finish calculate JEPO loss:", loss.item())
-        loss.backward()
-        print("Finish backward JEPO loss")
-        grad_norm = self._optimizer_step()
-        print("Finish doing gradient descent")
-        
-        # Collect metrics
-        metrics = {
-            "jepo_actor/jepo_loss": jepo_loss.detach().item(),
-            "jepo_actor/supp_loss": supp_loss.detach().item(),
-            "jepo_actor/total_loss": loss.detach().item(),
-            "jepo_actor/grad_norm": grad_norm.detach().item(),
-            "jepo_actor/jepo_advs_mean": jepo_advs.mean().detach().item(),
-            "jepo_actor/jepo_advs_std": jepo_advs.std().detach().item(),
-            "jepo_actor/cot_log_probs_mean": cot_log_probs.mean().detach().item(),
-            "jepo_actor/log_mean_answer_probs_mean": log_mean_answer_probs.mean().detach().item(),
+                            q_metrics = jepo_two_pass_step_for_one_question(
+                                model=self.actor_module,
+                                data_dict=dd,
+                                temperature=temperature,
+                                beta_supp=beta_supp,
+                                format_penalty=format_penalty,
+                                responses_micro_bs=resp_micro_bs,
+                                vocab_chunk=8192,
+                                device_name=self.device_name,
+                                accum_scale=1.0 / N_q,   # <-- scale for questions in each mini batc
+                            )
+                            # scale for gradient accumulation so overall grad is mean over the mini-batch
+                            # (we already averaged inside each question by B; now average over questions)
+                            for k2 in ("total_loss", "jepo_loss", "supp_loss"):
+                                q_metrics[k2] = q_metrics[k2] / accum_steps
+                            # keep the *last* loss tensor on graph? no—metrics are detached scalars already
+                            # just re-create a small scalar for backward scaling:
+                            loss_scale = q_metrics["total_loss"]
+                            # we already called backward *inside* the function;
+                            # here we only accumulate metrics (no extra backward)
+
+                            # accumulate meters
+                            for mk in meters:
+                                if mk in q_metrics:
+                                    meters[mk] += float(q_metrics[mk])
+                            meter_count += 1
+
+                # one optimizer step per mini-batch
+                grad_norm = self._optimizer_step()
+                meters["grad_norm"] += float(grad_norm.detach())
+
+        print("number of responses has delimiter:", num_delim)
+
+        # average meters
+        if meter_count > 0:
+            for k in meters:
+                meters[k] /= meter_count
+
+        return {
+            "jepo_actor/jepo_loss": meters["jepo_loss"],
+            "jepo_actor/supp_loss": meters["supp_loss"],
+            "jepo_actor/total_loss": meters["total_loss"],
+            "jepo_actor/grad_norm": meters["grad_norm"],
+            "jepo_actor/jepo_advs_mean": meters["jepo_advs_mean"],
+            "jepo_actor/jepo_advs_std": meters["jepo_advs_std"],
+            "jepo_actor/cot_log_probs_mean": meters["cot_log_probs_mean"],
+            "jepo_actor/log_mean_answer_probs_mean": meters["log_mean_answer_probs_mean"],
             "jepo_actor/beta_supp": beta_supp,
             "jepo_actor/format_penalty": format_penalty,
         }
-        
-        self.actor_optimizer.zero_grad()
-        return metrics

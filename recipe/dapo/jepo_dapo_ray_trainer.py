@@ -136,10 +136,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
 
         batch_size = len(all_incorrect_batch.batch["prompts"])
         print(f"Running JEPO training with {batch_size} samples...")
-
-        # Get micro batch size from config, fallback to full batch if not specified
-        micro_batch_size = getattr(self.config.data, 'jepo_micro_batch_size', batch_size)
-        micro_batch_size *= self.config.actor_rollout_ref.rollout.n  # Adjust for rollout n
         
         all_metrics = defaultdict(list)
         
@@ -148,15 +144,11 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             # Process batch in micro batches to avoid OOM
             step_metrics = defaultdict(list)
             
-            for start_idx in range(0, batch_size, micro_batch_size):
-                end_idx = min(start_idx + micro_batch_size, batch_size)
-                micro_batch = all_incorrect_batch[start_idx:end_idx]
+            metrics = self._perform_jepo_training_step(all_incorrect_batch)
                 
-                metrics = self._perform_jepo_training_step(micro_batch)
-                
-                # Collect metrics from this micro batch
-                for key, value in metrics.items():
-                    step_metrics[key].append(value)
+            # Collect metrics from this micro batch
+            for key, value in metrics.items():
+                step_metrics[key].append(value)
             
             # Average metrics across all micro batches for this step
             for key, values in step_metrics.items():
