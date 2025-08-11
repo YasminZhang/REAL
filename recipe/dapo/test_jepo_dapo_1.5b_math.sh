@@ -8,7 +8,7 @@ exp_name='deepscaler-1.5b-4k-True'
 adv_estimator=grpo
 
 use_kl_in_reward=False
-kl_coef=0.0
+kl_coef=0.001
 use_kl_loss=True
 kl_loss_coef=0.001
 
