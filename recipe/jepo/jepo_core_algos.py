@@ -336,3 +336,149 @@ def compute_jepo_advantages(
             data_dicts.append(data_dict)
     
     return data_dicts
+
+
+
+import math
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def _normalize(vec: torch.Tensor) -> torch.Tensor:
+    return (vec - vec.mean()) / (vec.std(unbiased=False) + 1e-8)
+
+def _rowwise_logsumexp_streaming(logits: torch.Tensor,
+                                 b_rows: torch.Tensor,
+                                 t_rows: torch.Tensor,
+                                 vocab_chunk: int = 8192) -> torch.Tensor:
+    """
+    Compute logsumexp over vocab for selected (b,t) rows in a memory-friendly way.
+    Returns: lse [U] for U = len(b_rows).
+    """
+    U = b_rows.numel()
+    device = logits.device
+    lse = torch.full((U,), float("-inf"), device=device, dtype=torch.float32)
+    V = logits.size(-1)
+
+    # stream over vocab to avoid materializing [U, V]
+    for start in range(0, V, vocab_chunk):
+        end = min(start + vocab_chunk, V)
+        # [U, w]
+        chunk = logits[b_rows, t_rows, start:end].float()
+        m = chunk.max(dim=-1).values                          # [U]
+        # logsumexp per chunk
+        lse_chunk = m + torch.log(torch.clamp(
+            torch.sum(torch.exp(chunk - m.unsqueeze(-1)), dim=-1), min=1e-45
+        ))
+        # combine across chunks in log-space
+        lse = torch.logaddexp(lse, lse_chunk)
+    return lse  # float32 for stability
+
+def _sparse_logprob_sum(logits: torch.Tensor,
+                        b_idx: torch.Tensor,
+                        t_idx: torch.Tensor,
+                        v_idx: torch.Tensor,
+                        B: int,
+                        vocab_chunk: int = 8192) -> torch.Tensor:
+    """
+    Compute sum of log-probs per batch item for a sparse set of (b,t,v) indices.
+    Returns: per-sample sums [B] with grad.
+    """
+    if b_idx.numel() == 0:
+        return torch.zeros(B, device=logits.device, dtype=logits.dtype)
+
+    # Group by unique (b,t) rows
+    rows = torch.stack([b_idx, t_idx], dim=1)                       # [K, 2]
+    uniq_rows, inv = torch.unique(rows, dim=0, return_inverse=True) # uniq_rows: [U,2], inv: [K]
+    b_rows = uniq_rows[:, 0].long()
+    t_rows = uniq_rows[:, 1].long()
+
+    # Row-wise logsumexp over vocab, streamed
+    lse_rows = _rowwise_logsumexp_streaming(logits, b_rows, t_rows, vocab_chunk=vocab_chunk)  # [U], float32
+
+    # Label logits for each sparse index
+    label_logits = logits[b_idx, t_idx, v_idx].float()              # [K], float32
+
+    # Sparse log-prob per index: log p = logit(label) - logsumexp(row)
+    logprob_flat = label_logits - lse_rows[inv]                     # [K], float32
+
+    # Sum per batch element
+    out = torch.zeros(B, device=logits.device, dtype=torch.float32)
+    out.index_add_(0, b_idx, logprob_flat)
+    return out.to(logits.dtype)                                     # match model dtype (bf16/fp16/fp32)
+
+def compute_jepo_from_logits_sparse(
+    logits, data_dict, format_penalty, has_delimiter, vocab_chunk=8192
+):
+    """
+    Memory-friendly replacement for compute_jepo_from_logprobs_*.
+    Takes raw logits [B, T, V] (already temperature-scaled), never builds BxTxV log_softmax.
+    """
+    device, dtype = logits.device, logits.dtype
+    B, T, V = logits.shape
+
+    cot_start = data_dict['cot_start_positions']
+    ans_start = data_dict['answer_start_positions']
+    cot_tok_list = data_dict['cot_tokens_list']
+    ans_tok_list = data_dict['ground_truth_answer_tokens']
+
+    # --- build sparse indices for CoT tokens ---
+    b_c, t_c, v_c = [], [], []
+    for i, (s, toks) in enumerate(zip(cot_start, cot_tok_list)):
+        if len(toks) == 0: continue
+        t = torch.arange(s, s + len(toks), device=device) - 1
+        m = (t >= 0) & (t < T)
+        if m.any():
+            b_c.append(torch.full((int(m.sum().item()),), i, device=device, dtype=torch.long))
+            t_c.append(t[m].long())
+            v_c.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
+    if b_c:
+        b_c = torch.cat(b_c); t_c = torch.cat(t_c); v_c = torch.cat(v_c)
+        cot_log_probs = _sparse_logprob_sum(logits, b_c, t_c, v_c, B, vocab_chunk=vocab_chunk)  # [B]
+    else:
+        cot_log_probs = torch.zeros(B, device=device, dtype=dtype)
+
+    # --- build sparse indices for ANSWER tokens ---
+    b_a, t_a, v_a = [], [], []
+    for i, (s, toks) in enumerate(zip(ans_start, ans_tok_list)):
+        if len(toks) == 0: continue
+        t = torch.arange(s, s + len(toks), device=device) - 1
+        m = (t >= 0) & (t < T)
+        if m.any():
+            b_a.append(torch.full((int(m.sum().item()),), i, device=device, dtype=torch.long))
+            t_a.append(t[m].long())
+            v_a.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
+    if b_a:
+        b_a = torch.cat(b_a); t_a = torch.cat(t_a); v_a = torch.cat(v_a)
+        answer_log_probs = _sparse_logprob_sum(logits, b_a, t_a, v_a, B, vocab_chunk=vocab_chunk)  # [B]
+    else:
+        answer_log_probs = torch.zeros(B, device=device, dtype=dtype)
+
+    # ---- log-mean over answers (WITH grad) ----
+    # scalar: log_mean = logsumexp(answer_log_probs) - log(B)
+    lse_all = torch.logsumexp(answer_log_probs.float(), dim=0)      # float32 for stability
+    log_mean_prob = (lse_all - math.log(max(B, 1))).to(dtype)
+
+    # ---- JEPO advantage (outside graph where appropriate) ----
+    with torch.no_grad():
+        ans_det = answer_log_probs.detach().float()
+        lse_all_d = torch.logsumexp(ans_det, dim=0)
+        d = ans_det - lse_all_d
+        if B > 1:
+            lse_others = lse_all_d + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+            v_i = lse_others - math.log(B - 1)
+        else:
+            v_i = ans_det.new_full((B,), float("-inf"))
+        A = (log_mean_prob.detach().float() - v_i)
+        A = torch.clamp(_normalize(A), -1.0, 1.0)
+
+        has_delim = torch.as_tensor(has_delimiter, device=device, dtype=torch.bool)
+        fmt = torch.where(has_delim,
+                          torch.zeros(B, device=device, dtype=torch.float32),
+                          torch.tensor(-float(format_penalty), device=device, dtype=torch.float32))
+        fmt = _normalize(fmt)
+
+        jepo_advantage = A  # + fmt if you want to include format penalty
+        jepo_advantage = jepo_advantage.to(dtype)
+
+    return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob

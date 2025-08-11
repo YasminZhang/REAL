@@ -47,7 +47,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_advantages_from_logprobs, compute_jepo_from_logprobs_fast_with_grad_mean
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse
 
 __all__ = ["JEPOActor"]
 
@@ -143,11 +143,13 @@ class JEPOActor(DataParallelPPOActor):
                 )
                 logits = output.logits
                 logits.div_(temperature)
-                log_probs_batch = torch.log_softmax(logits, dim=-1)
+
             # Compute JEPO advantages from log probabilities
-            print("Finish computing log probabilities")
-            jepo_advs, cot_log_probs, _, log_mean = compute_jepo_from_logprobs_fast_with_grad_mean(
-                log_probs_batch, data_dict, format_penalty, data_dict['has_delimiter'])
+            # No full log_softmax here.
+            print("Finish forward; computing sparse log-probs")
+            jepo_advs, cot_log_probs, _, log_mean = compute_jepo_from_logits_sparse(
+                logits, data_dict, format_penalty, data_dict['has_delimiter'], vocab_chunk=8192
+            )
 
             print("Finish computing JEPO advantages")
             all_advantages.append(jepo_advs)

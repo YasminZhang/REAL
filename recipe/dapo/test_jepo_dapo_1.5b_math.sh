@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='JEPO-DAPO-Qwen2.5-1.5b-MATH-True-val8-math500'
+exp_name='JEPO-dpsk-1.5b-True'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=1024
-max_response_length=3072
+max_response_length=8096
 enable_overlong_buffer=False
-overlong_buffer_len=3072
+overlong_buffer_len=8096
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -49,10 +49,10 @@ NNODES=1
 NGPUS_PER_NODE=8
 
 # Use 1.5B model
-MODEL_PATH="Qwen/Qwen2.5-Math-1.5B"
+MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=data/dsr_sub.parquet
-TEST_FILE=data/math.parquet
+TRAIN_FILE=data/train.parquet
+TEST_FILE=data/aime.parquet
 
 # Algorithm
 temperature=1.0
@@ -150,8 +150,8 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.val_before_train=False \
     trainer.test_freq=5 \
     trainer.save_freq=10 \
-    trainer.total_epochs=5 \
-    trainer.total_training_steps=100 \
+    trainer.total_epochs=50 \
+    trainer.total_training_steps=1000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.log_val_generations=5 
