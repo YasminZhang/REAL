@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='JEPO-dpsk-1.5b-True'
+exp_name='deepscaler-1.5b-4k-True'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -24,12 +24,13 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=64
+train_prompt_bsz=128
 n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 
 # DAPO
-enable_filter_groups=True
+# don't do filter.
+enable_filter_groups=False
 filter_groups_metric=acc
 max_num_gen_batches=10
 
@@ -58,10 +59,10 @@ TRAIN_FILE=data/train.parquet
 TEST_FILE=data/aime.parquet
 
 # Algorithm
-temperature=1.0
+temperature=0.6
 top_p=1.0
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+val_top_p=1.0
 
 # Performance Related Parameter - adjusted for 1.5B model
 sp_size=1  # Single sequence parallel for smaller model
@@ -102,6 +103,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     algorithm.filter_groups.metric=${filter_groups_metric} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
@@ -116,10 +118,11 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=3e-5 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     +actor_rollout_ref.jepo_actor.optim.lr=4e-7 \
+    +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
@@ -154,8 +157,8 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
-    trainer.test_freq=5 \
-    trainer.save_freq=10 \
+    trainer.test_freq=20 \
+    trainer.save_freq=20 \
     trainer.total_epochs=50 \
     trainer.total_training_steps=1000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
