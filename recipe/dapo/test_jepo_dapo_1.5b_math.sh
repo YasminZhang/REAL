@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=1024
-max_response_length=8096
+max_response_length=4096
 enable_overlong_buffer=False
-overlong_buffer_len=8096
+overlong_buffer_len=4096
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -43,7 +43,7 @@ jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
-jepo_mini_batch_size_per_gpu=8. # question per optimization step
+jepo_mini_batch_size_per_gpu=8 # question per optimization step
 jepo_micro_batch_size_per_gpu=1 # question per backward
 jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
 
