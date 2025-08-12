@@ -579,6 +579,7 @@ def jepo_two_pass_step_for_one_question(
     A = A.to(dev)
     A = (A + fmt).to(dev)
     w = w.to(dev)
+    print("Finish calculate advantage.")
 
     # ---- PASS 2: with-grad -> stream response chunks and backprop per chunk ----
     total_loss_val = 0.0
@@ -608,10 +609,9 @@ def jepo_two_pass_step_for_one_question(
         A_chunk = A[idxs]
         w_chunk = w[idxs]
         delimiter_mask = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
-
         # loss decomposition (values for logging; gradient via current chunk tensors)
         jepo_loss_part = (A_chunk * cot_lp_chunk * delimiter_mask).sum() / B
-        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk * delimiter_mask).sum()
+        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk * delimiter_mask).mean()
         
         # # compute kl loss
         # kld = kl_penalty(

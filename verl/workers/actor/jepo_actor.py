@@ -163,6 +163,7 @@ class JEPOActor(DataParallelPPOActor):
                         for dd in micro:
                             num_delim += int(np.sum(dd["has_delimiter"]))
                             if np.sum(dd["has_delimiter"]) == 0:
+                                print("All responses don't have delimiter.")
                                 continue
                             # if all don't have correct delimiter, skip all process.
                             q_metrics = jepo_two_pass_step_for_one_question(
