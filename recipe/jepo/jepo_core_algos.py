@@ -540,6 +540,82 @@ def compute_jepo_from_logits_sparse(
 
     return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob
 
+
+def compute_jepo_from_logits_efficient(
+    logits, data_dict, format_penalty, has_delimiter, vocab_chunk=8192
+):
+    """
+    Efficient replacement using standard shift and gather operations.
+    Much faster than sparse indexing approach.
+    """
+    device, dtype = logits.device, logits.dtype
+    B, T, V = logits.shape
+
+    cot_start = data_dict['cot_start_positions']
+    ans_start = data_dict['answer_start_positions']
+    cot_tok_list = data_dict['cot_tokens_list']
+    ans_tok_list = data_dict['ground_truth_answer_tokens']
+
+    # Standard language modeling setup: shift logits and create targets
+    shift_logits = logits[..., :-1, :].contiguous()  # [B, T-1, V]
+    shift_labels = torch.full((B, T-1), -100, dtype=torch.long, device=device)  # [B, T-1]
+    
+    # Create masks for CoT and answer regions
+    cot_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
+    ans_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
+    
+    # Fill in the target tokens and masks
+    for i in range(B):
+        # CoT tokens
+        cot_tokens = cot_tok_list[i]
+        cot_s = cot_start[i]
+        if len(cot_tokens) > 0:
+            cot_end = min(cot_s + len(cot_tokens), T-1)
+            cot_len = cot_end - cot_s
+            if cot_len > 0:
+                shift_labels[i, cot_s:cot_end] = torch.tensor(cot_tokens[:cot_len], device=device, dtype=torch.long)
+                cot_mask[i, cot_s:cot_end] = True
+        
+        # Answer tokens  
+        ans_tokens = ans_tok_list[i]
+        ans_s = ans_start[i]
+        if len(ans_tokens) > 0:
+            ans_end = min(ans_s + len(ans_tokens), T-1)
+            ans_len = ans_end - ans_s
+            if ans_len > 0:
+                shift_labels[i, ans_s:ans_end] = torch.tensor(ans_tokens[:ans_len], device=device, dtype=torch.long)
+                ans_mask[i, ans_s:ans_end] = True
+    
+    # Compute log probabilities efficiently without OOM
+    # Only compute log_softmax for positions we actually need
+    token_log_probs = torch.zeros((B, T-1), device=device, dtype=dtype)
+    valid_mask = (shift_labels != -100)
+    
+    if valid_mask.any():
+        # Get indices where we need to compute log probs
+        valid_b, valid_t = torch.where(valid_mask)
+        valid_labels = shift_labels[valid_mask]  # [num_valid]
+        
+        # Compute log softmax only for the needed positions
+        needed_logits = shift_logits[valid_b, valid_t]  # [num_valid, V]
+        needed_log_probs = F.log_softmax(needed_logits, dim=-1)  # [num_valid, V]
+        
+        # Gather the target token probabilities
+        target_log_probs = needed_log_probs.gather(-1, valid_labels.unsqueeze(-1)).squeeze(-1)  # [num_valid]
+        
+        # Put back into the full tensor
+        token_log_probs[valid_mask] = target_log_probs
+    
+    # Sum over CoT and answer regions
+    cot_log_probs = (token_log_probs * cot_mask.float()).sum(dim=-1)  # [B]
+    answer_log_probs = (token_log_probs * ans_mask.float()).sum(dim=-1)  # [B]
+    
+    # ---- log-mean over answers (WITH grad) ----
+    lse_all = torch.logsumexp(answer_log_probs.float(), dim=0)
+    log_mean_prob = (lse_all - math.log(max(B, 1))).to(dtype)
+
+    return cot_log_probs, answer_log_probs, log_mean_prob
+
 import math
 import numpy as np
 import torch

@@ -47,7 +47,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question, precompute_adv_for_dd, compute_advantages_with_dataproto, compute_jepo_adv_with_dataproto, compute_single_jepo_advantages, dummy_backward_fsdp_safe
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question, precompute_adv_for_dd, compute_advantages_with_dataproto, compute_jepo_adv_with_dataproto, compute_single_jepo_advantages, dummy_backward_fsdp_safe, compute_jepo_from_logits_efficient
 
 __all__ = ["JEPOActor"]
 
@@ -196,8 +196,8 @@ class JEPOActor(DataParallelPPOActor):
                             logits = out.logits
                             logits.div_(temperature)
                         
-                        # Compute CoT and answer log probabilities using the sparse function
-                        _, cot_log_probs, answer_log_probs, _ = compute_jepo_from_logits_sparse(
+                        # Compute CoT and answer log probabilities using the efficient function
+                         cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
                             logits=logits,
                             data_dict=micro_data_dict,
                             format_penalty=format_penalty,
@@ -211,7 +211,7 @@ class JEPOActor(DataParallelPPOActor):
                         
                         # Compute losses
                         jepo_loss_part = (micro_advantages * cot_log_probs).sum() / total_filtered
-                        supp_loss_part = beta_supp * (micro_weights * answer_log_probs).sum() / total_filtered
+                        supp_loss_part = beta_supp * (micro_weights * log_mean_answer_prob).sum() / total_filtered
                         
                         loss_chunk = (jepo_loss_part + supp_loss_part) / accum_steps
                         loss_chunk.backward()
