@@ -128,6 +128,7 @@ class JEPOActor(DataParallelPPOActor):
             pad_token=pad_token,
             index=data.non_tensor_batch["uid"],
             tokenizer=self._cached_tokenizer,
+            ref_log_prob=data.batch["ref_log_prob"]
         )
 
         # -------- meters --------
@@ -173,6 +174,7 @@ class JEPOActor(DataParallelPPOActor):
                                 vocab_chunk=8192,
                                 device_name=self.device_name,
                                 accum_scale=1.0 / N_q,   # <-- scale for questions in each mini batc
+                                ref_log_prob=dd.get("ref_log_prob", None),
                             )
                             # scale for gradient accumulation so overall grad is mean over the mini-batch
                             # (we already averaged inside each question by B; now average over questions)

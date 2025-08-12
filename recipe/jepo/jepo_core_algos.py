@@ -20,7 +20,7 @@ from copy import deepcopy
 import numpy as np
 from collections import defaultdict
 import verl.utils.torch_functional as verl_F
-
+from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 
 @dataclass
 class JEPOConfig:
@@ -45,7 +45,8 @@ def compute_single_jepo_advantages(
     model,
     device: torch.device,
     pad_token: int,
-    tokenizer
+    tokenizer,
+    ref_log_prob_uid: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # return shape [n],[n],[n],[n]
     # compute jepo adv for a single question
@@ -125,7 +126,8 @@ def compute_single_jepo_advantages(
         'cot_tokens_list': cot_tokens_list,
         'ground_truth_answer_tokens': ground_truth_answer_tokens,
         'has_delimiter': has_delimiter,
-        'max_len': max_len
+        'max_len': max_len,
+        'ref_log_prob': ref_log_prob_uid
     }
 
 def compute_jepo_advantages_from_logprobs(
@@ -304,6 +306,7 @@ def compute_jepo_advantages(
     pad_token,
     index,
     tokenizer,
+    ref_log_prob
 ):
 
     # response_tokens has shape [bsz, max_response_length]
@@ -317,6 +320,7 @@ def compute_jepo_advantages(
     for uid in uuid:
         uid_mask = (index == uid)
         response_tokens_uid = response_tokens[uid_mask]
+        ref_log_prob_uid = ref_log_prob[uid_mask]
         prompt_tokens_uid = prompt_tokens[uid_mask]
         ground_truth_answer_tokens_uid = ground_truth_answer_tokens[uid_mask]
         
@@ -331,7 +335,8 @@ def compute_jepo_advantages(
             model=model,
             device=device,
             pad_token=pad_token,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            ref_log_prob=ref_log_prob_uid
         )
         
         if 'data_dicts' not in locals():
@@ -521,6 +526,7 @@ def jepo_two_pass_step_for_one_question(
     vocab_chunk: int = 8192,
     device_name: str = "cuda",
     accum_scale: float = 1.0,
+    ref_log_prob: Optional[torch.Tensor] = None,
 ):
     """
     Returns detached metrics and does backward() internally (per response chunk).
@@ -601,6 +607,13 @@ def jepo_two_pass_step_for_one_question(
         # loss decomposition (values for logging; gradient via current chunk tensors)
         jepo_loss_part = (A_chunk * cot_lp_chunk).sum() / B
         supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk).sum()
+        
+        # # compute kl loss
+        # kld = kl_penalty(
+        #     logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
+        # )
+        # kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
         loss_chunk = (jepo_loss_part + supp_loss_part) * accum_scale
 
         loss_chunk.backward()  # free activations after each chunk
