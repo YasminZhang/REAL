@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-4k-True'
+exp_name='deepscaler-1.5b-4k-True-mask'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -37,8 +37,8 @@ max_num_gen_batches=10
 # JEPO specific parameters
 use_jepo=True
 jepo_delimiter="\\boxed\{"
-jepo_format_penalty=0.0
-jepo_beta_supp=0.0
+jepo_format_penalty=10
+jepo_beta_supp=0.01
 jepo_beta_kl=0.1
 jepo_buffer_size=64 # number of questions
 jepo_steps=1

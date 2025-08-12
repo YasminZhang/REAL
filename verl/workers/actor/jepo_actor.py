@@ -127,8 +127,7 @@ class JEPOActor(DataParallelPPOActor):
             device=self.actor_module.device,
             pad_token=pad_token,
             index=data.non_tensor_batch["uid"],
-            tokenizer=self._cached_tokenizer,
-            ref_log_prob=data.batch["ref_log_prob"]
+            tokenizer=self._cached_tokenizer
         )
 
         # -------- meters --------
@@ -163,7 +162,9 @@ class JEPOActor(DataParallelPPOActor):
                         # process a few questions; each question internally micro-batches its responses
                         for dd in micro:
                             num_delim += int(np.sum(dd["has_delimiter"]))
-
+                            if np.sum(dd["has_delimiter"]) == 0:
+                                continue
+                            # if all don't have correct delimiter, skip all process.
                             q_metrics = jepo_two_pass_step_for_one_question(
                                 model=self.actor_module,
                                 data_dict=dd,
@@ -173,8 +174,7 @@ class JEPOActor(DataParallelPPOActor):
                                 responses_micro_bs=resp_micro_bs,
                                 vocab_chunk=8192,
                                 device_name=self.device_name,
-                                accum_scale=1.0 / N_q,   # <-- scale for questions in each mini batc
-                                ref_log_prob=dd.get("ref_log_prob", None),
+                                accum_scale=1.0 / N_q,   # <-- scale for questions in each mini batch
                             )
                             # scale for gradient accumulation so overall grad is mean over the mini-batch
                             # (we already averaged inside each question by B; now average over questions)

@@ -46,7 +46,6 @@ def compute_single_jepo_advantages(
     device: torch.device,
     pad_token: int,
     tokenizer,
-    ref_log_prob_uid: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # return shape [n],[n],[n],[n]
     # compute jepo adv for a single question
@@ -127,7 +126,6 @@ def compute_single_jepo_advantages(
         'ground_truth_answer_tokens': ground_truth_answer_tokens,
         'has_delimiter': has_delimiter,
         'max_len': max_len,
-        'ref_log_prob': ref_log_prob_uid
     }
 
 def compute_jepo_advantages_from_logprobs(
@@ -306,7 +304,6 @@ def compute_jepo_advantages(
     pad_token,
     index,
     tokenizer,
-    ref_log_prob
 ):
 
     # response_tokens has shape [bsz, max_response_length]
@@ -320,7 +317,6 @@ def compute_jepo_advantages(
     for uid in uuid:
         uid_mask = (index == uid)
         response_tokens_uid = response_tokens[uid_mask]
-        ref_log_prob_uid = ref_log_prob[uid_mask]
         prompt_tokens_uid = prompt_tokens[uid_mask]
         ground_truth_answer_tokens_uid = ground_truth_answer_tokens[uid_mask]
         
@@ -336,7 +332,6 @@ def compute_jepo_advantages(
             device=device,
             pad_token=pad_token,
             tokenizer=tokenizer,
-            ref_log_prob=ref_log_prob_uid
         )
         
         if 'data_dicts' not in locals():
@@ -569,11 +564,20 @@ def jepo_two_pass_step_for_one_question(
     A = (log_mean_det - v_i)
     A = (A - A.mean()) / (A.std(unbiased=False) + 1e-8)
     A = A.clamp(-1.0, 1.0)
+
+    has_delim = torch.as_tensor(data_dict["has_delimiter"], device=dev, dtype=torch.bool)
+    fmt = torch.where(has_delim,
+                        torch.zeros(B, device=dev, dtype=torch.float32),
+                        torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32))
+    fmt = _normalize(fmt)
+    fmt.to(dev)
+    
     # softmax weights for exact grad of logsumexp
     w = torch.softmax(ans_det, dim=0)
 
     # move small vectors back to GPU
     A = A.to(dev)
+    A = (A + fmt).to(dev)
     w = w.to(dev)
 
     # ---- PASS 2: with-grad -> stream response chunks and backprop per chunk ----
@@ -603,10 +607,11 @@ def jepo_two_pass_step_for_one_question(
         # Use *global* detached A and w for exact first-order gradient, avoid keeping big graphs
         A_chunk = A[idxs]
         w_chunk = w[idxs]
+        delimiter_mask = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
 
         # loss decomposition (values for logging; gradient via current chunk tensors)
-        jepo_loss_part = (A_chunk * cot_lp_chunk).sum() / B
-        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk).sum()
+        jepo_loss_part = (A_chunk * cot_lp_chunk * delimiter_mask).sum() / B
+        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk * delimiter_mask).sum()
         
         # # compute kl loss
         # kld = kl_penalty(
