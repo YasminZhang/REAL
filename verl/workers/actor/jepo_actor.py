@@ -60,6 +60,19 @@ def compute_response_mask(data: DataProto):
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 
+def dummy_backward_fsdp_safe(model, scaler=None):
+    # zero scalar on the same device
+    z = torch.zeros((), device=next(model.parameters()).device)
+    for p in model.parameters():
+        if p.requires_grad:
+            # Touch the **param itself** so autograd/buckets match FSDP shards
+            z = z + (p * 0).sum()
+    if scaler is not None:
+        scaler.scale(z).backward()
+    else:
+        z.backward()
+
+
 from contextlib import nullcontext
 import math
 import numpy as np
@@ -161,11 +174,17 @@ class JEPOActor(DataParallelPPOActor):
                     with sync_ctx:
                         # process a few questions; each question internally micro-batches its responses
                         for dd in micro:
-                            num_delim += int(np.sum(dd["has_delimiter"]))
-                            if np.sum(dd["has_delimiter"]) == 0:
-                                print("All responses don't have delimiter.")
-                                continue
-                            # if all don't have correct delimiter, skip all process.
+                            # hd = dd["has_delimiter"]
+                            # if isinstance(hd, torch.Tensor):
+                            #     has_any = bool(hd.any().item())
+                            # else:
+                            #     has_any = np.count_nonzero(hd) > 0
+
+                            # if not has_any:
+                            #     # still do a tiny dummy backward to keep counts aligned
+                            #     dummy_backward_fsdp_safe(self.actor_module, scaler=None)
+                            #     continue
+                            num_delim += np.sum(dd["has_delimiter"])
                             q_metrics = jepo_two_pass_step_for_one_question(
                                 model=self.actor_module,
                                 data_dict=dd,

@@ -20,7 +20,7 @@ from copy import deepcopy
 import numpy as np
 from collections import defaultdict
 import verl.utils.torch_functional as verl_F
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+
 
 @dataclass
 class JEPOConfig:
@@ -45,7 +45,7 @@ def compute_single_jepo_advantages(
     model,
     device: torch.device,
     pad_token: int,
-    tokenizer,
+    tokenizer
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # return shape [n],[n],[n],[n]
     # compute jepo adv for a single question
@@ -125,7 +125,7 @@ def compute_single_jepo_advantages(
         'cot_tokens_list': cot_tokens_list,
         'ground_truth_answer_tokens': ground_truth_answer_tokens,
         'has_delimiter': has_delimiter,
-        'max_len': max_len,
+        'max_len': max_len
     }
 
 def compute_jepo_advantages_from_logprobs(
@@ -331,7 +331,7 @@ def compute_jepo_advantages(
             model=model,
             device=device,
             pad_token=pad_token,
-            tokenizer=tokenizer,
+            tokenizer=tokenizer
         )
         
         if 'data_dicts' not in locals():
@@ -521,7 +521,6 @@ def jepo_two_pass_step_for_one_question(
     vocab_chunk: int = 8192,
     device_name: str = "cuda",
     accum_scale: float = 1.0,
-    ref_log_prob: Optional[torch.Tensor] = None,
 ):
     """
     Returns detached metrics and does backward() internally (per response chunk).
@@ -579,7 +578,6 @@ def jepo_two_pass_step_for_one_question(
     A = A.to(dev)
     A = (A + fmt).to(dev)
     w = w.to(dev)
-    print("Finish calculate advantage.")
 
     # ---- PASS 2: with-grad -> stream response chunks and backprop per chunk ----
     total_loss_val = 0.0
@@ -609,16 +607,10 @@ def jepo_two_pass_step_for_one_question(
         A_chunk = A[idxs]
         w_chunk = w[idxs]
         delimiter_mask = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
+
         # loss decomposition (values for logging; gradient via current chunk tensors)
         jepo_loss_part = (A_chunk * cot_lp_chunk * delimiter_mask).sum() / B
         supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk * delimiter_mask).mean()
-        
-        # # compute kl loss
-        # kld = kl_penalty(
-        #     logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
-        # )
-        # kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
         loss_chunk = (jepo_loss_part + supp_loss_part) * accum_scale
 
         loss_chunk.backward()  # free activations after each chunk
