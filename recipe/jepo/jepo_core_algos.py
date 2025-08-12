@@ -21,6 +21,59 @@ import numpy as np
 from collections import defaultdict
 import verl.utils.torch_functional as verl_F
 
+def dummy_backward_fsdp_safe(model, scaler=None):
+    # Create a zero scalar that requires gradients
+    device = next(model.parameters()).device
+    z = torch.zeros((), device=device, requires_grad=True)
+    
+    # Touch each parameter to ensure FSDP buckets are aligned
+    for p in model.parameters():
+        if p.requires_grad:
+            # Add a tiny contribution that won't affect the loss but creates gradient flow
+            z = z + (p * 0).sum()
+    
+    # Ensure z requires gradients and has a computation graph
+    if z.requires_grad:
+        if scaler is not None:
+            scaler.scale(z).backward()
+        else:
+            z.backward()
+    else:
+        # Fallback: create a simple zero gradient flow
+        loss = torch.zeros((), device=device, requires_grad=True)
+        for p in model.parameters():
+            if p.requires_grad:
+                loss = loss + p.sum() * 0.0
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+import torch.distributed as dist
+
+def _to_tensor_list(x, device):
+    return torch.as_tensor(x, device=device) if not isinstance(x, torch.Tensor) else x.to(device)
+
+def _nonzero_idx(bool_list, device):
+    t = torch.as_tensor(bool_list, device=device, dtype=torch.bool)
+    return torch.nonzero(t, as_tuple=False).flatten()
+
+def _allreduce_sum_scalar(val: float | int, device) -> float:
+    t = torch.tensor([float(val)], device=device, dtype=torch.float32)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return float(t.item())
+
+def _maybe_dummy_backward(model):
+    # If you already have dummy_backward_fsdp_safe, call that instead.
+    try:
+        dummy_backward_fsdp_safe(model, scaler=None)
+    except NameError:
+        # ultra-cheap zero grad anchor
+        with torch.no_grad():
+            z = next(model.parameters()).sum() * 0.0
+        (z * 0.0).backward()
+
 
 @dataclass
 class JEPOConfig:
@@ -491,6 +544,7 @@ import math
 import numpy as np
 import torch
 from contextlib import nullcontext
+from verl import DataProto
 
 # --- helper: slice a single question's data_dict by response indices ---
 def _slice_data_dict(dd, idxs):
@@ -510,7 +564,6 @@ def _chunk_list(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
-# --- Two-pass step for ONE question (internally micro-batches responses) ---
 def jepo_two_pass_step_for_one_question(
     model,
     data_dict,
@@ -523,72 +576,77 @@ def jepo_two_pass_step_for_one_question(
     accum_scale: float = 1.0,
 ):
     """
-    Returns detached metrics and does backward() internally (per response chunk).
+    Uses precomputed A_full / w_full (if present). Filters to has_delimiter==True
+    BEFORE any with-grad work. Falls back to old pass-1 if cache missing.
     """
     dev = data_dict["batch_input_ids"].device
-    B = len(data_dict["cot_start_positions"])
+
+    # --- pull or build cached pass-1 items ---
+    if ("A_full" not in data_dict) or ("w_full" not in data_dict) or ("keep_idx" not in data_dict):
+        precompute_adv_for_dd(
+            model=model,
+            dd=data_dict,
+            temperature=temperature,
+            format_penalty=format_penalty,
+            responses_micro_bs=responses_micro_bs,
+            vocab_chunk=vocab_chunk,
+            device_name=device_name,
+        )
+
+    A_full = data_dict["A_full"]        # [B], detached
+    w_full = data_dict["w_full"]        # [B], detached
+    keep_idx = data_dict["keep_idx"]    # [K]
+    B_all = A_full.shape[0]             # original responses count
+    K = int(keep_idx.numel())
+
+    # --- Global denom for consistent scaling across ranks ---
+    denom_global = _allreduce_sum_scalar(K, device=dev)  # sum of kept responses over all ranks
+    if denom_global <= 0.0:
+        # no valid responses anywhere -> do a tiny dummy backward and return zeros
+        _maybe_dummy_backward(model)
+        return {
+            "total_loss": 0.0,
+            "jepo_loss": 0.0,
+            "supp_loss": 0.0,
+            "jepo_advs_mean": 0.0,
+            "jepo_advs_std": 0.0,
+            "cot_log_probs_mean": 0.0,
+            "log_mean_answer_probs_mean": float(data_dict.get("log_mean_det", 0.0)),
+        }
+
+    # If this rank has no valid responses, still do dummy backward so it participates in all-reduce
+    if K == 0:
+        _maybe_dummy_backward(model)
+        return {
+            "total_loss": 0.0,
+            "jepo_loss": 0.0,
+            "supp_loss": 0.0,
+            "jepo_advs_mean": 0.0,
+            "jepo_advs_std": 0.0,
+            "cot_log_probs_mean": 0.0,
+            "log_mean_answer_probs_mean": float(data_dict.get("log_mean_det", 0.0)),
+        }
+
+    # --- Filter FIRST (this is the key change) ---
+    dd_keep = _slice_data_dict(data_dict, keep_idx.tolist())
+    # No need to carry has_delimiter mask anymore; all kept are True
+    B = K
     all_idx = torch.arange(B, device=dev)
 
-    # ---- PASS 1: no-grad -> detached answer log-probs for ALL responses ----
-    ans_det_chunks = []
-    with torch.no_grad():
-        for s in range(0, B, responses_micro_bs):
-            idxs = all_idx[s:s+responses_micro_bs]
-            dd = _slice_data_dict(data_dict, idxs.tolist())
-            with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-                out = model(
-                    input_ids=dd["batch_input_ids"].detach(),
-                    attention_mask=dd["attention_mask"],
-                    position_ids=dd["position_ids"],
-                    use_cache=False,
-                )
-                logits = out.logits
-                logits.div_(temperature)
-            # only need detached answer_log_probs here
-            _, _, answer_lp, _ = compute_jepo_from_logits_sparse(
-                logits, dd, format_penalty, dd["has_delimiter"], vocab_chunk=vocab_chunk
-            )
-            ans_det_chunks.append(answer_lp.detach().float().cpu())
-            del out, logits
-    ans_det = torch.cat(ans_det_chunks, dim=0)               # [B] on CPU
-    lse_all = torch.logsumexp(ans_det, dim=0)                # scalar
-    d = ans_det - lse_all
-    if B > 1:
-        lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-        v_i = lse_others - math.log(B - 1)
-    else:
-        v_i = ans_det.new_full((B,), float("-inf"))
-    log_mean_det = lse_all - math.log(B)                     # scalar
-    # JEPO advantage A_i (detached)
-    A = (log_mean_det - v_i)
-    A = (A - A.mean()) / (A.std(unbiased=False) + 1e-8)
-    A = A.clamp(-1.0, 1.0)
+    # Attach the precomputed A/w restricted to kept indices
+    A_keep = A_full.index_select(0, keep_idx).to(dev)  # [K]
+    w_keep = w_full.index_select(0, keep_idx).to(dev)  # [K]
 
-    has_delim = torch.as_tensor(data_dict["has_delimiter"], device=dev, dtype=torch.bool)
-    fmt = torch.where(has_delim,
-                        torch.zeros(B, device=dev, dtype=torch.float32),
-                        torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32))
-    fmt = _normalize(fmt)
-    fmt.to(dev)
-    
-    # softmax weights for exact grad of logsumexp
-    w = torch.softmax(ans_det, dim=0)
-
-    # move small vectors back to GPU
-    A = A.to(dev)
-    A = (A + fmt).to(dev)
-    w = w.to(dev)
-
-    # ---- PASS 2: with-grad -> stream response chunks and backprop per chunk ----
     total_loss_val = 0.0
     jepo_loss_tot = 0.0
     supp_loss_tot = 0.0
     cot_lp_tot = 0.0
     ans_lp_tot = 0.0
 
+    # Chunk over kept responses only
     for s in range(0, B, responses_micro_bs):
         idxs = all_idx[s:s+responses_micro_bs]
-        dd = _slice_data_dict(data_dict, idxs.tolist())
+        dd = _slice_data_dict(dd_keep, idxs.tolist())
 
         with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
             out = model(
@@ -600,39 +658,304 @@ def jepo_two_pass_step_for_one_question(
             logits = out.logits
             logits.div_(temperature)
 
-        jepo_advs_chunk, cot_lp_chunk, ans_lp_chunk, _ = compute_jepo_from_logits_sparse(
-            logits, dd, format_penalty, dd["has_delimiter"], vocab_chunk=vocab_chunk
+        # compute sparse logprobs only for these kept responses
+        _, cot_lp_chunk, ans_lp_chunk, _ = compute_jepo_from_logits_sparse(
+            logits, dd, format_penalty, [True]*len(idxs), vocab_chunk=vocab_chunk
         )
-        # Use *global* detached A and w for exact first-order gradient, avoid keeping big graphs
-        A_chunk = A[idxs]
-        w_chunk = w[idxs]
-        delimiter_mask = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
+        A_chunk = A_keep.index_select(0, idxs)
+        w_chunk = w_keep.index_select(0, idxs)
 
-        # loss decomposition (values for logging; gradient via current chunk tensors)
-        jepo_loss_part = (A_chunk * cot_lp_chunk * delimiter_mask).sum() / B
-        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk * delimiter_mask).mean()
+        # Normalize by GLOBAL number of kept responses so loss scale is consistent across ranks
+        jepo_loss_part = (A_chunk * cot_lp_chunk).sum() / denom_global
+        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk).sum() / denom_global
+
         loss_chunk = (jepo_loss_part + supp_loss_part) * accum_scale
+        loss_chunk.backward()
 
-        loss_chunk.backward()  # free activations after each chunk
-
-        # detach for metrics
         total_loss_val += float(loss_chunk.detach())
         jepo_loss_tot += float(jepo_loss_part.detach())
         supp_loss_tot += float(supp_loss_part.detach())
         cot_lp_tot += float(cot_lp_chunk.detach().sum())
         ans_lp_tot += float(ans_lp_chunk.detach().sum())
 
-        del out, logits, jepo_advs_chunk, cot_lp_chunk, ans_lp_chunk, dd
+        del out, logits, cot_lp_chunk, ans_lp_chunk, dd
         torch.cuda.empty_cache()
 
-    # Aggregate per-question metrics
+    # Metrics (A stats over kept responses; log_mean from all responses)
     metrics_q = {
         "total_loss": total_loss_val,
         "jepo_loss": jepo_loss_tot,
         "supp_loss": supp_loss_tot,
-        "jepo_advs_mean": float(A.mean().item()),
-        "jepo_advs_std": float(A.std(unbiased=False).item()),
+        "jepo_advs_mean": float(A_keep.mean().item()),
+        "jepo_advs_std": float(A_keep.std(unbiased=False).item()),
         "cot_log_probs_mean": float(cot_lp_tot / max(1, B)),
-        "log_mean_answer_probs_mean": float(log_mean_det.item()),
+        "log_mean_answer_probs_mean": float(data_dict.get("log_mean_det", 0.0)),
     }
     return metrics_q
+
+
+
+@torch.no_grad()
+def precompute_adv_for_dd(
+    model,
+    dd: dict,
+    temperature: float,
+    format_penalty: float,
+    responses_micro_bs: int,
+    vocab_chunk: int,
+    device_name: str,
+):
+    """
+    Fills dd with:
+      - 'A_full' [B] (detached, computed over ALL responses)
+      - 'w_full' [B] (detached, softmax weights over ALL responses)
+      - 'keep_idx' [K] (indices with has_delimiter=True)
+      - 'log_mean_det' (scalar, detached)
+    """
+    dev = dd["batch_input_ids"].device
+    B = len(dd["cot_start_positions"])
+    all_idx = torch.arange(B, device=dev)
+    ans_det_chunks = []
+
+    for s in range(0, B, responses_micro_bs):
+        idxs = all_idx[s:s+responses_micro_bs]
+        dd_s = _slice_data_dict(dd, idxs.tolist())
+        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+            out = model(
+                input_ids=dd_s["batch_input_ids"].detach(),
+                attention_mask=dd_s["attention_mask"],
+                position_ids=dd_s["position_ids"],
+                use_cache=False,
+            )
+            logits = out.logits
+            logits.div_(temperature)
+        # only need detached answer log-probs here
+        _, _, ans_lp, _ = compute_jepo_from_logits_sparse(
+            logits, dd_s, format_penalty, dd_s["has_delimiter"], vocab_chunk=vocab_chunk
+        )
+        ans_det_chunks.append(ans_lp.detach().float().cpu())
+        del out, logits
+
+    ans_det = torch.cat(ans_det_chunks, dim=0).to(dev)       # [B]
+    lse_all = torch.logsumexp(ans_det, dim=0)                # scalar
+    d = ans_det - lse_all
+    if B > 1:
+        lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+        v_i = lse_others - math.log(B - 1)
+    else:
+        v_i = ans_det.new_full((B,), float("-inf"))
+    log_mean_det = lse_all - math.log(B)                     # scalar
+
+    # JEPO advantage A_i over ALL responses (detach)
+    A = (log_mean_det - v_i)
+    A = (A - A.mean()) / (A.std(unbiased=False) + 1e-8)
+    A = A.clamp(-1.0, 1.0)
+
+    # format penalty term (normalized) – keep same as your pass-2 logic
+    has_delim = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
+    fmt = torch.where(
+        has_delim,
+        torch.zeros(B, device=dev, dtype=torch.float32),
+        torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
+    )
+    fmt = _normalize(fmt)  # you already have this helper
+    A_full = (A + fmt).detach()
+
+    # weights for exact gradient of logsumexp over ALL responses
+    w_full = torch.softmax(ans_det, dim=0).detach()
+
+    keep_idx = _nonzero_idx(dd["has_delimiter"], device=dev)
+
+    # cache in dd (CPU or GPU is fine; keep on same dev to avoid copies later)
+    dd["A_full"] = A_full
+    dd["w_full"] = w_full
+    dd["keep_idx"] = keep_idx
+    dd["log_mean_det"] = log_mean_det.detach().item()
+
+
+@torch.no_grad()
+def compute_advantages_with_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
+    """
+    Compute advantages and necessary info for data, maintaining DataProto class.
+    This function does not require any gradients.
+    
+    Args:
+        data: DataProto object containing batch data
+        model: The actor model 
+        jepo_cfg: JEPO configuration dictionary
+        cached_tokenizer: Tokenizer for encoding/decoding
+        
+    Returns:
+        DataProto object with added advantage information
+    """
+    # Extract config
+    format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
+    temperature = float(data.meta_info["temperature"])
+    resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))
+    delimiter = jepo_cfg.get("delimiter", "\n\n")
+    
+    # Prepare model inputs
+    model_inputs = {**data.batch, **data.non_tensor_batch}
+    ground_truths = model_inputs.get("reward_model", {})
+    ground_truths_tokens = np.array(
+        [cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths],
+        dtype=object,
+    )
+    pad_token = cached_tokenizer.pad_token_id
+    
+    # Compute advantages for all questions
+    data_dicts = compute_jepo_advantages(
+        response_tokens=data.batch["responses"],
+        prompt_tokens=data.batch["prompts"],
+        ground_truth_answer_tokens=ground_truths_tokens,
+        delimiter_str=delimiter,
+        format_penalty=format_penalty,
+        model=model,
+        device=model.device,
+        pad_token=pad_token,
+        index=data.non_tensor_batch["uid"],
+        tokenizer=cached_tokenizer
+    )
+    
+    # Precompute advantages for all data dicts
+    for dd in data_dicts:
+        precompute_adv_for_dd(
+            model=model,
+            dd=dd,
+            temperature=temperature,
+            format_penalty=format_penalty,
+            responses_micro_bs=resp_micro_bs,
+            vocab_chunk=8192,
+            device_name="cuda" if torch.cuda.is_available() else "cpu",
+        )
+    
+    # Add advantage information to the DataProto
+    data.non_tensor_batch["jepo_data_dicts"] = data_dicts
+    
+    return data
+
+
+@torch.no_grad()
+def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
+    """
+    Compute JEPO advantages and necessary info for data, maintaining DataProto class.
+    This function does not require any gradients and only adds keys and values to data proto.
+    
+    Args:
+        data: DataProto object containing batch data
+        model: The actor model 
+        jepo_cfg: JEPO configuration dictionary
+        cached_tokenizer: Tokenizer for encoding/decoding
+        
+    Returns:
+        DataProto object with added advantage information in data.batch
+    """
+    # Extract config
+    format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
+    temperature = float(data.meta_info["temperature"])
+    resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))
+    delimiter = jepo_cfg.get("delimiter", "\n\n")
+    
+    # Prepare model inputs
+    model_inputs = {**data.batch, **data.non_tensor_batch}
+    ground_truths = model_inputs.get("reward_model", {})
+    ground_truths_tokens = np.array(
+        [cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths],
+        dtype=object,
+    )
+    pad_token = cached_tokenizer.pad_token_id
+    
+    # Compute advantages for all questions
+    data_dicts = compute_jepo_advantages(
+        response_tokens=data.batch["responses"],
+        prompt_tokens=data.batch["prompts"],
+        ground_truth_answer_tokens=ground_truths_tokens,
+        delimiter_str=delimiter,
+        format_penalty=format_penalty,
+        model=model,
+        device=model.device,
+        pad_token=pad_token,
+        index=data.non_tensor_batch["uid"],
+        tokenizer=cached_tokenizer
+    )
+    
+    # Precompute advantages for all data dicts
+    for dd in data_dicts:
+        precompute_adv_for_dd(
+            model=model,
+            dd=dd,
+            temperature=temperature,
+            format_penalty=format_penalty,
+            responses_micro_bs=resp_micro_bs,
+            vocab_chunk=8192,
+            device_name="cuda" if torch.cuda.is_available() else "cpu",
+        )
+    
+    # Extract A and w from data_dicts and reconstruct batch tensors
+    batch_size = data.batch["responses"].shape[0]
+    device = data.batch["responses"].device
+    
+    # Initialize tensors for advantages and weights
+    jepo_adv = torch.zeros(batch_size, device=device)
+    jepo_weights = torch.zeros(batch_size, device=device) 
+    has_delimiter = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    
+    # Initialize lists for position information needed for log prob calculation
+    all_cot_start_positions = []
+    all_answer_start_positions = []
+    all_cot_tokens_list = []
+    all_ground_truth_answer_tokens = []
+    
+    # Map data_dict results back to original batch indices
+    current_idx = 0
+    for dd in data_dicts:
+        n_responses = len(dd["has_delimiter"])
+        
+        # Get advantages and weights from precomputed data
+        A_full = dd["A_full"]  # [n_responses]
+        w_full = dd["w_full"]  # [n_responses]
+        has_delim = dd["has_delimiter"]  # list of booleans
+        
+        # Place back into batch tensors
+        jepo_adv[current_idx:current_idx + n_responses] = A_full
+        jepo_weights[current_idx:current_idx + n_responses] = w_full
+        has_delimiter[current_idx:current_idx + n_responses] = torch.tensor(has_delim, device=device)
+        
+        # Collect position information for log prob calculation
+        all_cot_start_positions.extend(dd["cot_start_positions"])
+        all_answer_start_positions.extend(dd["answer_start_positions"])
+        all_cot_tokens_list.extend(dd["cot_tokens_list"])
+        all_ground_truth_answer_tokens.extend(dd["ground_truth_answer_tokens"])
+        
+        current_idx += n_responses
+    
+    # Reconstruct batch_input_ids, attention_mask, position_ids from data_dicts
+    all_batch_input_ids = []
+    all_attention_mask = []
+    all_position_ids = []
+    
+    for dd in data_dicts:
+        all_batch_input_ids.append(dd["batch_input_ids"])
+        all_attention_mask.append(dd["attention_mask"])
+        all_position_ids.append(dd["position_ids"])
+    
+    # Concatenate all tensors
+    batch_input_ids = torch.cat(all_batch_input_ids, dim=0)
+    attention_mask = torch.cat(all_attention_mask, dim=0)
+    position_ids = torch.cat(all_position_ids, dim=0)
+    
+    # Add to data.batch
+    data.batch["jepo_adv"] = jepo_adv
+    data.batch["jepo_weights"] = jepo_weights
+    data.batch["has_delimiter"] = has_delimiter
+    data.batch["batch_input_ids"] = batch_input_ids
+    data.batch["batch_attention_mask"] = attention_mask
+    data.batch["batch_position_ids"] = position_ids
+    
+    # Add position information to non_tensor_batch for log prob calculation
+    data.non_tensor_batch["cot_start_positions"] = all_cot_start_positions
+    data.non_tensor_batch["answer_start_positions"] = all_answer_start_positions
+    data.non_tensor_batch["cot_tokens_list"] = all_cot_tokens_list
+    data.non_tensor_batch["ground_truth_answer_tokens"] = all_ground_truth_answer_tokens
+    
+    return data

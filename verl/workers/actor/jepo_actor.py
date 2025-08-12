@@ -47,7 +47,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question, precompute_adv_for_dd, compute_advantages_with_dataproto, compute_jepo_adv_with_dataproto, compute_single_jepo_advantages, dummy_backward_fsdp_safe
 
 __all__ = ["JEPOActor"]
 
@@ -60,17 +60,7 @@ def compute_response_mask(data: DataProto):
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 
-def dummy_backward_fsdp_safe(model, scaler=None):
-    # zero scalar on the same device
-    z = torch.zeros((), device=next(model.parameters()).device)
-    for p in model.parameters():
-        if p.requires_grad:
-            # Touch the **param itself** so autograd/buckets match FSDP shards
-            z = z + (p * 0).sum()
-    if scaler is not None:
-        scaler.scale(z).backward()
-    else:
-        z.backward()
+
 
 
 from contextlib import nullcontext
@@ -120,28 +110,18 @@ class JEPOActor(DataParallelPPOActor):
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
         temperature = float(data.meta_info["temperature"])
 
-        # -------- prepare data_dicts (one per question) --------
-        model_inputs = {**data.batch, **data.non_tensor_batch}
-        ground_truths = model_inputs.get("reward_model", {})
-        ground_truths_tokens = np.array(
-            [self._cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths],
-            dtype=object,
-        )
-        delimiter = jepo_cfg.get("delimiter", "\n\n")
-        pad_token = self._cached_tokenizer.pad_token_id
-
-        data_dicts = compute_jepo_advantages(
-            response_tokens=data.batch["responses"],
-            prompt_tokens=data.batch["prompts"],
-            ground_truth_answer_tokens=ground_truths_tokens,
-            delimiter_str=delimiter,
-            format_penalty=format_penalty,
+        # -------- compute advantages and add to data --------
+        data = compute_jepo_adv_with_dataproto(
+            data=data,
             model=self.actor_module,
-            device=self.actor_module.device,
-            pad_token=pad_token,
-            index=data.non_tensor_batch["uid"],
-            tokenizer=self._cached_tokenizer
+            jepo_cfg=jepo_cfg,
+            cached_tokenizer=self._cached_tokenizer
         )
+        
+        # -------- filter data where has_delimiter is True --------
+        has_delimiter_mask = data.batch["has_delimiter"]
+        filtered_data = data[has_delimiter_mask]
+
 
         # -------- meters --------
         meters = dict(
@@ -157,14 +137,31 @@ class JEPOActor(DataParallelPPOActor):
         meter_count = 0
         num_delim = 0
 
+        # Get total number of filtered responses for scaling
+        total_filtered = filtered_data.batch["responses"].shape[0]
+        num_delim = total_filtered
+        
+        # Extract stored advantages and weights
+        jepo_advantages = filtered_data.batch["jepo_adv"]  # [N_filtered]
+        jepo_weights = filtered_data.batch["jepo_weights"]  # [N_filtered]
+        
         # -------- training loop (mini/micro/accum) --------
         for _ in range(epochs):
-            for mini in _chunk_list(data_dicts, mini_bs):
-                N_q = len(mini)  # number of questions in this optimizer step
-                accum_steps = math.ceil(N_q / micro_bs)
+            # Split filtered data into mini-batches
+            filtered_indices = torch.arange(total_filtered, device=filtered_data.batch["responses"].device)
+            
+            for mini_start in range(0, total_filtered, mini_bs):
+                mini_end = min(mini_start + mini_bs, total_filtered)
+                mini_indices = filtered_indices[mini_start:mini_end]
+                N_responses = len(mini_indices)  # number of responses in this optimizer step
+                accum_steps = math.ceil(N_responses / micro_bs)
                 self.actor_optimizer.zero_grad()
 
-                for k, micro in enumerate(_chunk_list(mini, micro_bs)):
+                for k in range(accum_steps):
+                    micro_start = k * micro_bs
+                    micro_end = min(micro_start + micro_bs, N_responses)
+                    micro_indices = mini_indices[micro_start:micro_end]
+                    
                     # FSDP: delay allreduce until last accum step
                     sync_ctx = (
                         self.actor_module.no_sync()
@@ -172,45 +169,65 @@ class JEPOActor(DataParallelPPOActor):
                         else nullcontext()
                     )
                     with sync_ctx:
-                        # process a few questions; each question internally micro-batches its responses
-                        for dd in micro:
-                            # hd = dd["has_delimiter"]
-                            # if isinstance(hd, torch.Tensor):
-                            #     has_any = bool(hd.any().item())
-                            # else:
-                            #     has_any = np.count_nonzero(hd) > 0
-
-                            # if not has_any:
-                            #     # still do a tiny dummy backward to keep counts aligned
-                            #     dummy_backward_fsdp_safe(self.actor_module, scaler=None)
-                            #     continue
-                            num_delim += np.sum(dd["has_delimiter"])
-                            q_metrics = jepo_two_pass_step_for_one_question(
-                                model=self.actor_module,
-                                data_dict=dd,
-                                temperature=temperature,
-                                beta_supp=beta_supp,
-                                format_penalty=format_penalty,
-                                responses_micro_bs=resp_micro_bs,
-                                vocab_chunk=8192,
-                                device_name=self.device_name,
-                                accum_scale=1.0 / N_q,   # <-- scale for questions in each mini batch
+                        if len(micro_indices) == 0:
+                            # Still do a dummy backward to keep FSDP sync aligned across ranks
+                            dummy_backward_fsdp_safe(self.actor_module, scaler=None)
+                            continue
+                        # Get micro-batch data
+                        micro_data = filtered_data[micro_indices]
+                        B_micro = len(micro_indices)
+                        
+                        # Prepare data dict for compute_jepo_from_logits_sparse
+                        micro_data_dict = {
+                            'cot_start_positions': [micro_data.non_tensor_batch["cot_start_positions"][i] for i in range(B_micro)],
+                            'answer_start_positions': [micro_data.non_tensor_batch["answer_start_positions"][i] for i in range(B_micro)],
+                            'cot_tokens_list': [micro_data.non_tensor_batch["cot_tokens_list"][i] for i in range(B_micro)],
+                            'ground_truth_answer_tokens': [micro_data.non_tensor_batch["ground_truth_answer_tokens"][i] for i in range(B_micro)]
+                        }
+                        
+                        # Forward pass to get logits
+                        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                            out = self.actor_module(
+                                input_ids=micro_data.batch["batch_input_ids"],
+                                attention_mask=micro_data.batch["batch_attention_mask"],
+                                position_ids=micro_data.batch["batch_position_ids"],
+                                use_cache=False,
                             )
-                            # scale for gradient accumulation so overall grad is mean over the mini-batch
-                            # (we already averaged inside each question by B; now average over questions)
-                            for k2 in ("total_loss", "jepo_loss", "supp_loss"):
-                                q_metrics[k2] = q_metrics[k2] / accum_steps
-                            # keep the *last* loss tensor on graph? no—metrics are detached scalars already
-                            # just re-create a small scalar for backward scaling:
-                            loss_scale = q_metrics["total_loss"]
-                            # we already called backward *inside* the function;
-                            # here we only accumulate metrics (no extra backward)
-
-                            # accumulate meters
-                            for mk in meters:
-                                if mk in q_metrics:
-                                    meters[mk] += float(q_metrics[mk])
-                            meter_count += 1
+                            logits = out.logits
+                            logits.div_(temperature)
+                        
+                        # Compute CoT and answer log probabilities using the sparse function
+                        _, cot_log_probs, answer_log_probs, _ = compute_jepo_from_logits_sparse(
+                            logits=logits,
+                            data_dict=micro_data_dict,
+                            format_penalty=format_penalty,
+                            has_delimiter=[True] * B_micro,  # All filtered data has delimiter
+                            vocab_chunk=8192
+                        )
+                        
+                        # Get advantages and weights for this micro-batch
+                        micro_advantages = jepo_advantages[micro_indices]
+                        micro_weights = jepo_weights[micro_indices]
+                        
+                        # Compute losses
+                        jepo_loss_part = (micro_advantages * cot_log_probs).sum() / total_filtered
+                        supp_loss_part = beta_supp * (micro_weights * answer_log_probs).sum() / total_filtered
+                        
+                        loss_chunk = (jepo_loss_part + supp_loss_part) / accum_steps
+                        loss_chunk.backward()
+                        
+                        # Accumulate metrics
+                        meters["total_loss"] += float(loss_chunk.detach())
+                        meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
+                        meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
+                        meters["jepo_advs_mean"] += float(micro_advantages.mean().detach())
+                        meters["jepo_advs_std"] += float(micro_advantages.std().detach())
+                        meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
+                        meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
+                        meter_count += 1
+                        
+                        del out, logits, cot_log_probs, answer_log_probs
+                        torch.cuda.empty_cache()
 
                 # one optimizer step per mini-batch
                 grad_norm = self._optimizer_step()
