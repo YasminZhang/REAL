@@ -82,7 +82,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             epochs=getattr(self.config.algorithm, 'jepo_epochs', 1),
             mini_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_mini_batch_size_per_gpu', 8),
             micro_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_micro_batch_size_per_gpu', 1),
-            responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8)
+            responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8),
+            num_response_per_question=getattr(self.config.actor_rollout_ref.rollout, 'n', 1)
         )
         
         self.jepo_metrics = defaultdict(list)

@@ -22,32 +22,12 @@ from collections import defaultdict
 import verl.utils.torch_functional as verl_F
 
 def dummy_backward_fsdp_safe(model, scaler=None):
-    # Create a zero scalar that requires gradients
     device = next(model.parameters()).device
-    z = torch.zeros((), device=device, requires_grad=True)
-    
-    # Touch each parameter to ensure FSDP buckets are aligned
-    for p in model.parameters():
-        if p.requires_grad:
-            # Add a tiny contribution that won't affect the loss but creates gradient flow
-            z = z + (p * 0).sum()
-    
-    # Ensure z requires gradients and has a computation graph
-    if z.requires_grad:
-        if scaler is not None:
-            scaler.scale(z).backward()
-        else:
-            z.backward()
-    else:
-        # Fallback: create a simple zero gradient flow
-        loss = torch.zeros((), device=device, requires_grad=True)
-        for p in model.parameters():
-            if p.requires_grad:
-                loss = loss + p.sum() * 0.0
-        if scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+    input_ids = torch.zeros(1, 1, dtype=torch.long, device=device)
+    model.train()
+    out = model(input_ids=input_ids)
+    loss = out.logits[..., :1].sum() * 0.0
+    (scaler.scale(loss) if scaler else loss).backward()
 
 import torch.distributed as dist
 
@@ -87,6 +67,7 @@ class JEPOConfig:
     mini_batch_size_per_gpu: int = 8,  # questions per optimizer step per rank
     micro_batch_size_per_gpu: int = 1,  # questions per backward pass per rank
     responses_micro_batch_size: int = 8  # responses per question when calculating loss
+    num_response_per_question: int = 8
     
 
 def compute_single_jepo_advantages(

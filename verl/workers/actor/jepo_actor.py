@@ -106,9 +106,11 @@ class JEPOActor(DataParallelPPOActor):
         mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))        # questions per optimizer step per rank
         micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 1))      # questions per backward call
         resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))  # responses per backward inside a question
+        accum_steps = int(jepo_cfg.get("accum_steps", 4))               # fixed accumulate steps for consistent backwards
         format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
         temperature = float(data.meta_info["temperature"])
+        n = int(jepo_cfg.get("num_response_per_question", 8))  # number of responses per question
 
         # -------- compute advantages and add to data --------
         data = compute_jepo_adv_with_dataproto(
@@ -144,68 +146,91 @@ class JEPOActor(DataParallelPPOActor):
         # Get total number of filtered responses for scaling
         total_filtered = filtered_data.batch["responses"].shape[0]
         num_delim = total_filtered
+        num_responses = data.batch["responses"].shape[0]
         
         # Extract stored advantages and weights
         jepo_advantages = filtered_data.batch["jepo_adv"]  # [N_filtered]
         jepo_weights = filtered_data.batch["jepo_weights"]  # [N_filtered]
         
-        # -------- training loop --------
+        # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
             
-            if total_filtered == 0:
-                # No filtered data - do dummy backward to maintain FSDP sync
-                dummy_backward_fsdp_safe(self.actor_module, scaler=None)
-            else:
-                # Process all filtered data at once
-                data_dict = {
-                    'cot_start_positions': filtered_data.batch["cot_start_positions"].cpu().tolist(),
-                    'answer_start_positions': filtered_data.batch["answer_start_positions"].cpu().tolist(),
-                    'cot_tokens_list': [filtered_data.batch["cot_tokens"][i][filtered_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(total_filtered)],
-                    'ground_truth_answer_tokens': [filtered_data.batch["ground_truth_tokens"][i][filtered_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(total_filtered)]
-                }
+            for k in range(accum_steps):
+                step_start = k * micro_bs
+                step_end = min(step_start + micro_bs, total_filtered)
                 
-                # Forward pass to get logits
-                with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
-                    out = self.actor_module(
-                        input_ids=filtered_data.batch["batch_input_ids"],
-                        attention_mask=filtered_data.batch["batch_attention_mask"],
-                        position_ids=filtered_data.batch["batch_position_ids"],
-                        use_cache=False,
-                    )
-                    logits = out.logits
-                    logits.div_(temperature)
-                
-                # Compute CoT and answer log probabilities
-                cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
-                    logits=logits,
-                    data_dict=data_dict,
-                    format_penalty=format_penalty,
-                    has_delimiter=[True] * total_filtered,  # All filtered data has delimiter
-                    vocab_chunk=8192
+                # FSDP: delay allreduce until last accum step
+                sync_ctx = (
+                    self.actor_module.no_sync()
+                    if isinstance(self.actor_module, (FSDP, FSDPModule)) and (k < accum_steps - 1)
+                    else nullcontext()
                 )
-                
-                # Compute losses
-                jepo_loss = (jepo_advantages * cot_log_probs).sum() / total_filtered
-                supp_loss = beta_supp * (jepo_weights * log_mean_answer_prob).sum() / total_filtered
-                
-                total_loss = jepo_loss + supp_loss
-                total_loss.backward()
-                
-                # Update metrics
-                meters["total_loss"] += float(total_loss.detach())
-                meters["jepo_loss"] += float(jepo_loss.detach())
-                meters["supp_loss"] += float(supp_loss.detach())
-                meters["jepo_advs_mean"] += float(jepo_advantages.mean().detach())
-                meters["jepo_advs_std"] += float(jepo_advantages.std().detach())
-                meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
-                meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
-                meter_count += 1
-                
-                del out, logits, cot_log_probs, answer_log_probs
-                torch.cuda.empty_cache()
+                with sync_ctx:
+                    if step_start >= total_filtered:
+                        # Still do a dummy backward to keep FSDP sync aligned across ranks
+                        dummy_backward_fsdp_safe(self.actor_module, scaler=None)
+                    else:
+                        # Get step data by slicing filtered_data
+                        step_indices = torch.arange(step_start, step_end, device=filtered_data.batch["responses"].device)
+                        step_data = filtered_data[step_indices]
+                        B_step = len(step_indices)
+                        
+                        # Prepare data dict for compute_jepo_from_logits_efficient
+                        # Convert tensors back to lists for the function interface
+                        step_data_dict = {
+                            'cot_start_positions': step_data.batch["cot_start_positions"].cpu().tolist(),
+                            'answer_start_positions': step_data.batch["answer_start_positions"].cpu().tolist(),
+                            'cot_tokens_list': [step_data.batch["cot_tokens"][i][step_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)],
+                            'ground_truth_answer_tokens': [step_data.batch["ground_truth_tokens"][i][step_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)]
+                        }
+                        
+                        # Forward pass to get logits
+                        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                            out = self.actor_module(
+                                input_ids=step_data.batch["batch_input_ids"],
+                                attention_mask=step_data.batch["batch_attention_mask"],
+                                position_ids=step_data.batch["batch_position_ids"],
+                                use_cache=False,
+                            )
+                            logits = out.logits
+                            logits.div_(temperature)
+                        
+                        # Compute CoT and answer log probabilities using the efficient function
+                        cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
+                            logits=logits,
+                            data_dict=step_data_dict,
+                            format_penalty=format_penalty,
+                            has_delimiter=[True] * B_step,  # All filtered data has delimiter
+                            vocab_chunk=8192
+                        )
+                        
+                        # Get advantages and weights for this step
+                        step_advantages = jepo_advantages[step_indices]
+                        step_weights = jepo_weights[step_indices]
+                        
+                        # Compute losses
+                        jepo_loss_part = (step_advantages * cot_log_probs).sum() / num_responses
+                        supp_loss_part = beta_supp * (step_weights * log_mean_answer_prob).sum() / num_responses
+                        
+                        loss_chunk = (jepo_loss_part + supp_loss_part) / accum_steps
+                        print("finish calculate jepo loss")
+                        loss_chunk.backward()
+                        
+                        # Accumulate metrics
+                        meters["total_loss"] += float(loss_chunk.detach())
+                        meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
+                        meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
+                        meters["jepo_advs_mean"] += float(step_advantages.mean().detach())
+                        meters["jepo_advs_std"] += float(step_advantages.std().detach())
+                        meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
+                        meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
+                        meter_count += 1
+                        
+                        del out, logits, cot_log_probs, answer_log_probs
+                        torch.cuda.empty_cache()
 
-            # Optimizer step
+            # one optimizer step per epoch
             grad_norm = self._optimizer_step()
             meters["grad_norm"] += float(grad_norm.detach())
 
