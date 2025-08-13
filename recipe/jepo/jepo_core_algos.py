@@ -67,7 +67,8 @@ class JEPOConfig:
     mini_batch_size_per_gpu: int = 8,  # questions per optimizer step per rank
     micro_batch_size_per_gpu: int = 1,  # questions per backward pass per rank
     responses_micro_batch_size: int = 8  # responses per question when calculating loss
-    num_response_per_question: int = 8
+    num_response_per_question: int = 8,
+    accum_steps: int = 4,  # fixed accumulate steps for consistent backwards
     
 
 def compute_single_jepo_advantages(

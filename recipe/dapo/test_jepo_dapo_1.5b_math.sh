@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-4k-True-mask-test'
+exp_name='deepscaler-1.5b-4k-True-grpo'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -13,7 +13,7 @@ use_kl_loss=True
 kl_loss_coef=0.001
 
 clip_ratio_low=0.2
-clip_ratio_high=0.28
+clip_ratio_high=0.2
 
 max_prompt_length=1024
 max_response_length=4096
@@ -37,13 +37,14 @@ max_num_gen_batches=10
 # JEPO specific parameters
 use_jepo=True
 jepo_delimiter="\\boxed\{"
-jepo_format_penalty=10
+jepo_format_penalty=1
 jepo_beta_supp=0.001
 jepo_beta_kl=0.1
 jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
-jepo_epochs=1
+jepo_epochs=3
+jepo_accum_steps=4
 jepo_mini_batch_size_per_gpu=8 # question per optimization step
 jepo_micro_batch_size_per_gpu=1 # question per backward
 jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
@@ -98,6 +99,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
     +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
+    +algorithm.jepo_accum_steps=${jepo_accum_steps} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
