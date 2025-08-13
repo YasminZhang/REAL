@@ -122,8 +122,8 @@ def compute_single_jepo_advantages(
             has_delimiter.append(False)
         cot_str = response_str.split(delimiter_str)[0].strip()
         cot_tokens = tokenizer.encode(cot_str, add_special_tokens=False)
-        if len(cot_tokens) >= max_response_length:
-            gt_length = len(ground_truth_answer_tokens[i])
+        gt_length = len(ground_truth_answer_tokens[i])
+        if len(cot_tokens) + delimiter_token_length + gt_length > max_response_length:
             cot_tokens = cot_tokens[:(max_response_length - gt_length - delimiter_token_length)]
         cot_tokens_list.append(cot_tokens)
     #breakpoint()
@@ -587,7 +587,7 @@ def compute_jepo_from_logits_efficient(
                 ans_mask[i, ans_s:ans_end] = True
     
     # Compute log probabilities efficiently without OOM
-    # Only compute log_softmax for positions we actually need
+    # Chunk the computation to handle long sequences with large vocab
     token_log_probs = torch.zeros((B, T-1), device=device, dtype=dtype)
     valid_mask = (shift_labels != -100)
     
@@ -595,16 +595,34 @@ def compute_jepo_from_logits_efficient(
         # Get indices where we need to compute log probs
         valid_b, valid_t = torch.where(valid_mask)
         valid_labels = shift_labels[valid_mask]  # [num_valid]
+        num_valid = len(valid_b)
         
-        # Compute log softmax only for the needed positions
-        needed_logits = shift_logits[valid_b, valid_t]  # [num_valid, V]
-        needed_log_probs = F.log_softmax(needed_logits, dim=-1)  # [num_valid, V]
+        # Chunk size to avoid OOM - adjust based on available memory
+        # Conservative estimate: ~1K positions at a time for large vocab
+        chunk_size = min(vocab_chunk // 100, 1024)  # vocab_chunk is typically 8192, so this gives ~80 positions
         
-        # Gather the target token probabilities
-        target_log_probs = needed_log_probs.gather(-1, valid_labels.unsqueeze(-1)).squeeze(-1)  # [num_valid]
-        
-        # Put back into the full tensor
-        token_log_probs[valid_mask] = target_log_probs
+        for start_idx in range(0, num_valid, chunk_size):
+            end_idx = min(start_idx + chunk_size, num_valid)
+            
+            # Get chunk indices
+            chunk_b = valid_b[start_idx:end_idx]
+            chunk_t = valid_t[start_idx:end_idx]
+            chunk_labels = valid_labels[start_idx:end_idx]
+            
+            # Compute log softmax only for this chunk
+            chunk_logits = shift_logits[chunk_b, chunk_t]  # [chunk_size, V]
+            chunk_log_probs = F.log_softmax(chunk_logits, dim=-1)  # [chunk_size, V]
+            
+            # Gather the target token probabilities
+            chunk_target_probs = chunk_log_probs.gather(-1, chunk_labels.unsqueeze(-1)).squeeze(-1)  # [chunk_size]
+            
+            # Put back into the full tensor
+            chunk_mask = torch.zeros_like(valid_mask)
+            chunk_mask[valid_b[start_idx:end_idx], valid_t[start_idx:end_idx]] = True
+            token_log_probs[chunk_mask] = chunk_target_probs
+            
+            # Clean up intermediate tensors
+            del chunk_logits, chunk_log_probs, chunk_target_probs, chunk_mask
     
     # Sum over CoT and answer regions
     cot_log_probs = (token_log_probs * cot_mask.float()).sum(dim=-1)  # [B]
@@ -1006,19 +1024,71 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
         current_idx += n_responses
     
     # Reconstruct batch_input_ids, attention_mask, position_ids from data_dicts
+    # First, find the maximum sequence length across all data_dicts
+    max_seq_len = 0
     all_batch_input_ids = []
     all_attention_mask = []
     all_position_ids = []
     
     for dd in data_dicts:
+        max_seq_len = max(max_seq_len, dd["batch_input_ids"].shape[1])
         all_batch_input_ids.append(dd["batch_input_ids"])
         all_attention_mask.append(dd["attention_mask"])
         all_position_ids.append(dd["position_ids"])
     
+    # Pad all tensors to the same length
+    pad_token_id = cached_tokenizer.pad_token_id
+    padded_batch_input_ids = []
+    padded_attention_mask = []
+    padded_position_ids = []
+    
+    for i, (input_ids, attn_mask, pos_ids) in enumerate(zip(all_batch_input_ids, all_attention_mask, all_position_ids)):
+        current_len = input_ids.shape[1]
+        if current_len < max_seq_len:
+            pad_len = max_seq_len - current_len
+            
+            # Pad input_ids with pad_token_id
+            padded_input_ids = F.pad(input_ids, (0, pad_len), value=pad_token_id)
+            
+            # Pad attention_mask with 0s
+            padded_attn_mask = F.pad(attn_mask, (0, pad_len), value=0)
+            
+            # Pad position_ids with 0s
+            padded_pos_ids = F.pad(pos_ids, (0, pad_len), value=0)
+            
+            padded_batch_input_ids.append(padded_input_ids)
+            padded_attention_mask.append(padded_attn_mask)
+            padded_position_ids.append(padded_pos_ids)
+        else:
+            padded_batch_input_ids.append(input_ids)
+            padded_attention_mask.append(attn_mask)
+            padded_position_ids.append(pos_ids)
+    
     # Concatenate all tensors
-    batch_input_ids = torch.cat(all_batch_input_ids, dim=0)
-    attention_mask = torch.cat(all_attention_mask, dim=0)
-    position_ids = torch.cat(all_position_ids, dim=0)
+    batch_input_ids = torch.cat(padded_batch_input_ids, dim=0)
+    attention_mask = torch.cat(padded_attention_mask, dim=0)
+    position_ids = torch.cat(padded_position_ids, dim=0)
+    
+    # Convert position information to tensors for data.batch
+    # Pad cot_tokens_list and ground_truth_answer_tokens to same length for batching
+    max_cot_len = max(len(tokens) for tokens in all_cot_tokens_list) if all_cot_tokens_list else 0
+    max_ans_len = max(len(tokens) for tokens in all_ground_truth_answer_tokens) if all_ground_truth_answer_tokens else 0
+    
+    # Create padded tensors
+    cot_start_positions_tensor = torch.tensor(all_cot_start_positions, device=device, dtype=torch.long)
+    answer_start_positions_tensor = torch.tensor(all_answer_start_positions, device=device, dtype=torch.long)
+    
+    # Pad token lists
+    padded_cot_tokens = torch.full((batch_size, max_cot_len), pad_token_id, device=device, dtype=torch.long)
+    padded_ans_tokens = torch.full((batch_size, max_ans_len), pad_token_id, device=device, dtype=torch.long)
+    
+    for i, cot_tokens in enumerate(all_cot_tokens_list):
+        if len(cot_tokens) > 0:
+            padded_cot_tokens[i, :len(cot_tokens)] = torch.tensor(cot_tokens, device=device, dtype=torch.long)
+    
+    for i, ans_tokens in enumerate(all_ground_truth_answer_tokens):
+        if len(ans_tokens) > 0:
+            padded_ans_tokens[i, :len(ans_tokens)] = torch.tensor(ans_tokens, device=device, dtype=torch.long)
     
     # Add to data.batch
     data.batch["jepo_adv"] = jepo_adv
@@ -1027,11 +1097,9 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
     data.batch["batch_input_ids"] = batch_input_ids
     data.batch["batch_attention_mask"] = attention_mask
     data.batch["batch_position_ids"] = position_ids
-    
-    # Add position information to non_tensor_batch for log prob calculation
-    data.non_tensor_batch["cot_start_positions"] = all_cot_start_positions
-    data.non_tensor_batch["answer_start_positions"] = all_answer_start_positions
-    data.non_tensor_batch["cot_tokens_list"] = all_cot_tokens_list
-    data.non_tensor_batch["ground_truth_answer_tokens"] = all_ground_truth_answer_tokens
+    data.batch["cot_start_positions"] = cot_start_positions_tensor
+    data.batch["answer_start_positions"] = answer_start_positions_tensor
+    data.batch["cot_tokens"] = padded_cot_tokens
+    data.batch["ground_truth_tokens"] = padded_ans_tokens
     
     return data

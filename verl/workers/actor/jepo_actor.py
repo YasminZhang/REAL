@@ -120,7 +120,11 @@ class JEPOActor(DataParallelPPOActor):
         
         # -------- filter data where has_delimiter is True --------
         has_delimiter_mask = data.batch["has_delimiter"]
-        filtered_data = data[has_delimiter_mask]
+        # Convert boolean mask to integer indices for DataProto indexing
+        valid_indices = torch.nonzero(has_delimiter_mask, as_tuple=False).squeeze(-1)
+        # Convert to numpy for DataProto compatibility
+        valid_indices_np = valid_indices.cpu().numpy()
+        filtered_data = data[valid_indices_np]
 
 
         # -------- meters --------
@@ -177,12 +181,13 @@ class JEPOActor(DataParallelPPOActor):
                         micro_data = filtered_data[micro_indices]
                         B_micro = len(micro_indices)
                         
-                        # Prepare data dict for compute_jepo_from_logits_sparse
+                        # Prepare data dict for compute_jepo_from_logits_efficient
+                        # Convert tensors back to lists for the function interface
                         micro_data_dict = {
-                            'cot_start_positions': [micro_data.non_tensor_batch["cot_start_positions"][i] for i in range(B_micro)],
-                            'answer_start_positions': [micro_data.non_tensor_batch["answer_start_positions"][i] for i in range(B_micro)],
-                            'cot_tokens_list': [micro_data.non_tensor_batch["cot_tokens_list"][i] for i in range(B_micro)],
-                            'ground_truth_answer_tokens': [micro_data.non_tensor_batch["ground_truth_answer_tokens"][i] for i in range(B_micro)]
+                            'cot_start_positions': micro_data.batch["cot_start_positions"].cpu().tolist(),
+                            'answer_start_positions': micro_data.batch["answer_start_positions"].cpu().tolist(),
+                            'cot_tokens_list': [micro_data.batch["cot_tokens"][i][micro_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_micro)],
+                            'ground_truth_answer_tokens': [micro_data.batch["ground_truth_tokens"][i][micro_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_micro)]
                         }
                         
                         # Forward pass to get logits
@@ -197,7 +202,7 @@ class JEPOActor(DataParallelPPOActor):
                             logits.div_(temperature)
                         
                         # Compute CoT and answer log probabilities using the efficient function
-                         cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
+                        cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
                             logits=logits,
                             data_dict=micro_data_dict,
                             format_penalty=format_penalty,
