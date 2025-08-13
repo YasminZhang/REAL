@@ -154,85 +154,84 @@ class JEPOActor(DataParallelPPOActor):
             # Split filtered data into mini-batches
             filtered_indices = torch.arange(total_filtered, device=filtered_data.batch["responses"].device)
             
-            for mini_start in range(0, total_filtered, mini_bs):
-                mini_end = min(mini_start + mini_bs, total_filtered)
-                mini_indices = filtered_indices[mini_start:mini_end]
-                N_responses = len(mini_indices)  # number of responses in this optimizer step
-                accum_steps = math.ceil(N_responses / micro_bs)
-                self.actor_optimizer.zero_grad()
+            mini_indices = filtered_indices
+            N_responses = len(mini_indices)  # number of responses in this optimizer step
+            #accum_steps = math.ceil(N_responses / micro_bs)
+            accum_steps = 1
+            self.actor_optimizer.zero_grad()
 
-                for k in range(accum_steps):
-                    micro_start = k * micro_bs
-                    micro_end = min(micro_start + micro_bs, N_responses)
-                    micro_indices = mini_indices[micro_start:micro_end]
+            for k in range(accum_steps):
+                micro_start = k * micro_bs
+                micro_end = min(micro_start + micro_bs, N_responses)
+                micro_indices = mini_indices[micro_start:micro_end]
+                
+                # FSDP: delay allreduce until last accum step
+                sync_ctx = (
+                    self.actor_module.no_sync()
+                    if isinstance(self.actor_module, (FSDP, FSDPModule)) and (k < accum_steps - 1)
+                    else nullcontext()
+                )
+                with sync_ctx:
+                    if len(micro_indices) == 0:
+                        # Still do a dummy backward to keep FSDP sync aligned across ranks
+                        dummy_backward_fsdp_safe(self.actor_module, scaler=None)
+                        continue
+                    # Get micro-batch data
+                    micro_data = filtered_data[micro_indices]
+                    B_micro = len(micro_indices)
                     
-                    # FSDP: delay allreduce until last accum step
-                    sync_ctx = (
-                        self.actor_module.no_sync()
-                        if isinstance(self.actor_module, (FSDP, FSDPModule)) and (k < accum_steps - 1)
-                        else nullcontext()
-                    )
-                    with sync_ctx:
-                        if len(micro_indices) == 0:
-                            # Still do a dummy backward to keep FSDP sync aligned across ranks
-                            dummy_backward_fsdp_safe(self.actor_module, scaler=None)
-                            continue
-                        # Get micro-batch data
-                        micro_data = filtered_data[micro_indices]
-                        B_micro = len(micro_indices)
-                        
-                        # Prepare data dict for compute_jepo_from_logits_efficient
-                        # Convert tensors back to lists for the function interface
-                        micro_data_dict = {
-                            'cot_start_positions': micro_data.batch["cot_start_positions"].cpu().tolist(),
-                            'answer_start_positions': micro_data.batch["answer_start_positions"].cpu().tolist(),
-                            'cot_tokens_list': [micro_data.batch["cot_tokens"][i][micro_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_micro)],
-                            'ground_truth_answer_tokens': [micro_data.batch["ground_truth_tokens"][i][micro_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_micro)]
-                        }
-                        
-                        # Forward pass to get logits
-                        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
-                            out = self.actor_module(
-                                input_ids=micro_data.batch["batch_input_ids"],
-                                attention_mask=micro_data.batch["batch_attention_mask"],
-                                position_ids=micro_data.batch["batch_position_ids"],
-                                use_cache=False,
-                            )
-                            logits = out.logits
-                            logits.div_(temperature)
-                        
-                        # Compute CoT and answer log probabilities using the efficient function
-                        cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
-                            logits=logits,
-                            data_dict=micro_data_dict,
-                            format_penalty=format_penalty,
-                            has_delimiter=[True] * B_micro,  # All filtered data has delimiter
-                            vocab_chunk=8192
+                    # Prepare data dict for compute_jepo_from_logits_efficient
+                    # Convert tensors back to lists for the function interface
+                    micro_data_dict = {
+                        'cot_start_positions': micro_data.batch["cot_start_positions"].cpu().tolist(),
+                        'answer_start_positions': micro_data.batch["answer_start_positions"].cpu().tolist(),
+                        'cot_tokens_list': [micro_data.batch["cot_tokens"][i][micro_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_micro)],
+                        'ground_truth_answer_tokens': [micro_data.batch["ground_truth_tokens"][i][micro_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_micro)]
+                    }
+                    
+                    # Forward pass to get logits
+                    with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                        out = self.actor_module(
+                            input_ids=micro_data.batch["batch_input_ids"],
+                            attention_mask=micro_data.batch["batch_attention_mask"],
+                            position_ids=micro_data.batch["batch_position_ids"],
+                            use_cache=False,
                         )
-                        
-                        # Get advantages and weights for this micro-batch
-                        micro_advantages = jepo_advantages[micro_indices]
-                        micro_weights = jepo_weights[micro_indices]
-                        
-                        # Compute losses
-                        jepo_loss_part = (micro_advantages * cot_log_probs).sum() / total_filtered
-                        supp_loss_part = beta_supp * (micro_weights * log_mean_answer_prob).sum() / total_filtered
-                        
-                        loss_chunk = (jepo_loss_part + supp_loss_part) / accum_steps
-                        loss_chunk.backward()
-                        
-                        # Accumulate metrics
-                        meters["total_loss"] += float(loss_chunk.detach())
-                        meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
-                        meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
-                        meters["jepo_advs_mean"] += float(micro_advantages.mean().detach())
-                        meters["jepo_advs_std"] += float(micro_advantages.std().detach())
-                        meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
-                        meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
-                        meter_count += 1
-                        
-                        del out, logits, cot_log_probs, answer_log_probs
-                        torch.cuda.empty_cache()
+                        logits = out.logits
+                        logits.div_(temperature)
+                    
+                    # Compute CoT and answer log probabilities using the efficient function
+                    cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
+                        logits=logits,
+                        data_dict=micro_data_dict,
+                        format_penalty=format_penalty,
+                        has_delimiter=[True] * B_micro,  # All filtered data has delimiter
+                        vocab_chunk=8192
+                    )
+                    
+                    # Get advantages and weights for this micro-batch
+                    micro_advantages = jepo_advantages[micro_indices]
+                    micro_weights = jepo_weights[micro_indices]
+                    
+                    # Compute losses
+                    jepo_loss_part = (micro_advantages * cot_log_probs).sum() / total_filtered
+                    supp_loss_part = beta_supp * (micro_weights * log_mean_answer_prob).sum() / total_filtered
+                    
+                    loss_chunk = (jepo_loss_part + supp_loss_part) / accum_steps
+                    loss_chunk.backward()
+                    
+                    # Accumulate metrics
+                    meters["total_loss"] += float(loss_chunk.detach())
+                    meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
+                    meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
+                    meters["jepo_advs_mean"] += float(micro_advantages.mean().detach())
+                    meters["jepo_advs_std"] += float(micro_advantages.std().detach())
+                    meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
+                    meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
+                    meter_count += 1
+                    
+                    del out, logits, cot_log_probs, answer_log_probs
+                    torch.cuda.empty_cache()
 
                 # one optimizer step per mini-batch
                 grad_norm = self._optimizer_step()
