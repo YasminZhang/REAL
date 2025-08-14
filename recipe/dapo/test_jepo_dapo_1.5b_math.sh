@@ -37,7 +37,7 @@ max_num_gen_batches=10
 # JEPO specific parameters
 use_jepo=True
 jepo_delimiter="\\boxed\{"
-jepo_format_penalty=1
+jepo_format_penalty=10
 jepo_beta_supp=0.001
 jepo_beta_kl=0.1
 jepo_buffer_size=64 # number of questions

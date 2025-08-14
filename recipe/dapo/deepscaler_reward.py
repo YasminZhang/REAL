@@ -548,12 +548,13 @@ class RewardMathFn:
             "Invalid problem type: expected 'MATH', but got '{}'".format(input.problem_type)
         
         model_response = input.model_response
+        model_solution = model_response
         
-        # Extract solution from thought delimiters
-        if THOUGHT_DELIMITER_START in model_response and THOUGHT_DELIMITER_END in model_response:
-            model_solution = model_response.split(THOUGHT_DELIMITER_END)[1]
-        else:
-            return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
+        # # Extract solution from thought delimiters
+        # if THOUGHT_DELIMITER_START in model_response and THOUGHT_DELIMITER_END in model_response:
+        #     model_solution = model_response.split(THOUGHT_DELIMITER_END)[1]
+        # else:
+        #     return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
         
         # Extract the mathematical answer
         model_answer = extract_answer(model_solution)
