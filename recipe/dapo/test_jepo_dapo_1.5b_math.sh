@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-4k-True-grpo'
+exp_name='deepscaler-1.5b-4k-True-grpo-deepscaler_reward'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -165,4 +165,6 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.total_training_steps=1000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    trainer.log_val_generations=5 
+    trainer.log_val_generations=5 \
+    custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
+    custom_reward_function.name=deepscaler_reward_fn

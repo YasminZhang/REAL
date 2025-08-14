@@ -592,7 +592,7 @@ class RewardMathFn:
         return RewardOutput(reward=self.config.incorrect_reward, is_correct=False)
 
 
-def deepscaler_reward_fn(data_source, solution_str, ground_truth) -> bool:
+def deepscaler_reward_fn(data_source, solution_str, ground_truth, extra_info=None) -> float:
     """
     Self-contained reward function for mathematical problems.
     
@@ -601,7 +601,7 @@ def deepscaler_reward_fn(data_source, solution_str, ground_truth) -> bool:
         ground_truth: The correct answer(s) - can be a string or list of strings
         
     Returns:
-        bool: True if the solution is correct, False otherwise
+        float: The reward value (1 for correct, 0 for incorrect)
     """
     reward_config = RewardConfig()
     reward_fn = RewardMathFn(reward_config)
