@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-8k-jepo-only-1e6'
+exp_name='deepscaler-1.5b-8k-jepo-only-4e7'
 #exp_name="test1"
 
 adv_estimator=grpo
