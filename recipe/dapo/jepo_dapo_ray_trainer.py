@@ -348,7 +348,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     all_incorrect_uids = [
                         uid
                         for uid, mean in prompt_uid2metric_mean.items()
-                        if mean == 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
+                        if mean >= 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
                     ]
                     
                     num_prompt_in_batch += len(kept_prompt_uids)
@@ -459,11 +459,11 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup and standard actor update
-                    if self.config.trainer.critic_warmup <= self.global_steps:
-                        with marked_timer("update_actor", timing_raw, "red"):
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
+                    # if self.config.trainer.critic_warmup <= self.global_steps:
+                    #     with marked_timer("update_actor", timing_raw, "red"):
+                    #         actor_output = self.actor_rollout_wg.update_actor(batch)
+                    #     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                    #     metrics.update(actor_output_metrics)
 
                     
                     # Perform JEPO training when frequency is hit
