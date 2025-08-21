@@ -824,7 +824,7 @@ def precompute_adv_for_dd(
 
     # JEPO advantage A_i over ALL responses (detach)
     A = (log_mean_det - v_i)
-    A = (A - A.mean()) / (A.std(unbiased=False) + 1e-8)
+    A = A / (A.std(unbiased=False) + 1e-8)
     A = A.clamp(-1.0, 1.0)
 
     # format penalty term (normalized) – keep same as your pass-2 logic
