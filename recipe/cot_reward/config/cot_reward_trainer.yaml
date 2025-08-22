@@ -1,0 +1,129 @@
+# CoT Reward Training Configuration
+# This configuration extends the standard PPO trainer with CoT likelihood ratio computation
+
+defaults:
+  - /verl/trainer/config/ppo_trainer
+  - _self_
+
+# Override trainer settings for CoT reward
+trainer:
+  project_name: "CoT_Reward"
+  experiment_name: "cot_reward_training"
+  total_epochs: 50
+  total_training_steps: 1000
+  test_freq: 20
+  save_freq: 20
+  val_before_train: true
+  log_val_generations: 5
+  balance_batch: true
+
+# Ray initialization
+ray_init:
+  num_cpus: 16
+
+# Algorithm configuration with CoT-specific parameters
+algorithm:
+  # Standard PPO parameters
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  kl_coef: 0.001
+  
+  # CoT-specific parameters
+  cot_delimiter: "\\boxed{"
+  cot_min_length: 10
+  cot_max_ratio: 10.0
+  cot_log_rewards: true
+  cot_truncate_tokens: 50
+
+# Data configuration
+data:
+  train_batch_size: 128
+  max_prompt_length: 1024
+  max_response_length: 8192
+  prompt_key: prompt
+  truncation: 'left'
+
+# Actor rollout configuration
+actor_rollout_ref:
+  rollout:
+    n: 8  # Number of responses per prompt
+    temperature: 0.6
+    top_p: 1.0
+    top_k: -1
+    name: vllm
+    gpu_memory_utilization: 0.50
+    tensor_model_parallel_size: 1
+    enable_chunked_prefill: true
+    max_num_batched_tokens: 9216  # max_prompt_length + max_response_length
+    
+    val_kwargs:
+      temperature: 0.6
+      top_p: 1.0
+      top_k: -1
+      do_sample: true
+      n: 8
+
+  actor:
+    strategy: fsdp
+    ppo_mini_batch_size: 16
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 18432  # (max_prompt_length + max_response_length) * 2
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: -1  # Auto FSDP size
+    ulysses_sequence_parallel_size: 1
+    entropy_coeff: 0
+    grad_clip: 1.0
+    loss_agg_mode: "token-mean"
+    
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: 0
+      weight_decay: 0.1
+
+  model:
+    path: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    override_config:
+      max_position_embeddings: 32768
+
+  ref:
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 27648  # (max_prompt_length + max_response_length) * 3
+    fsdp_config:
+      param_offload: true
+    ulysses_sequence_parallel_size: 1
+
+# Critic configuration
+critic:
+  strategy: fsdp
+  enable: true
+  
+# Reward model configuration
+reward_model:
+  reward_manager: dapo
+  enable: false  # We use custom reward function
+  overlong_buffer:
+    enable: false
+    len: 8192
+    penalty_factor: 1.0
+    log: false
+  max_resp_len: 8192
+
+# Custom reward function configuration
+custom_reward_function:
+  path: "recipe/cot_reward/cot_reward_function.py"
+  name: "cot_reward_function"
+
+# Global profiler (optional)
+global_profiler:
+  steps: null  # Set to [10, 11] for profiling steps 10-11
+  tool: null   # Set to "nsys" for nsight profiling
+
+# Node and GPU configuration
+trainer:
+  n_gpus_per_node: 8
+  nnodes: 1
+  device: "cuda"
