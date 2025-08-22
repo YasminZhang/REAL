@@ -22,9 +22,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=8192
+max_response_length=4096
 enable_overlong_buffer=false
-overlong_buffer_len=8192
+overlong_buffer_len=4096
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -72,11 +72,11 @@ python3 -m recipe.cot_reward.main_cot_reward \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    +algorithm.cot_delimiter="${cot_delimiter}" \
-    +algorithm.cot_min_length=${cot_min_length} \
-    +algorithm.cot_max_ratio=${cot_max_ratio} \
-    +algorithm.cot_log_rewards=${cot_log_rewards} \
-    +algorithm.cot_truncate_tokens=${cot_truncate_tokens} \
+    algorithm.cot_delimiter="${cot_delimiter}" \
+    algorithm.cot_min_length=${cot_min_length} \
+    algorithm.cot_max_ratio=${cot_max_ratio} \
+    algorithm.cot_log_rewards=${cot_log_rewards} \
+    algorithm.cot_truncate_tokens=${cot_truncate_tokens} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -84,7 +84,7 @@ python3 -m recipe.cot_reward.main_cot_reward \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
     actor_rollout_ref.model.use_remove_padding=true \
-    +actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
+    actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
@@ -120,11 +120,11 @@ python3 -m recipe.cot_reward.main_cot_reward \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     reward_model.reward_manager=dapo \
-    +reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
-    +reward_model.overlong_buffer.len=${overlong_buffer_len} \
-    +reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.overlong_buffer.log=false \
-    +reward_model.max_resp_len=${max_response_length} \
+    reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
+    reward_model.overlong_buffer.len=${overlong_buffer_len} \
+    reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
+    reward_model.overlong_buffer.log=false \
+    reward_model.max_resp_len=${max_response_length} \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \

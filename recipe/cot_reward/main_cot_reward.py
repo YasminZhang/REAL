@@ -13,8 +13,10 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
+from verl.utils.import_utils import load_extern_type
 from recipe.cot_reward.cot_reward_trainer import COTRewardTrainer
 
 
@@ -83,20 +85,20 @@ class TaskRunner:
 
         from verl.trainer.ppo.ray_trainer import Role, ResourcePoolManager
 
-        # Configure resource pools
+        # Configure resource pools  
         global_pool_id = "global_pool"
         
         resource_pool_spec = {
-            global_pool_id: list(range(config.trainer.nnodes))
+            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
 
         role_worker_mapping = {
-            Role.ActorRolloutRef: ray.remote(ActorRolloutRefWorker),
+            Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
             Role.Critic: ray.remote(CriticWorker),
         }
 
         mapping = {
-            Role.ActorRolloutRef: global_pool_id,
+            Role.ActorRollout: global_pool_id,
             Role.Critic: global_pool_id,
         }
 
@@ -119,23 +121,22 @@ class TaskRunner:
 
         # Load reward functions
         reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            0,
-            max_resp_len=config.data.max_response_length,
-            overlong_buffer_cfg=config.reward_model.overlong_buffer,
+            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
         )
 
         # Note that we always use function-based RM for validation
         val_reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            1,
-            max_resp_len=config.data.max_response_length,
-            overlong_buffer_cfg=config.reward_model.overlong_buffer,
+            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
         )
         
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+
+        from verl.utils.dataset.rl_dataset import collate_fn
+
+        # Create training and validation datasets
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
+        train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Create the CoT Reward Trainer
         trainer = COTRewardTrainer(
@@ -147,11 +148,74 @@ class TaskRunner:
             processor=processor,
             reward_fn=reward_fn,
             val_reward_fn=val_reward_fn,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            collate_fn=collate_fn,
+            train_sampler=train_sampler,
         )
         
         # Initialize workers and start training
         trainer.init_workers()
         trainer.fit()
+
+
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True):
+    """Create a dataset."""
+    from torch.utils.data import Dataset
+    from verl.utils.dataset.rl_dataset import RLHFDataset
+
+    # Check if a custom dataset class is specified
+    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
+        if not issubclass(dataset_cls, Dataset):
+            raise TypeError(
+                f"The custom dataset class '{data_config.custom_cls.name}' from "
+                f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
+            )
+    elif "datagen" in data_config and data_config.datagen.get("path", None) is not None and is_train:
+        from verl.utils.dataset.dynamicgen_dataset import DynamicGenDataset
+        dataset_cls = DynamicGenDataset
+        print("Using DynamicGenDataset for data generation.")
+    else:
+        dataset_cls = RLHFDataset
+    
+    print(f"Using dataset class: {dataset_cls.__name__}")
+
+    dataset = dataset_cls(
+        data_files=data_paths,
+        tokenizer=tokenizer,
+        processor=processor,
+        config=data_config,
+    )
+    return dataset
+
+
+def create_rl_sampler(data_config, dataset):
+    """Create a sampler for the dataset."""
+    import torch
+    from torch.utils.data import RandomSampler, SequentialSampler
+
+    if data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
+        curriculum_class = load_extern_type(
+            data_config.sampler.class_path,
+            data_config.sampler.class_name,
+        )
+        sampler = curriculum_class(
+            data_source=dataset,
+            data_config=data_config,
+        )
+        assert isinstance(sampler, AbstractSampler)
+        assert data_config.get("dataloader_num_workers", 8) == 0, (
+            "If using curriculum, num_workers must be 0 to prevent data caching."
+        )
+    elif data_config.shuffle:
+        train_dataloader_generator = torch.Generator()
+        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
+        sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
+    else:
+        sampler = SequentialSampler(data_source=dataset)
+
+    return sampler
 
 
 if __name__ == "__main__":
