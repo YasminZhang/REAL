@@ -202,7 +202,7 @@ def _process_single_response(
         cot_tokens = tokenizer.encode(cot_part, add_special_tokens=False)
         
         # Remove last few tokens to make room for delimiter + answer
-        gt_tokens = tokenizer.encode(f"{config.delimiter}{gt_answer}}", add_special_tokens=False)
+        gt_tokens = tokenizer.encode(f"{config.delimiter}{gt_answer}", add_special_tokens=False)
         available_length = config.max_sequence_length - len(tokenizer.encode(prompt_str, add_special_tokens=False)) - len(gt_tokens) - 10  # 10 buffer tokens
         
         if len(cot_tokens) > available_length:
