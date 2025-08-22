@@ -654,16 +654,12 @@ class COTRewardTrainer(RayPPOTrainer):
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        if OmegaConf.select(self.config.global_profiler, "steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            # Only require nsight worker options when tool is nsys
-            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-                assert (
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                    is not None
-                ), "worker_nsight_options must be set when using nsys with profile_steps"
+        if OmegaConf.select(self.config.trainer, "profile_steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.trainer, "profile_steps")
+            # Only require nsight worker options when worker_nsight_options is set
+            if OmegaConf.select(self.config.trainer, "worker_nsight_options") is not None:
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                    OmegaConf.select(self.config.trainer, "worker_nsight_options")
                 )
         wg_kwargs["device_name"] = self.device_name
 
@@ -905,8 +901,8 @@ class COTRewardTrainer(RayPPOTrainer):
 
         prev_step_profile = False
         curr_step_profile = (
-            self.global_steps in self.config.global_profiler.steps
-            if self.config.global_profiler.steps is not None
+            self.global_steps in self.config.trainer.profile_steps
+            if OmegaConf.select(self.config.trainer, "profile_steps") is not None
             else False
         )
         next_step_profile = False
@@ -919,7 +915,7 @@ class COTRewardTrainer(RayPPOTrainer):
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
                         not prev_step_profile and curr_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
+                        if OmegaConf.select(self.config.trainer, "profile_continuous_steps", default=False)
                         else curr_step_profile
                     )
 
@@ -993,12 +989,13 @@ class COTRewardTrainer(RayPPOTrainer):
                             batch = batch.union(reward_tensor)
 
                         # Compute CoT log probabilities before reward computation
-                        batch = self._compute_and_store_cot_log_probs(batch)
+                        # Create a copy to avoid modifying the original batch used for log prob computation
+                        batch_for_reward = self._compute_and_store_cot_log_probs(batch)
                         
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
+                            future_reward = compute_reward_async.remote(data=batch_for_reward, reward_fn=self.reward_fn)
                         else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            reward_tensor, reward_extra_infos_dict = compute_reward(batch_for_reward, self.reward_fn)
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1145,13 +1142,13 @@ class COTRewardTrainer(RayPPOTrainer):
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
-                        self.global_steps + 1 in self.config.global_profiler.steps
-                        if self.config.global_profiler.steps is not None
+                        self.global_steps + 1 in self.config.trainer.profile_steps
+                        if OmegaConf.select(self.config.trainer, "profile_steps") is not None
                         else False
                     )
                     self._stop_profiling(
                         curr_step_profile and not next_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
+                        if OmegaConf.select(self.config.trainer, "profile_continuous_steps", default=False)
                         else curr_step_profile
                     )
                     prev_step_profile = curr_step_profile
@@ -1231,8 +1228,10 @@ class COTRewardTrainer(RayPPOTrainer):
                 config=self.cot_logprob_config
             )
             
+            # Create a copy of the batch to avoid modifying the original
+            batch_copy = deepcopy(batch)
             # Store results in non_tensor_batch
-            batch.non_tensor_batch["cot_log_probs"] = cot_log_prob_results
+            batch_copy.non_tensor_batch["cot_log_probs"] = cot_log_prob_results
             
             if self.cot_config.log_rewards:
                 total_samples = sum(len(sample_results) for sample_results in cot_log_prob_results)
@@ -1250,6 +1249,8 @@ class COTRewardTrainer(RayPPOTrainer):
                     print(f"CoT ratio stats - mean: {np.mean(valid_ratios):.3f}, "
                           f"median: {np.median(valid_ratios):.3f}, "
                           f"std: {np.std(valid_ratios):.3f}")
+            
+            return batch_copy
             
         except Exception as e:
             print(f"Error computing CoT log probabilities: {e}")
@@ -1272,6 +1273,8 @@ class COTRewardTrainer(RayPPOTrainer):
                             "error": str(e)
                         })
                     fallback_results.append(sample_results)
-                batch.non_tensor_batch["cot_log_probs"] = fallback_results
+                batch_copy = deepcopy(batch)
+                batch_copy.non_tensor_batch["cot_log_probs"] = fallback_results
+                return batch_copy
         
-        return batch
+        return batch_copy

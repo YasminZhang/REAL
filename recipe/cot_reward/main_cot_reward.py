@@ -27,12 +27,12 @@ def main(config):
 
 def run_cot_reward_training(config) -> None:
     if not ray.is_initialized():
-        # Initialize Ray for distributed training
+        # this is for local ray cluster
         ray.init(
             runtime_env={
                 "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
             },
-            num_cpus=config.ray_init.num_cpus,
+            num_cpus=OmegaConf.select(config.ray_init, "num_cpus"),
         )
 
     if (
@@ -47,62 +47,71 @@ def run_cot_reward_training(config) -> None:
     ray.get(runner.run.remote(config))
 
 
-@ray.remote(num_cpus=1)  # Ensure main task is not scheduled on head node
+@ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
     def run(self, config):
-        # Print initial config
+        # print initial config
         from pprint import pprint
+
         from omegaconf import OmegaConf
+
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)
 
-        # Download the checkpoint from hdfs
+        # download the checkpoint from hdfs
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
 
-        # Instantiate tokenizer
+        # instantiate tokenizer
         from verl.utils import hf_processor, hf_tokenizer
+
         tokenizer = hf_tokenizer(local_path)
         processor = hf_processor(local_path, use_fast=True)  # used for multimodal LLM, could be none
 
         from verl.single_controller.ray import RayWorkerGroup
 
-        # Define worker classes based on strategy
+        # define worker classes
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             assert config.critic.strategy in {"fsdp", "fsdp2"}
+
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
+
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
             from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
+
             ray_worker_group_cls = RayWorkerGroup
 
         else:
             raise NotImplementedError
 
-        from verl.trainer.ppo.ray_trainer import Role, ResourcePoolManager
-
-        # Configure resource pools  
-        global_pool_id = "global_pool"
-        
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        }
+        from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
             Role.Critic: ray.remote(CriticWorker),
         }
 
+        global_pool_id = "global_pool"
+        resource_pool_spec = {
+            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        }
         mapping = {
             Role.ActorRollout: global_pool_id,
             Role.Critic: global_pool_id,
         }
 
-        # Set up reward model if enabled
+        # we should adopt a multi-source reward function here
+        # - for rule-based rm, we directly call a reward score
+        # - for model-based rm, we call a model
+        # - for code related prompt, we send to a sandbox if there are test cases
+        # - finally, we combine all the rewards together
+        # - The reward type depends on the tag of the data
         if config.reward_model.enable:
             if config.reward_model.strategy in {"fsdp", "fsdp2"}:
                 from verl.workers.fsdp_workers import RewardModelWorker
@@ -110,112 +119,44 @@ class TaskRunner:
                 from verl.workers.megatron_workers import RewardModelWorker
             else:
                 raise NotImplementedError
-
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
-        # Set up reference model if needed
+        # reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        # Load reward functions
         reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+            config,
+            tokenizer,
+            0,
+            max_resp_len=config.data.max_response_length,
+            overlong_buffer_cfg=config.reward_model.overlong_buffer,
         )
 
         # Note that we always use function-based RM for validation
         val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+            config,
+            tokenizer,
+            1,
+            max_resp_len=config.data.max_response_length,
+            overlong_buffer_cfg=config.reward_model.overlong_buffer,
         )
-        
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        from verl.utils.dataset.rl_dataset import collate_fn
-
-        # Create training and validation datasets
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
-        train_sampler = create_rl_sampler(config.data, train_dataset)
-
-        # Create the CoT Reward Trainer
         trainer = COTRewardTrainer(
             config=config,
             tokenizer=tokenizer,
+            processor=processor,
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            processor=processor,
             reward_fn=reward_fn,
             val_reward_fn=val_reward_fn,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            collate_fn=collate_fn,
-            train_sampler=train_sampler,
         )
-        
-        # Initialize workers and start training
         trainer.init_workers()
         trainer.fit()
-
-
-def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True):
-    """Create a dataset."""
-    from torch.utils.data import Dataset
-    from verl.utils.dataset.rl_dataset import RLHFDataset
-
-    # Check if a custom dataset class is specified
-    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
-        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
-        if not issubclass(dataset_cls, Dataset):
-            raise TypeError(
-                f"The custom dataset class '{data_config.custom_cls.name}' from "
-                f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
-            )
-    elif "datagen" in data_config and data_config.datagen.get("path", None) is not None and is_train:
-        from verl.utils.dataset.dynamicgen_dataset import DynamicGenDataset
-        dataset_cls = DynamicGenDataset
-        print("Using DynamicGenDataset for data generation.")
-    else:
-        dataset_cls = RLHFDataset
-    
-    print(f"Using dataset class: {dataset_cls.__name__}")
-
-    dataset = dataset_cls(
-        data_files=data_paths,
-        tokenizer=tokenizer,
-        processor=processor,
-        config=data_config,
-    )
-    return dataset
-
-
-def create_rl_sampler(data_config, dataset):
-    """Create a sampler for the dataset."""
-    import torch
-    from torch.utils.data import RandomSampler, SequentialSampler
-
-    if data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
-        curriculum_class = load_extern_type(
-            data_config.sampler.class_path,
-            data_config.sampler.class_name,
-        )
-        sampler = curriculum_class(
-            data_source=dataset,
-            data_config=data_config,
-        )
-        assert isinstance(sampler, AbstractSampler)
-        assert data_config.get("dataloader_num_workers", 8) == 0, (
-            "If using curriculum, num_workers must be 0 to prevent data caching."
-        )
-    elif data_config.shuffle:
-        train_dataloader_generator = torch.Generator()
-        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
-        sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
-    else:
-        sampler = SequentialSampler(data_source=dataset)
-
-    return sampler
 
 
 if __name__ == "__main__":

@@ -678,7 +678,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     raise ValueError(f"Unknown warmup_style: {warmup_style}")
             else:
-                raise ValueError("Can not find jepo actor optim config.")
+                # raise ValueError("Can not find jepo actor optim config.")
                 self.jepo_actor_optimizer = None
                 self.jepo_actor_lr_scheduler = None
             

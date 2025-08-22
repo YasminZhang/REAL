@@ -1,247 +1,37 @@
-# CoT Reward Training Configuration
-# Complete standalone configuration for CoT reward training
-
-# Add Hydra searchpath for verl configs
 hydra:
   searchpath:
     - file://verl/trainer/config
 
-# Ray initialization
-ray_init:
-  num_cpus: 16
+defaults:
+  - ppo_trainer
+  - _self_
 
-# Trainer configuration
-trainer:
-  project_name: "CoT_Reward"
-  experiment_name: "cot_reward_training"
-  total_epochs: 50
-  total_training_steps: 1000
-  test_freq: 20
-  save_freq: 20
-  val_before_train: true
-  log_val_generations: 5
-  balance_batch: true
-  n_gpus_per_node: 8
-  nnodes: 1
-  device: "cuda"
-  logger: ["console", "wandb"]
-  critic_warmup: 0
-  default_local_dir: null  # Will be overridden by command line
-  resume_mode: auto
+data:
+  gen_batch_size: ${data.train_batch_size}
 
-# Algorithm configuration with CoT-specific parameters
+reward_model:
+  reward_manager: dapo
+  overlong_buffer: 
+    enable: False # We try to avoid forgetting to set enable
+    len: 0
+    penalty_factor: 0.0
+    log: False
+
 algorithm:
-  # Standard PPO parameters
-  adv_estimator: grpo
-  use_kl_in_reward: false
-  gamma: 1.0
-  lam: 0.95
-  kl_penalty: kl
-  
-  # KL control configuration
-  kl_ctrl:
-    kl_coef: 0.001
-  
-  # CoT-specific parameters
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: False # We try to avoid forgetting to set enable
+    metric: null # acc / score / seq_reward / seq_final_reward / ...
+    max_num_gen_batches: 0 # Non-positive values mean no upper limit
   cot_delimiter: "\\boxed{"
   cot_min_length: 10
   cot_max_ratio: 10.0
   cot_log_rewards: true
   cot_truncate_tokens: 50
 
-# Data configuration
-data:
-  tokenizer: null
-  use_shm: false
-  train_files: null  # Will be overridden by command line
-  val_files: null    # Will be overridden by command line
-  prompt_key: prompt
-  reward_fn_key: data_source  # Key for reward function in dataset
-  max_prompt_length: 1024
-  max_response_length: 4096
-  train_batch_size: 128
-  val_batch_size: null
-  return_raw_input_ids: false
-  return_raw_chat: false
-  return_full_prompt: false
-  shuffle: true
-  dataloader_num_workers: 0
-  validation_shuffle: false
-  filter_overlong_prompts: false
-  filter_overlong_prompts_workers: 1
-  truncation: 'left'
-  image_key: images
-  video_key: videos
-  trust_remote_code: false
-  return_multi_modal_inputs: true
-  
-  custom_cls:
-    path: null
-    name: null
-  
-  sampler:
-    class_path: null
-    class_name: null
-  
-  datagen:
-    path: null
-    name: null
-
-# Actor rollout configuration
 actor_rollout_ref:
-  hybrid_engine: true
-  nccl_timeout: 600
-  
-  model:
-    path: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    use_remove_padding: true
-    enable_gradient_checkpointing: true
-    override_config:
-      max_position_embeddings: 32768
+  jepo_actor:
+    optim: null
 
-  rollout:
-    n: 8  # Number of responses per prompt
-    temperature: 0.6
-    top_p: 1.0
-    top_k: -1
-    name: vllm
-    gpu_memory_utilization: 0.50
-    tensor_model_parallel_size: 1
-    enable_chunked_prefill: true
-    max_num_batched_tokens: 5120  # max_prompt_length + max_response_length
-    log_prob_use_dynamic_bsz: true
-    log_prob_max_token_len_per_gpu: 15360  # (max_prompt_length + max_response_length) * 3
-    
-    val_kwargs:
-      temperature: 0.6
-      top_p: 1.0
-      top_k: -1
-      do_sample: true
-      n: 8
-
-  actor:
-    _target_: verl.workers.config.FSDPActorConfig
-    strategy: fsdp
-    ppo_mini_batch_size: 16
-    ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 4
-    use_dynamic_bsz: true
-    ppo_max_token_len_per_gpu: 10240  # (max_prompt_length + max_response_length) * 2
-    use_kl_loss: true
-    kl_loss_coef: 0.001
-    kl_loss_type: low_var_kl
-    clip_ratio: 0.2
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.2
-    clip_ratio_c: 10.0
-    
-    policy_loss:
-      _target_: verl.workers.config.PolicyLossConfig
-      loss_mode: "vanilla"
-      clip_cov_ratio: 0.0002
-      clip_cov_lb: 1.0
-      clip_cov_ub: 5.0
-      kl_cov_ratio: 0.0002
-      ppo_kl_coef: 0.1
-    
-    ulysses_sequence_parallel_size: 1
-    entropy_coeff: 0
-    grad_clip: 1.0
-    loss_agg_mode: "token-mean"
-    use_remove_padding: true
-    ppo_epochs: 1
-    shuffle: false
-    use_torch_compile: true
-    use_fused_kernels: false
-    
-    checkpoint:
-      _target_: verl.trainer.config.CheckpointConfig
-      save_contents: ['model', 'optimizer', 'extra']
-      load_contents: ['model', 'optimizer', 'extra']
-      async_save: false
-    
-    optim:
-      _target_: verl.workers.config.FSDPOptimizerConfig
-      lr: 1e-6
-      lr_warmup_steps: 0
-      lr_warmup_steps_ratio: 0.0
-      total_training_steps: -1
-      weight_decay: 0.1
-      min_lr_ratio: 0.0
-      num_cycles: 0.5
-      warmup_style: constant
-    
-    fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
-      param_offload: true
-      optimizer_offload: true
-      fsdp_size: -1  # Auto FSDP size
-      wrap_policy:
-        min_num_params: 0
-      forward_prefetch: false
-
-  ref:
-    log_prob_use_dynamic_bsz: true
-    log_prob_max_token_len_per_gpu: 15360  # (max_prompt_length + max_response_length) * 3
-    fsdp_config:
-      param_offload: true
-    ulysses_sequence_parallel_size: 1
-
-# Critic configuration
-critic:
-  _target_: verl.workers.config.FSDPCriticConfig
-  strategy: fsdp
-  enable: true
-  grad_clip: 1.0
-  ulysses_sequence_parallel_size: 1
-  ppo_micro_batch_size_per_gpu: 16  # Required batch size parameter
-  
-  optim:
-    _target_: verl.workers.config.FSDPOptimizerConfig
-    lr: 1e-5
-    lr_warmup_steps: 0
-    weight_decay: 0.1
-    min_lr_ratio: null
-    warmup_style: constant
-  
-  model:
-    _target_: verl.workers.config.FSDPCriticModelCfg
-    use_shm: false
-    enable_gradient_checkpointing: true
-    enable_activation_offload: false
-    use_remove_padding: false
-    lora_rank: 0
-    lora_alpha: 16
-    target_modules: all-linear
-    
-    fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
-      param_offload: true
-      optimizer_offload: true
-      fsdp_size: -1
-      wrap_policy:
-        min_num_params: 0
-      forward_prefetch: false
-      offload_policy: false
-      reshard_after_forward: true
-  
-# Reward model configuration
-reward_model:
-  reward_manager: dapo
-  enable: false  # We use custom reward function
-  overlong_buffer:
-    enable: false
-    len: 4096
-    penalty_factor: 1.0
-    log: false
-  max_resp_len: 4096
-
-# Custom reward function configuration
-custom_reward_function:
-  path: "recipe/cot_reward/cot_reward_function.py"
-  name: "cot_reward_function"
-
-# Global profiler (optional)
-global_profiler:
-  steps: null  # Set to [10, 11] for profiling steps 10-11
-  tool: null   # Set to "nsys" for nsight profiling
+trainer:
+  project_name: verl-dapo
