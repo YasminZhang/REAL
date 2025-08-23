@@ -241,7 +241,16 @@ def cot_reward_function(
     """
     config = CoTRewardConfig()
     
-    # Check if pre-computed log probabilities are available
+    # Fast path: allow passing ratio directly via extra_info["ratio"]
+    if extra_info and isinstance(extra_info, dict) and "ratio" in extra_info:
+        ratio = float(extra_info["ratio"])
+        # Clamp to safe range
+        ratio = max(0.0, min(ratio, config.max_ratio))
+        if config.log_rewards:
+            print(f"CoT reward (direct ratio) = {ratio:.4f}")
+        return ratio
+
+    # Otherwise, fallback to nested cot_log_probs structure
     if not extra_info or "cot_log_probs" not in extra_info:
         if config.log_rewards:
             print("Warning: No pre-computed CoT log probabilities found in extra_info")
@@ -255,6 +264,14 @@ def cot_reward_function(
             print(f"Invalid ground truth or computation error: {cot_data.get('error', 'Unknown error')}")
         return 0.0
         
+    # If ratio is provided in nested dict, use it directly
+    if "ratio" in cot_data:
+        ratio = float(cot_data["ratio"]) if cot_data["ratio"] is not None else 0.0
+        ratio = max(0.0, min(ratio, config.max_ratio))
+        if config.log_rewards:
+            print(f"CoT reward (nested ratio) = {ratio:.4f}")
+        return ratio
+
     log_prob_with_cot = cot_data.get("log_prob_with_cot", float('-inf'))
     log_prob_without_cot = cot_data.get("log_prob_without_cot", float('-inf'))
     cot_length = cot_data.get("cot_length", 0)

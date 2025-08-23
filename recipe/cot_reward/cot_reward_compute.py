@@ -231,6 +231,7 @@ def compute_cot_log_prob_ratios(
     results: List[Dict[str, Any]] = []
     for i, md in enumerate(md_list):
         try:
+            breakpoint()
             off = int(md.get("answer_offset", 0))
             ln = int(md.get("answer_len", lp_w.size(1)))
             with_cot = float(lp_w[i, off:off + ln].sum().item())
