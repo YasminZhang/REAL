@@ -373,3 +373,145 @@ def compute_cot_pmi_whitebox(
         "pmi_norm": pmi_norm,
         "ratio": ratio,
     }
+
+
+# ============================
+# ID-based white-box PMI (avoid prompt/CoT re-tokenization)
+# ============================
+
+def _possible_delimiter_tokenizations(tokenizer, delimiter: str) -> list[list[int]]:
+    cands = [delimiter, " " + delimiter]
+    ids = []
+    for s in cands:
+        try:
+            t = tokenizer.encode(s, add_special_tokens=False)
+            if t and t not in ids:
+                ids.append(t)
+        except Exception:
+            pass
+    return ids
+
+
+def _find_subsequence(hay: list[int], needles: list[list[int]]) -> int | None:
+    """Return start index of first occurrence of any needle in hay, or None.
+    Tries each needle; robust to different leading-space BPE variants.
+    """
+    n = len(hay)
+    for nd in needles:
+        m = len(nd)
+        if m == 0 or m > n:
+            continue
+        # search
+        for i in range(0, n - m + 1):
+            if hay[i : i + m] == nd:
+                return i
+    return None
+
+
+@torch.no_grad()
+def logp_of_answer_ids(model, input_ids_full: list[int], answer_total_len: int, delimiter_len: int, temperature: float = 1.0):
+    """
+    Compute sum of log-probs for only the GT tokens within the tail answer span (exclude delimiter).
+
+    input_ids_full: prompt + (optional cot) + answer_target_ids (delimiter+gt)
+    answer_total_len: len(delimiter+gt) ids at the end
+    delimiter_len: number of ids belonging to delimiter at the head of answer span
+    """
+    device = next(model.parameters()).device
+    ids = torch.tensor([input_ids_full], dtype=torch.long, device=device)
+    attn = torch.ones_like(ids)
+    T = ids.shape[1]
+    # Labels: ignore everything before the answer span; include full answer span labels initially
+    labels = ids.clone()
+    start_answer = T - answer_total_len
+    if start_answer > 0:
+        labels[:, :start_answer] = -100
+
+    # Forward
+    with torch.autocast(device_type=str(device).split(":")[0], dtype=torch.float32, enabled=False):
+        out = model(input_ids=ids, attention_mask=attn)
+        logits = out.logits
+
+    # Shift next-token prediction
+    logits = logits[:, :-1, :]
+    labels = labels[:, 1:]
+    dev = logits.device
+    if labels.device != dev:
+        labels = labels.to(dev)
+
+    # Temperature
+    if temperature is not None and temperature > 0 and temperature != 1.0:
+        logits = logits / temperature
+    logprobs = F.log_softmax(logits, dim=-1)
+
+    # Gather all positions (we will sum only gt positions)
+    mask_all = (labels != -100)
+    safe_labels = labels.clone()
+    safe_labels[~mask_all] = 0
+    tgt_logprobs = logprobs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+
+    # Build mask for gt-only inside answer span (exclude delimiter ids)
+    # After shift, the answer span corresponds to indices [start_answer-1 : T-1] in logits/labels
+    # We keep only the last (answer_total_len - delimiter_len) positions
+    gt_len = max(answer_total_len - delimiter_len, 0)
+    if gt_len == 0:
+        return 0.0, 0
+    # start index in shifted space
+    start_in_shift = max(start_answer - 1, 0) + delimiter_len
+    end_in_shift = start_in_shift + gt_len
+    idx = torch.arange(tgt_logprobs.shape[1], device=dev)
+    gt_mask = (idx >= start_in_shift) & (idx < end_in_shift)
+
+    total_logp = tgt_logprobs[0][gt_mask].sum().item()
+    length = int(gt_mask.sum().item())
+    return total_logp, length
+
+
+@torch.no_grad()
+def compute_cot_pmi_whitebox_ids(
+    model,
+    tokenizer,
+    prompt_ids: list[int],
+    response_ids: list[int],
+    gt_text: str,
+    delimiter: str = "\\boxed{",
+    temperature: float = 1.0,
+) -> Dict[str, float]:
+    """
+    Build with/without-CoT input ids using existing prompt/response ids and GT text,
+    then compute PMI on ids without re-tokenizing the prompt/CoT.
+    """
+    # Find delimiter position inside response ids (handle leading-space variants)
+    del_tok_cands = _possible_delimiter_tokenizations(tokenizer, delimiter)
+    split_idx = _find_subsequence(response_ids, del_tok_cands)
+    cot_ids = response_ids[:split_idx] if split_idx is not None else response_ids
+
+    # Tokenize answer target (delimiter + gt_text)
+    delim_ids = tokenizer.encode(delimiter, add_special_tokens=False)
+    gt_ids = tokenizer.encode(str(gt_text), add_special_tokens=False)
+    answer_target = delim_ids + gt_ids
+
+    # Compose full sequences
+    full_with = prompt_ids + cot_ids + answer_target
+    full_wo = prompt_ids + answer_target
+
+    # Compute teacher-forced logp for GT-only within answer span
+    logp_c, Lc = logp_of_answer_ids(
+        model, full_with, answer_total_len=len(answer_target), delimiter_len=len(delim_ids), temperature=temperature
+    )
+    logp_0, L0 = logp_of_answer_ids(
+        model, full_wo, answer_total_len=len(answer_target), delimiter_len=len(delim_ids), temperature=temperature
+    )
+
+    pmi_log = logp_c - logp_0
+    pmi_norm = (logp_c / max(Lc, 1)) - (logp_0 / max(L0, 1))
+    ratio = torch.exp(torch.tensor(pmi_log)).item()
+    return {
+        "logp_c": logp_c,
+        "logp_0": logp_0,
+        "Lc": Lc,
+        "L0": L0,
+        "pmi_log": pmi_log,
+        "pmi_norm": pmi_norm,
+        "ratio": ratio,
+    }

@@ -1227,17 +1227,10 @@ class COTRewardTrainer(RayPPOTrainer):
             Enhanced DataProto with CoT log probabilities in non_tensor_batch
         """
         if self.cot_config.log_rewards:
-            print("Computing CoT log probabilities using actor workers...")
+            print("Computing CoT ratios via white-box ID-based PMI...")
         
         try:
-            # Use the efficient computation method
-            cot_log_prob_results = compute_cot_log_prob_ratios(
-                batch=batch,
-                actor_worker_group=self.actor_rollout_wg,
-                tokenizer=self.tokenizer,
-                config=self.cot_logprob_config
-            )
-            # Convert to per-row extra_info and attach under non_tensor_batch['extra_info']
+            # Start from a copy
             batch_copy = deepcopy(batch)
             import numpy as _np
             B = len(batch_copy)
@@ -1248,53 +1241,39 @@ class COTRewardTrainer(RayPPOTrainer):
             else:
                 # make a writable copy
                 extra_info = extra_info.copy()
-            assert len(cot_log_prob_results) == B, (
-                f"cot_log_prob_results length {len(cot_log_prob_results)} != batch size {B}"
-            )
-            # track has_delimiter flags
-            has_delim_flags = []
-            for i in range(B):
-                row_info = extra_info[i] if isinstance(extra_info[i], dict) else {}
-                row_info["cot_log_probs"] = cot_log_prob_results[i]
-                extra_info[i] = row_info
-                has_delim_flags.append(bool(cot_log_prob_results[i].get("has_delimiter", False)))
-            batch_copy.non_tensor_batch["extra_info"] = extra_info
-            # store boolean vector for analysis
-            batch_copy.non_tensor_batch["cot_has_delimiter"] = _np.array(has_delim_flags)
-            # aggregate counts as meta for metrics
-            num_with_delim = int(sum(has_delim_flags))
-            frac_with_delim = float(num_with_delim / B) if B > 0 else 0.0
-            batch_copy.meta_info["cot_num_with_delimiter"] = num_with_delim
-            batch_copy.meta_info["cot_frac_with_delimiter"] = frac_with_delim
-
-            if self.cot_config.log_rewards:
-                # Log simple stats
-                valid_ratios = [r.get("ratio", 0) for r in cot_log_prob_results if r.get("ratio", 0) > 0]
-                print(
-                    f"Computed CoT log-probs for {B} rows; valid ratios: {len(valid_ratios)}, "
-                    f"with delimiter: {num_with_delim} ({frac_with_delim:.2%})"
-                )
-                if valid_ratios:
-                    import numpy as np
-                    print(
-                        f"CoT ratio stats - mean: {np.mean(valid_ratios):.3f}, median: {np.median(valid_ratios):.3f}, std: {np.std(valid_ratios):.3f}"
-                    )
-            # Optionally compute white-box PMI on actor device for debugging/validation
-            whitebox_cfg = getattr(self.config.algorithm, "cot_whitebox", None)
-            if whitebox_cfg and getattr(whitebox_cfg, "enable", False):
+            # Compute white-box PMI on actor device using IDs (primary reward source)
+            # Use white-box ID-based PMI as the primary path
+            if True:
                 try:
-                    prompts_str = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                    cot_str = [r.get("cot_part", "") for r in cot_log_prob_results]
-                    gt_str = [r.get("gt_answer", "") for r in cot_log_prob_results]
+                    # Prepare id-based inputs for whitebox
+                    attn = batch.batch["attention_mask"]
+                    prompts_ids_tensor = batch.batch["prompts"]
+                    responses_ids_tensor = batch.batch["responses"]
+                    prompt_len = prompts_ids_tensor.shape[1]
+                    resp_len = responses_ids_tensor.shape[1]
+                    prompt_ids_list, response_ids_list, gt_str = [], [], []
+                    for i in range(B):
+                        # Robust to left/right truncation: select mask==1 positions
+                        pmask = attn[i, :prompt_len].bool()
+                        p_ids = prompts_ids_tensor[i][pmask].tolist()
+                        rmask = attn[i, prompt_len:prompt_len + resp_len].bool()
+                        r_ids = responses_ids_tensor[i][rmask].tolist()
+                        prompt_ids_list.append(p_ids)
+                        response_ids_list.append(r_ids)
+                        try:
+                            gt_val = batch[i].non_tensor_batch["reward_model"]["ground_truth"]
+                        except Exception:
+                            gt_val = ""
+                        gt_str.append(gt_val)
                     delimiter = getattr(self.config.algorithm, 'cot_delimiter', '\\boxed{')
                     temperature = float(self.config.actor_rollout_ref.rollout.temperature)
                     from verl import DataProto as _DP
                     import numpy as np
                     req = _DP.from_dict(
                         non_tensors={
-                            "prompt_str": np.array(prompts_str, dtype=object),
-                            "cot_str": np.array(cot_str, dtype=object),
                             "gt_str": np.array(gt_str, dtype=object),
+                            "prompt_ids": np.array(prompt_ids_list, dtype=object),
+                            "response_ids": np.array(response_ids_list, dtype=object),
                             "delimiter": np.array([delimiter] * B, dtype=object),
                             "temperature": np.full((B,), temperature, dtype=float),
                         }
@@ -1317,10 +1296,16 @@ class COTRewardTrainer(RayPPOTrainer):
                         batch_copy.meta_info["cot_whitebox_ratio_median"] = float(np.median(valid_wb)) if len(valid_wb)>0 else 0.0
                     except Exception as _:
                         pass
-                    # Attach to extra_info
+                    # Attach to extra_info and create cot_log_probs with ratio only
                     for i in range(B):
                         row_info = batch_copy.non_tensor_batch["extra_info"][i]
-                        row_info["whitebox"] = wb_list[i] if i < len(wb_list) else {}
+                        wb_item = wb_list[i] if i < len(wb_list) else {}
+                        row_info["whitebox"] = wb_item
+                        ratio = wb_item.get("ratio", 0.0)
+                        # propagate ratio in both top-level and nested for reward_fn fast path
+                        row_info["ratio"] = ratio
+                        row_info["cot_log_probs"] = {"ratio": ratio, "has_valid_gt": True}
+                        batch_copy.non_tensor_batch["extra_info"][i] = row_info
                 except Exception as e:
                     print(f"Whitebox PMI computation failed: {e}")
 

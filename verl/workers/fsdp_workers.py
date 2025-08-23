@@ -77,7 +77,7 @@ from verl.utils.profiler.performance import reduce_timing
 from verl.utils.py_functional import convert_to_regular_types
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
-from recipe.cot_reward.cot_reward_compute import compute_cot_pmi_whitebox
+from recipe.cot_reward.cot_reward_compute import compute_cot_pmi_whitebox, compute_cot_pmi_whitebox_ids
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -970,6 +970,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         prompts = nt.get("prompt_str")
         cots = nt.get("cot_str")
         gts = nt.get("gt_str")
+        # Optional id-based inputs
+        prompt_ids_list = nt.get("prompt_ids")
+        response_ids_list = nt.get("response_ids")
         delimiter = nt.get("delimiter", "\\boxed{")
         temperature = nt.get("temperature", 1.0)
 
@@ -985,16 +988,28 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         try:
             with self.ulysses_sharding_manager:
-                for i in range(len(prompts)):
-                    res = compute_cot_pmi_whitebox(
-                        model=self.actor.actor_module,
-                        tokenizer=self.tokenizer,
-                        x=prompts[i],
-                        c=cots[i],
-                        a_star=gts[i],
-                        delimiter=delimiter[i],
-                        temperature=float(temperature[i]),
-                    )
+                N = len(gts)
+                for i in range(N):
+                    if prompt_ids_list is not None and response_ids_list is not None:
+                        res = compute_cot_pmi_whitebox_ids(
+                            model=self.actor.actor_module,
+                            tokenizer=self.tokenizer,
+                            prompt_ids=list(prompt_ids_list[i]),
+                            response_ids=list(response_ids_list[i]),
+                            gt_text=gts[i],
+                            delimiter=delimiter[i],
+                            temperature=float(temperature[i]),
+                        )
+                    else:
+                        res = compute_cot_pmi_whitebox(
+                            model=self.actor.actor_module,
+                            tokenizer=self.tokenizer,
+                            x=prompts[i],
+                            c=cots[i],
+                            a_star=gts[i],
+                            delimiter=delimiter[i],
+                            temperature=float(temperature[i]),
+                        )
                     results.append(res)
         finally:
             if self._is_offload_param:
