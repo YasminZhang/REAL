@@ -1305,6 +1305,11 @@ class COTRewardTrainer(RayPPOTrainer):
                         # propagate ratio in both top-level and nested for reward_fn fast path
                         row_info["ratio"] = ratio
                         row_info["cot_log_probs"] = {"ratio": ratio, "has_valid_gt": True}
+                        # propagate cot_max_ratio for reward clamp
+                        try:
+                            row_info["cot_max_ratio"] = float(self.config.algorithm.cot_max_ratio)
+                        except Exception:
+                            pass
                         batch_copy.non_tensor_batch["extra_info"][i] = row_info
                 except Exception as e:
                     print(f"Whitebox PMI computation failed: {e}")

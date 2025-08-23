@@ -1,3 +1,5 @@
+from typing import Any, Dict
+
 """
 CoT Reward Function Implementation
 
@@ -240,95 +242,18 @@ def cot_reward_function(
         Reward value based on likelihood ratio π_θ(a|c,x) / π_θ(a|x)
     """
     config = CoTRewardConfig()
-    
-    # Fast path: allow passing ratio directly via extra_info["ratio"]
-    if extra_info and isinstance(extra_info, dict) and "ratio" in extra_info:
-        ratio = float(extra_info["ratio"])
-        # Clamp to safe range
-        ratio = max(0.0, min(ratio, config.max_ratio))
-        if config.log_rewards:
-            print(f"CoT reward (direct ratio) = {ratio:.4f}")
-        return ratio
-
-    # Otherwise, fallback to nested cot_log_probs structure
-    if not extra_info or "cot_log_probs" not in extra_info:
-        if config.log_rewards:
-            print("Warning: No pre-computed CoT log probabilities found in extra_info")
-        return 0.0
-        
-    cot_data = extra_info["cot_log_probs"]
-    
-    # Check if computation was successful
-    if not cot_data.get("has_valid_gt", False):
-        if config.log_rewards:
-            print(f"Invalid ground truth or computation error: {cot_data.get('error', 'Unknown error')}")
-        return 0.0
-        
-    # If ratio is provided in nested dict, use it directly
-    if "ratio" in cot_data:
-        ratio = float(cot_data["ratio"]) if cot_data["ratio"] is not None else 0.0
-        ratio = max(0.0, min(ratio, config.max_ratio))
-        if config.log_rewards:
-            print(f"CoT reward (nested ratio) = {ratio:.4f}")
-        return ratio
-
-    log_prob_with_cot = cot_data.get("log_prob_with_cot", float('-inf'))
-    log_prob_without_cot = cot_data.get("log_prob_without_cot", float('-inf'))
-    cot_length = cot_data.get("cot_length", 0)
-    # Check for valid log probabilities
-    if log_prob_with_cot == float('-inf') or log_prob_without_cot == float('-inf'):
-        if config.log_rewards:
-            print("Invalid log probabilities computed")
-        return 0.0
-        
-    # Check minimum CoT length requirement
-    if cot_length < config.min_cot_length:
-        if config.log_rewards:
-            print(f"CoT too short: {cot_length} < {config.min_cot_length}")
-        return 0.0
-        
-    # Calculate log ratio: log(P(a|c,x) / P(a|x)) = log(P(a|c,x)) - log(P(a|x))
-    log_ratio = log_prob_with_cot - log_prob_without_cot
-    
-    # Convert to probability ratio
-    ratio = torch.exp(torch.tensor(log_ratio)).item()
-    
-    # Clamp to reasonable range to avoid extreme values
-    ratio = max(0.0, min(ratio, config.max_ratio))
-    
-    if config.log_rewards:
-        print(f"CoT reward calculated: log_ratio={log_ratio:.4f}, ratio={ratio:.4f}, cot_length={cot_length}")
-    
-    return ratio
-
-
-# Alternative simple version for testing without model access
-def simple_cot_reward_function(
-    data_source: str, 
-    solution_str: str, 
-    ground_truth: str, 
-    extra_info: Dict = None
-) -> float:
-    """
-    Simplified CoT reward function for testing that doesn't require model access.
-    Just checks if the response contains reasoning before the delimiter.
-    """
-    delimiter = "\\boxed{"
-    
-    # Split response by delimiter
-    delimiter_pos = solution_str.find(delimiter)
-    
-    if delimiter_pos == -1:
-        return 0.0  # No delimiter found
-        
-    cot_part = solution_str[:delimiter_pos].strip()
-    
-    # Simple heuristic: reward based on length and content of reasoning
-    if len(cot_part) > 100:  # Substantial reasoning
-        return 1.0
-    elif len(cot_part) > 50:  # Moderate reasoning
-        return 0.7
-    elif len(cot_part) > 10:  # Some reasoning
-        return 0.3
+    from recipe.dapo.deepscaler_reward import deepscaler_reward_fn
+    acc = deepscaler_reward_fn("deepscaler", solution_str, ground_truth, extra_info)
+    if extra_info is None or "cot_log_probs" not in extra_info:
+        if extra_info.get('split') != "test":
+            print("Warning: Missing CoT log probabilities in extra_info.")
+        else:
+            pass
+        ratio = 0.
+        return {"score": ratio, "acc": acc}
     else:
-        return 0.0  # Little to no reasoning
+        cot_data = extra_info["cot_log_probs"]
+        max_ratio = extra_info.get("max_ratio", config.max_ratio)
+        ratio = float(cot_data["ratio"]) if cot_data["ratio"] is not None else 0.0
+        ratio = max(0.0, min(ratio, max_ratio))
+        return {"score":ratio, "acc":acc}
