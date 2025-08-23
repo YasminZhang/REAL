@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from verl import DataProto
 from recipe.cot_reward.cot_reward_function import (
@@ -81,7 +82,7 @@ def _process_single_response(
     responses_without_cot = answer_target_tokens
 
     metadata = {
-        "cot_part": cot_tokens,
+        "cot_part": cot_part,
         "gt_answer": gt_answer,
         "has_delimiter": has_delim,
         # Allow selecting only gt tokens (exclude delimiter) when computing sums
@@ -231,7 +232,6 @@ def compute_cot_log_prob_ratios(
     batch_w, batch_wo, md_list = prepare_cot_log_prob_batches(batch, tokenizer, config)
     out_w = actor_worker_group.compute_log_prob(batch_w)
     out_wo = actor_worker_group.compute_log_prob(batch_wo)
-    breakpoint()
 
     # worker returns key 'old_log_probs' for log-prob tensors of targets
     lp_w = out_w.batch["old_log_probs"]  # [B, L_ans]
@@ -277,3 +277,99 @@ def compute_cot_log_prob_ratios(
             )
 
     return results
+
+
+# ============================
+# White-box teacher-forced log-prob helpers (optional)
+# ============================
+
+@torch.no_grad()
+def logp_of_answer(model, tokenizer, prompt: str, answer: str, temperature: float = 1.0):
+    """
+    Returns (total_log_likelihood, n_target_tokens) for `answer` given `prompt`.
+    Teacher-forced next-token prediction, summing only over answer tokens.
+    """
+    device = next(model.parameters()).device  # infer device
+
+    full = prompt + answer
+    enc_full = tokenizer(full, return_tensors="pt")
+    input_ids = enc_full.input_ids.to(device)
+    attn_mask = enc_full.attention_mask.to(device)
+
+    enc_prompt = tokenizer(prompt, return_tensors="pt")
+    n_prompt = enc_prompt.input_ids.shape[1]
+
+    labels = input_ids.clone().to(device).long()
+    labels[:, :n_prompt] = -100  # ignore prompt positions
+
+    # Forward (fp32 for stability)
+    with torch.autocast(device_type=str(device).split(":")[0], dtype=torch.float32, enabled=False):
+        out = model(input_ids=input_ids, attention_mask=attn_mask)
+        logits = out.logits  # [B, T, V]
+
+    # Shift for next-token prediction
+    logits = logits[:, :-1, :]
+    labels = labels[:, 1:]
+    # Ensure same device for all tensors
+    dev = logits.device
+    if labels.device != dev:
+        labels = labels.to(dev)
+    mask = (labels != -100)
+    if mask.device != dev:
+        mask = mask.to(dev)
+
+    # Temperature scaling and per-token logprobs
+    if temperature is not None and temperature > 0 and temperature != 1.0:
+        logits = logits / temperature
+    logprobs = F.log_softmax(logits, dim=-1)  # [B, T-1, V]
+    # Avoid invalid gather on masked positions (-100)
+    safe_labels = labels.clone()
+    safe_labels[~mask] = 0
+    tgt_logprobs = logprobs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
+
+    # Sum only over answer tokens
+    total_logp = tgt_logprobs[mask].sum().item() if mask.any() else 0.0
+    length = int(mask.sum().item())
+    return total_logp, length
+
+
+@torch.no_grad()
+def compute_cot_pmi_whitebox(
+    model,
+    tokenizer,
+    x: str,
+    c: str,
+    a_star: str,
+    delimiter: str = "\\boxed{",
+    temperature: float = 1.0,
+) -> Dict[str, float]:
+    """
+    Compute PMI-style CoT advantage with a direct model forward:
+      - prompt_with_c:   x + c + "Final Answer:" (or delimiter)
+      - prompt_without_c:x + "Final Answer:"
+      - answer is delimiter + a_star (matches our pipeline)
+
+    Returns dict with logp_c, logp_0, Lc, L0, pmi_log, pmi_norm, ratio.
+    """
+    # Build prompts
+    # You can customize the separator/headers to match your dataset format
+    prompt_with_c = f"{x}{c}"
+    prompt_without_c = f"{x}"
+    answer = f"{delimiter}{a_star}"
+
+    logp_c, Lc = logp_of_answer(model, tokenizer, prompt_with_c, answer, temperature=temperature)
+    logp_0, L0 = logp_of_answer(model, tokenizer, prompt_without_c, answer, temperature=temperature)
+    pmi_log = logp_c - logp_0
+    # length-normalized PMI to reduce verbosity bias
+    pmi_norm = (logp_c / max(Lc, 1)) - (logp_0 / max(L0, 1))
+    ratio = torch.exp(torch.tensor(pmi_log)).item()
+
+    return {
+        "logp_c": logp_c,
+        "logp_0": logp_0,
+        "Lc": Lc,
+        "L0": L0,
+        "pmi_log": pmi_log,
+        "pmi_norm": pmi_norm,
+        "ratio": ratio,
+    }

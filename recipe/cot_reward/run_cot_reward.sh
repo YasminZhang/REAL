@@ -22,9 +22,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=8192
+max_response_length=1024
 enable_overlong_buffer=false
-overlong_buffer_len=8192
+overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -77,6 +77,7 @@ python3 -m recipe.cot_reward.main_cot_reward \
     algorithm.cot_max_ratio=${cot_max_ratio} \
     algorithm.cot_log_rewards=${cot_log_rewards} \
     algorithm.cot_truncate_tokens=${cot_truncate_tokens} \
+    +algorithm.cot_whitebox.enable=true \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \

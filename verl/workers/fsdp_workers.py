@@ -77,6 +77,7 @@ from verl.utils.profiler.performance import reduce_timing
 from verl.utils.py_functional import convert_to_regular_types
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from recipe.cot_reward.cot_reward_compute import compute_cot_pmi_whitebox
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -948,6 +949,58 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.ref_policy.actor_module.shard()
 
         return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    def compute_whitebox_cot_pmi(self, data: DataProto):
+        """
+        Compute PMI-style CoT advantage on the actor device using teacher-forced log-prob.
+
+        non_tensor_batch must include:
+          - prompt_str: np.ndarray[str]
+          - cot_str: np.ndarray[str]
+          - gt_str: np.ndarray[str]
+        Optionally:
+          - delimiter: str or np.ndarray[str] (default "\\boxed{")
+          - temperature: float or np.ndarray[float] (default 1.0)
+        """
+        self.actor.actor_module.eval()
+        import numpy as np
+
+        nt = data.non_tensor_batch
+        prompts = nt.get("prompt_str")
+        cots = nt.get("cot_str")
+        gts = nt.get("gt_str")
+        delimiter = nt.get("delimiter", "\\boxed{")
+        temperature = nt.get("temperature", 1.0)
+
+        # Normalize broadcast scalars
+        if not isinstance(delimiter, (list, tuple, np.ndarray)):
+            delimiter = [delimiter] * len(prompts)
+        if not isinstance(temperature, (list, tuple, np.ndarray)):
+            temperature = [temperature] * len(prompts)
+
+        # Keep model on device during teacher-forced forward; respect sharding manager
+        results = []
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+        try:
+            with self.ulysses_sharding_manager:
+                for i in range(len(prompts)):
+                    res = compute_cot_pmi_whitebox(
+                        model=self.actor.actor_module,
+                        tokenizer=self.tokenizer,
+                        x=prompts[i],
+                        c=cots[i],
+                        a_star=gts[i],
+                        delimiter=delimiter[i],
+                        temperature=float(temperature[i]),
+                    )
+                    results.append(res)
+        finally:
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        return DataProto.from_dict(non_tensors={"whitebox": np.array(results, dtype=object)})
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

@@ -268,8 +268,8 @@ def cot_reward_function(
     if "ratio" in cot_data:
         ratio = float(cot_data["ratio"]) if cot_data["ratio"] is not None else 0.0
         ratio = max(0.0, min(ratio, config.max_ratio))
-        if config.log_rewards:
-            print(f"CoT reward (nested ratio) = {ratio:.4f}")
+        # if config.log_rewards:
+        #     print(f"CoT reward (nested ratio) = {ratio:.4f}")
         return ratio
 
     log_prob_with_cot = cot_data.get("log_prob_with_cot", float('-inf'))

@@ -1279,6 +1279,50 @@ class COTRewardTrainer(RayPPOTrainer):
                     print(
                         f"CoT ratio stats - mean: {np.mean(valid_ratios):.3f}, median: {np.median(valid_ratios):.3f}, std: {np.std(valid_ratios):.3f}"
                     )
+            # Optionally compute white-box PMI on actor device for debugging/validation
+            whitebox_cfg = getattr(self.config.algorithm, "cot_whitebox", None)
+            if whitebox_cfg and getattr(whitebox_cfg, "enable", False):
+                try:
+                    prompts_str = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+                    cot_str = [r.get("cot_part", "") for r in cot_log_prob_results]
+                    gt_str = [r.get("gt_answer", "") for r in cot_log_prob_results]
+                    delimiter = getattr(self.config.algorithm, 'cot_delimiter', '\\boxed{')
+                    temperature = float(self.config.actor_rollout_ref.rollout.temperature)
+                    from verl import DataProto as _DP
+                    import numpy as np
+                    req = _DP.from_dict(
+                        non_tensors={
+                            "prompt_str": np.array(prompts_str, dtype=object),
+                            "cot_str": np.array(cot_str, dtype=object),
+                            "gt_str": np.array(gt_str, dtype=object),
+                            "delimiter": np.array([delimiter] * B, dtype=object),
+                            "temperature": np.full((B,), temperature, dtype=float),
+                        }
+                    )
+                    wb = self.actor_rollout_wg.compute_whitebox_cot_pmi(req)
+                    wb_list = wb.non_tensor_batch.get("whitebox", [])
+                    # Print whitebox ratios for reference
+                    try:
+                        wb_ratios = [d.get("ratio", None) for d in wb_list]
+                        valid_wb = [r for r in wb_ratios if r is not None]
+                        if len(valid_wb) > 0:
+                            print(
+                                f"Whitebox CoT ratios: count={len(valid_wb)}, "
+                                f"first5={valid_wb[:5]}, mean={np.mean(valid_wb):.4f}, median={np.median(valid_wb):.4f}"
+                            )
+                        else:
+                            print("Whitebox CoT ratios: no valid entries")
+                        # Expose as meta metrics too
+                        batch_copy.meta_info["cot_whitebox_ratio_mean"] = float(np.mean(valid_wb)) if len(valid_wb)>0 else 0.0
+                        batch_copy.meta_info["cot_whitebox_ratio_median"] = float(np.median(valid_wb)) if len(valid_wb)>0 else 0.0
+                    except Exception as _:
+                        pass
+                    # Attach to extra_info
+                    for i in range(B):
+                        row_info = batch_copy.non_tensor_batch["extra_info"][i]
+                        row_info["whitebox"] = wb_list[i] if i < len(wb_list) else {}
+                except Exception as e:
+                    print(f"Whitebox PMI computation failed: {e}")
 
             return batch_copy
             
