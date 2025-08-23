@@ -345,10 +345,11 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         for uid, std in prompt_uid2metric_std.items()
                         if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
                     ]
+                    # Prompts where all responses are incorrect (acc == 0 across n samples)
+                    # NOTE: For accuracy-style metrics in {0,1}, the “all incorrect” case means mean == 0.
+                    # Using ">= 0" incorrectly included almost all prompts and diluted JEPO training.
                     all_incorrect_uids = [
-                        uid
-                        for uid, mean in prompt_uid2metric_mean.items()
-                        if mean >= 0 # Only works when we use acc as filter metrics. need to be change for other metrics.
+                        uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
                     ]
                     
                     num_prompt_in_batch += len(kept_prompt_uids)

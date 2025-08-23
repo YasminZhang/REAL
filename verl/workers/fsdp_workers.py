@@ -804,6 +804,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.jepo_actor_optimizer, device_id=get_device_id())
+        # Ensure reference model is available to JEPO actor when computing KL
+        ref_loaded = False
+        if hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None:
+            try:
+                # Attach ref module to JEPO actor for KL computation
+                self.jepo_actor._ref_module = self.ref_module_fsdp
+                if self._is_offload_param:
+                    load_fsdp_model_to_gpu(self.ref_module_fsdp)
+                    ref_loaded = True
+            except Exception:
+                self.jepo_actor._ref_module = None
 
         with self.ulysses_sharding_manager:
             # perform JEPO training
@@ -831,6 +842,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.jepo_actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during jepo_update_actor", logger=logger)
+        # Offload ref model if we loaded it for JEPO
+        if ref_loaded and self._is_offload_param and hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None:
+            offload_fsdp_model_to_cpu(self.ref_module_fsdp)
+            log_gpu_memory_usage("After offload ref model during jepo_update_actor", logger=logger)
 
         return output
 

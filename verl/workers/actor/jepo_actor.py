@@ -109,6 +109,8 @@ class JEPOActor(DataParallelPPOActor):
         accum_steps = int(jepo_cfg.get("accum_steps", 4))               # fixed accumulate steps for consistent backwards
         format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
+        beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
+        kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
         n = int(jepo_cfg.get("num_response_per_question", 8))  # number of responses per question
 
@@ -139,6 +141,7 @@ class JEPOActor(DataParallelPPOActor):
             jepo_advs_std=0.0,
             cot_log_probs_mean=0.0,
             log_mean_answer_probs_mean=0.0,
+            kl_loss=0.0,
         )
         meter_count = 0
         num_delim = 0
@@ -146,12 +149,29 @@ class JEPOActor(DataParallelPPOActor):
         # Get total number of filtered responses for scaling
         total_filtered = filtered_data.batch["responses"].shape[0]
         num_delim = total_filtered
+        # Total number of responses in this JEPO batch (used for normalization)
         num_responses = data.batch["responses"].shape[0]
         
         # Extract stored advantages and weights
         jepo_advantages = filtered_data.batch["jepo_adv"]  # [N_filtered]
         jepo_weights = filtered_data.batch["jepo_weights"]  # [N_filtered]
         
+        # Short-circuit if no samples contain the delimiter (nothing to update for CoT)
+        if total_filtered == 0:
+            print("JEPO: no responses contain delimiter; skipping update step")
+            return {
+                "jepo_actor/jepo_loss": 0.0,
+                "jepo_actor/supp_loss": 0.0,
+                "jepo_actor/total_loss": 0.0,
+                "jepo_actor/grad_norm": 0.0,
+                "jepo_actor/jepo_advs_mean": 0.0,
+                "jepo_actor/jepo_advs_std": 0.0,
+                "jepo_actor/cot_log_probs_mean": 0.0,
+                "jepo_actor/log_mean_answer_probs_mean": 0.0,
+                "jepo_actor/beta_supp": beta_supp,
+                "jepo_actor/format_penalty": format_penalty,
+            }
+
         # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
@@ -204,16 +224,42 @@ class JEPOActor(DataParallelPPOActor):
                             has_delimiter=[True] * B_step,  # All filtered data has delimiter
                             vocab_chunk=8192
                         )
+
+                        # Optionally compute KL term against reference policy on the same tokens
+                        kl_loss_part = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+                        if beta_kl > 0 and hasattr(self, "_ref_module") and self._ref_module is not None:
+                            with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                                out_ref = self._ref_module(
+                                    input_ids=step_data.batch["batch_input_ids"],
+                                    attention_mask=step_data.batch["batch_attention_mask"],
+                                    position_ids=step_data.batch["batch_position_ids"],
+                                    use_cache=False,
+                                )
+                                ref_logits = out_ref.logits
+                                ref_logits.div_(temperature)
+                            _, ref_answer_log_probs, _ = compute_jepo_from_logits_efficient(
+                                logits=ref_logits,
+                                data_dict=step_data_dict,
+                                format_penalty=format_penalty,
+                                has_delimiter=[True] * B_step,
+                                vocab_chunk=8192,
+                            )
+                            # kld over answer sums per sample; normalize by contributing samples
+                            kld = kl_penalty(
+                                logprob=answer_log_probs, ref_logprob=ref_answer_log_probs, kl_penalty=kl_loss_type
+                            )
+                            kl_loss_part = (kld.sum() / denom) * beta_kl
                         
                         # Get advantages and weights for this step
                         step_advantages = jepo_advantages[step_indices]
                         step_weights = jepo_weights[step_indices]
                         
-                        # Compute losses
-                        jepo_loss_part = (step_advantages * cot_log_probs).sum() / num_responses
-                        supp_loss_part = beta_supp * (step_weights * log_mean_answer_prob).sum() / num_responses
+                        # Compute losses. Normalize by the number of contributing samples to avoid vanishing gradients
+                        denom = max(total_filtered, 1)
+                        jepo_loss_part = (step_advantages * cot_log_probs).sum() / denom
+                        supp_loss_part = beta_supp * (step_weights * log_mean_answer_prob).sum() / denom
                         
-                        loss_chunk = (jepo_loss_part + supp_loss_part) / accum_steps
+                        loss_chunk = (jepo_loss_part + supp_loss_part + kl_loss_part) / accum_steps
                         print("finish calculate jepo loss")
                         loss_chunk.backward()
                         
@@ -225,6 +271,7 @@ class JEPOActor(DataParallelPPOActor):
                         meters["jepo_advs_std"] += float(step_advantages.std().detach())
                         meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
                         meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
+                        meters["kl_loss"] += float(kl_loss_part.detach()) / accum_steps
                         meter_count += 1
                         
                         del out, logits, cot_log_probs, answer_log_probs
@@ -251,5 +298,7 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/cot_log_probs_mean": meters["cot_log_probs_mean"],
             "jepo_actor/log_mean_answer_probs_mean": meters["log_mean_answer_probs_mean"],
             "jepo_actor/beta_supp": beta_supp,
+            "jepo_actor/kl_loss": meters.get("kl_loss", 0.0),
+            "jepo_actor/beta_kl": beta_kl,
             "jepo_actor/format_penalty": format_penalty,
         }
