@@ -49,6 +49,15 @@ def _process_single_response(
     has_delim = config.delimiter in response_str
 
     prompt_tokens = tokenizer.encode(prompt_str, add_special_tokens=False)
+    # Ensure there is at least one prefix token to align logits for first answer token
+    if len(prompt_tokens) == 0:
+        bos_id = getattr(tokenizer, "bos_token_id", None)
+        fallback_id = bos_id if bos_id is not None else (
+            getattr(tokenizer, "eos_token_id", None) if getattr(tokenizer, "eos_token_id", None) is not None else (
+                getattr(tokenizer, "pad_token_id", None) if getattr(tokenizer, "pad_token_id", None) is not None else 0
+            )
+        )
+        prompt_tokens = [fallback_id]
     cot_tokens = tokenizer.encode(cot_part, add_special_tokens=False)
     # Target answer includes the delimiter prefix
     delimiter_tokens = tokenizer.encode(str(config.delimiter), add_special_tokens=False)
@@ -220,9 +229,9 @@ def compute_cot_log_prob_ratios(
     Returns a list of dicts aligned with rows in the input batch.
     """
     batch_w, batch_wo, md_list = prepare_cot_log_prob_batches(batch, tokenizer, config)
-
     out_w = actor_worker_group.compute_log_prob(batch_w)
     out_wo = actor_worker_group.compute_log_prob(batch_wo)
+    breakpoint()
 
     # worker returns key 'old_log_probs' for log-prob tensors of targets
     lp_w = out_w.batch["old_log_probs"]  # [B, L_ans]
@@ -231,13 +240,15 @@ def compute_cot_log_prob_ratios(
     results: List[Dict[str, Any]] = []
     for i, md in enumerate(md_list):
         try:
-            breakpoint()
             off = int(md.get("answer_offset", 0))
             ln = int(md.get("answer_len", lp_w.size(1)))
+            # Guard invalid/empty windows to avoid zero-length sum
+            if ln <= 0 or off < 0 or off >= lp_w.size(1):
+                off, ln = 0, lp_w.size(1)
             with_cot = float(lp_w[i, off:off + ln].sum().item())
             without_cot = float(lp_wo[i, off:off + ln].sum().item())
             log_ratio = with_cot - without_cot
-            ratio = float(torch.exp(torch.tensor(log_ratio)).item())
+            ratio = float(torch.exp(torch.tensor(log_ratio)).clamp(min=0.0, max=10.0).item())
             results.append(
                 {
                     "log_prob_with_cot": with_cot,

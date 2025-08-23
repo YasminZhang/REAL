@@ -22,9 +22,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=4096
+max_response_length=8192
 enable_overlong_buffer=false
-overlong_buffer_len=4096
+overlong_buffer_len=8192
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"

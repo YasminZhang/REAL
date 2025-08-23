@@ -275,7 +275,6 @@ def cot_reward_function(
     log_prob_with_cot = cot_data.get("log_prob_with_cot", float('-inf'))
     log_prob_without_cot = cot_data.get("log_prob_without_cot", float('-inf'))
     cot_length = cot_data.get("cot_length", 0)
-    
     # Check for valid log probabilities
     if log_prob_with_cot == float('-inf') or log_prob_without_cot == float('-inf'):
         if config.log_rewards:
