@@ -72,7 +72,7 @@ def _process_single_response(
     responses_without_cot = answer_target_tokens
 
     metadata = {
-        "cot_part": cot_part,
+        "cot_part": cot_tokens,
         "gt_answer": gt_answer,
         "has_delimiter": has_delim,
         # Allow selecting only gt tokens (exclude delimiter) when computing sums
@@ -140,18 +140,11 @@ def prepare_cot_log_prob_batches(
 
     for i in range(B):
         prompt_ids = prompts[i]
-        if tokenizer.pad_token_id is not None:
-            plen = int((prompt_ids != tokenizer.pad_token_id).sum().item())
-        else:
-            plen = prompt_ids.shape[-1]
-        prompt_str = tokenizer.decode(prompt_ids[:plen], skip_special_tokens=True)
+        # Robust to left/right truncation and any padding: rely on skip_special_tokens
+        prompt_str = tokenizer.decode(prompt_ids, skip_special_tokens=True)
 
         resp_ids = responses[i]
-        if tokenizer.pad_token_id is not None:
-            rlen = int((resp_ids != tokenizer.pad_token_id).sum().item())
-        else:
-            rlen = resp_ids.shape[-1]
-        response_str = tokenizer.decode(resp_ids[:rlen], skip_special_tokens=True)
+        response_str = tokenizer.decode(resp_ids, skip_special_tokens=True)
 
         reward_info = batch[i].non_tensor_batch.get("reward_model", {})
         gt = reward_info.get("ground_truth", "")

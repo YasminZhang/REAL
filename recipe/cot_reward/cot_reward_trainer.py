@@ -991,6 +991,16 @@ class COTRewardTrainer(RayPPOTrainer):
                         # Compute CoT log probabilities before reward computation
                         # Create a copy to avoid modifying the original batch used for log prob computation
                         batch_for_reward = self._compute_and_store_cot_log_probs(batch)
+                        # Log CoT delimiter coverage metrics
+                        try:
+                            num_with_delim = batch_for_reward.meta_info.get("cot_num_with_delimiter", 0)
+                            frac_with_delim = batch_for_reward.meta_info.get("cot_frac_with_delimiter", 0.0)
+                            metrics.update({
+                                "cot/num_with_delimiter": num_with_delim,
+                                "cot/frac_with_delimiter": frac_with_delim,
+                            })
+                        except Exception:
+                            pass
                         
                         if self.config.reward_model.launch_reward_fn_async:
                             future_reward = compute_reward_async.remote(data=batch_for_reward, reward_fn=self.reward_fn)
@@ -1241,16 +1251,29 @@ class COTRewardTrainer(RayPPOTrainer):
             assert len(cot_log_prob_results) == B, (
                 f"cot_log_prob_results length {len(cot_log_prob_results)} != batch size {B}"
             )
+            # track has_delimiter flags
+            has_delim_flags = []
             for i in range(B):
                 row_info = extra_info[i] if isinstance(extra_info[i], dict) else {}
                 row_info["cot_log_probs"] = cot_log_prob_results[i]
                 extra_info[i] = row_info
+                has_delim_flags.append(bool(cot_log_prob_results[i].get("has_delimiter", False)))
             batch_copy.non_tensor_batch["extra_info"] = extra_info
+            # store boolean vector for analysis
+            batch_copy.non_tensor_batch["cot_has_delimiter"] = _np.array(has_delim_flags)
+            # aggregate counts as meta for metrics
+            num_with_delim = int(sum(has_delim_flags))
+            frac_with_delim = float(num_with_delim / B) if B > 0 else 0.0
+            batch_copy.meta_info["cot_num_with_delimiter"] = num_with_delim
+            batch_copy.meta_info["cot_frac_with_delimiter"] = frac_with_delim
 
             if self.cot_config.log_rewards:
                 # Log simple stats
                 valid_ratios = [r.get("ratio", 0) for r in cot_log_prob_results if r.get("ratio", 0) > 0]
-                print(f"Computed CoT log-probs for {B} rows; valid ratios: {len(valid_ratios)}")
+                print(
+                    f"Computed CoT log-probs for {B} rows; valid ratios: {len(valid_ratios)}, "
+                    f"with delimiter: {num_with_delim} ({frac_with_delim:.2%})"
+                )
                 if valid_ratios:
                     import numpy as np
                     print(

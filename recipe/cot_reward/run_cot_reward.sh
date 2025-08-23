@@ -7,7 +7,7 @@ exp_name='cot-reward-deepscaler-1.5b-8k'
 # CoT specific parameters
 cot_delimiter="\\boxed\{"
 cot_min_length=10
-cot_max_ratio=10.0
+cot_max_ratio=100.0
 cot_log_rewards=true
 cot_truncate_tokens=50
 
