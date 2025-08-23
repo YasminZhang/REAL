@@ -256,4 +256,5 @@ def cot_reward_function(
         max_ratio = extra_info.get("max_ratio", config.max_ratio)
         ratio = float(cot_data["ratio"]) if cot_data["ratio"] is not None else 0.0
         ratio = max(0.0, min(ratio, max_ratio))
+        print(f"CoT Reward - Ratio: {ratio}")
         return {"score":ratio, "acc":acc}

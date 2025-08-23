@@ -65,7 +65,12 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 # Import CoT reward functionality
 from recipe.cot_reward.cot_reward_function import CoTRewardConfig
-from recipe.cot_reward.cot_reward_compute import CoTLogProbConfig, compute_cot_log_prob_ratios
+from recipe.cot_reward.cot_reward_compute import (
+    CoTLogProbConfig,
+    compute_cot_log_prob_ratios,
+    _possible_delimiter_tokenizations,
+    _find_subsequence,
+)
 
 WorkerType = type[Worker]
 
@@ -1313,8 +1318,31 @@ class COTRewardTrainer(RayPPOTrainer):
                         batch_copy.non_tensor_batch["extra_info"][i] = row_info
                 except Exception as e:
                     print(f"Whitebox PMI computation failed: {e}")
+            
+                # Compute delimiter coverage at token level for metrics
+                try:
+                    del_tok_cands = _possible_delimiter_tokenizations(self.tokenizer, delimiter)
+                    has_delim_flags = []
+                    for ids in response_ids_list:
+                        idx = _find_subsequence(ids, del_tok_cands)
+                        has_delim_flags.append(idx is not None)
+                    num_with_delim = int(sum(1 for v in has_delim_flags if v))
+                    frac_with_delim = float(num_with_delim) / float(B) if B > 0 else 0.0
+                    batch_copy.meta_info["cot_num_with_delimiter"] = num_with_delim
+                    batch_copy.meta_info["cot_frac_with_delimiter"] = frac_with_delim
+                    # Also propagate per-sample flag into extra_info for downstream use
+                    try:
+                        for i in range(B):
+                            row_info = batch_copy.non_tensor_batch["extra_info"][i]
+                            row_info["has_delimiter"] = bool(has_delim_flags[i])
+                            batch_copy.non_tensor_batch["extra_info"][i] = row_info
+                    except Exception:
+                        pass
+                except Exception:
+                    # Best-effort; keep metrics absent if anything goes wrong
+                    pass
 
-            return batch_copy
+                return batch_copy
             
         except Exception as e:
             print(f"Error computing CoT log probabilities: {e}")
