@@ -2,12 +2,12 @@
 set -xeuo pipefail
 
 project_name='CoT_Reward'
-exp_name='cot-reward-deepscaler-1.5b-8k'
+exp_name='cot-reward-deepscaler-1.5b-4k'
 
 # CoT specific parameters
 cot_delimiter="\\boxed\{"
 cot_min_length=10
-cot_max_ratio=100.0
+cot_max_ratio=1.0
 cot_log_rewards=true
 cot_truncate_tokens=50
 
@@ -95,7 +95,7 @@ python3 -m recipe.cot_reward.main_cot_reward \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=4e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \

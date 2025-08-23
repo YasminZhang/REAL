@@ -1312,7 +1312,8 @@ class COTRewardTrainer(RayPPOTrainer):
                         row_info["cot_log_probs"] = {"ratio": ratio, "has_valid_gt": True}
                         # propagate cot_max_ratio for reward clamp
                         try:
-                            row_info["cot_max_ratio"] = float(self.config.algorithm.cot_max_ratio)
+                            # Ensure reward function can read assigned max_ratio from bash/config
+                            row_info["max_ratio"] = float(getattr(self.config.algorithm, "cot_max_ratio", self.cot_config.max_ratio))
                         except Exception:
                             pass
                         batch_copy.non_tensor_batch["extra_info"][i] = row_info

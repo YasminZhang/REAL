@@ -170,6 +170,28 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
 
+    # Optional: accuracy-style metric from reward function
+    try:
+        acc_values = None
+        if "acc" in batch.non_tensor_batch:
+            import numpy as _np
+            acc_arr = batch.non_tensor_batch["acc"]
+            # acc_arr may be list or numpy array
+            acc_values = torch.tensor(_np.array(acc_arr), dtype=torch.float32)
+        elif "acc" in batch.batch:
+            acc_values = batch.batch["acc"].float().detach().cpu()
+        if acc_values is not None and acc_values.numel() > 0:
+            metrics.update(
+                {
+                    "critic/acc/mean": torch.mean(acc_values).item(),
+                    "critic/acc/max": torch.max(acc_values).item(),
+                    "critic/acc/min": torch.min(acc_values).item(),
+                }
+            )
+    except Exception:
+        # Best-effort; skip acc metrics if shape/type unexpected
+        pass
+
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:
         num_turns = batch.non_tensor_batch["__num_turns__"]
