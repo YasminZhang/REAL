@@ -351,9 +351,23 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     all_incorrect_uids = [
                         uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
                     ]
+                    # Prompts where all responses are correct (acc == 1 across n samples)
+                    all_correct_uids = [
+                        uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 1.0)
+                    ]
+                    # Partial solves: neither all-correct nor all-incorrect
+                    all_prompt_uids = list(prompt_uid2metric_mean.keys())
+                    partial_uids = [
+                        uid for uid in all_prompt_uids if uid not in all_correct_uids and uid not in all_incorrect_uids
+                    ]
                     
                     num_prompt_in_batch += len(kept_prompt_uids)
                     num_prompt_in_jepo_buffer += len(all_incorrect_uids)
+                    # Log solve stats for this gen batch
+                    metrics["jepo_buffer/solve_all"] = len(all_correct_uids)
+                    metrics["jepo_buffer/solve_none"] = len(all_incorrect_uids)
+                    metrics["jepo_buffer/solve_partial"] = len(partial_uids)
+                    metrics["jepo_buffer/total_prompts"] = len(all_prompt_uids)
 
                     kept_traj_idxs = []
                     all_incorrect_traj_idxs = []

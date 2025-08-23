@@ -169,6 +169,8 @@ class JEPOActor(DataParallelPPOActor):
                 "jepo_actor/cot_log_probs_mean": 0.0,
                 "jepo_actor/log_mean_answer_probs_mean": 0.0,
                 "jepo_actor/beta_supp": beta_supp,
+                "jepo_actor/num_has_delimiter": 0,
+                "jepo_actor/frac_has_delimiter": 0.0,
                 "jepo_actor/format_penalty": format_penalty,
             }
 
@@ -300,5 +302,7 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/beta_supp": beta_supp,
             "jepo_actor/kl_loss": meters.get("kl_loss", 0.0),
             "jepo_actor/beta_kl": beta_kl,
+            "jepo_actor/num_has_delimiter": int(num_delim),
+            "jepo_actor/frac_has_delimiter": float(num_delim / max(num_responses, 1)),
             "jepo_actor/format_penalty": format_penalty,
         }
