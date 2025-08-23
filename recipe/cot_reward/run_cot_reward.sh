@@ -7,7 +7,7 @@ exp_name='cot-reward-deepscaler-1.5b-8k'
 # CoT specific parameters
 cot_delimiter="\\boxed\{"
 cot_min_length=10
-cot_max_ratio=100.0
+cot_max_ratio=10.0
 cot_log_rewards=true
 cot_truncate_tokens=50
 
@@ -22,9 +22,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=1024
+max_response_length=4096
 enable_overlong_buffer=false
-overlong_buffer_len=1024
+overlong_buffer_len=4096
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -132,8 +132,8 @@ python3 -m recipe.cot_reward.main_cot_reward \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=False \
-    trainer.test_freq=20 \
+    trainer.val_before_train=True \
+    trainer.test_freq=10 \
     trainer.save_freq=20 \
     trainer.total_epochs=50 \
     trainer.total_training_steps=1000 \

@@ -284,7 +284,14 @@ def compute_cot_log_prob_ratios(
 # ============================
 
 @torch.no_grad()
-def logp_of_answer(model, tokenizer, prompt: str, answer: str, temperature: float = 1.0):
+def logp_of_answer(
+    model,
+    tokenizer,
+    prompt: str,
+    answer: str,
+    temperature: float = 1.0,
+    exclude_prefix_len: int = 0,
+):
     """
     Returns (total_log_likelihood, n_target_tokens) for `answer` given `prompt`.
     Teacher-forced next-token prediction, summing only over answer tokens.
@@ -327,9 +334,14 @@ def logp_of_answer(model, tokenizer, prompt: str, answer: str, temperature: floa
     safe_labels[~mask] = 0
     tgt_logprobs = logprobs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
 
-    # Sum only over answer tokens
-    total_logp = tgt_logprobs[mask].sum().item() if mask.any() else 0.0
-    length = int(mask.sum().item())
+    # Sum only over answer tokens, excluding the first `exclude_prefix_len` tokens
+    if mask.any():
+        cum = mask.int().cumsum(dim=1)
+        keep = mask & (cum > exclude_prefix_len)
+        total_logp = tgt_logprobs[keep].sum().item() if keep.any() else 0.0
+        length = int(keep.sum().item())
+    else:
+        total_logp, length = 0.0, 0
     return total_logp, length
 
 
@@ -355,12 +367,22 @@ def compute_cot_pmi_whitebox(
     # You can customize the separator/headers to match your dataset format
     prompt_with_c = f"{x}{c}"
     prompt_without_c = f"{x}"
+    # Tokenize delimiter and GT to compute lengths; exclude delimiter from sum
+    delim_ids = tokenizer.encode(delimiter, add_special_tokens=False)
+    gt_ids = tokenizer.encode(str(a_star), add_special_tokens=False)
     answer = f"{delimiter}{a_star}"
 
-    logp_c, Lc = logp_of_answer(model, tokenizer, prompt_with_c, answer, temperature=temperature)
-    logp_0, L0 = logp_of_answer(model, tokenizer, prompt_without_c, answer, temperature=temperature)
+    logp_c, _ = logp_of_answer(
+        model, tokenizer, prompt_with_c, answer, temperature=temperature, exclude_prefix_len=len(delim_ids)
+    )
+    logp_0, _ = logp_of_answer(
+        model, tokenizer, prompt_without_c, answer, temperature=temperature, exclude_prefix_len=len(delim_ids)
+    )
     pmi_log = logp_c - logp_0
     # length-normalized PMI to reduce verbosity bias
+    # length-normalized PMI to reduce verbosity bias (normalize by GT length only)
+    Lc = max(len(gt_ids), 0)
+    L0 = max(len(gt_ids), 0)
     pmi_norm = (logp_c / max(Lc, 1)) - (logp_0 / max(L0, 1))
     ratio = torch.exp(torch.tensor(pmi_log)).item()
 
