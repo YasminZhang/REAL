@@ -1227,29 +1227,36 @@ class COTRewardTrainer(RayPPOTrainer):
                 tokenizer=self.tokenizer,
                 config=self.cot_logprob_config
             )
-            
-            # Create a copy of the batch to avoid modifying the original
+            # Convert to per-row extra_info and attach under non_tensor_batch['extra_info']
             batch_copy = deepcopy(batch)
-            # Store results in non_tensor_batch
-            batch_copy.non_tensor_batch["cot_log_probs"] = cot_log_prob_results
-            
+            import numpy as _np
+            B = len(batch_copy)
+            # Ensure extra_info array exists
+            extra_info = batch_copy.non_tensor_batch.get("extra_info")
+            if extra_info is None:
+                extra_info = _np.array([{} for _ in range(B)], dtype=object)
+            else:
+                # make a writable copy
+                extra_info = extra_info.copy()
+            assert len(cot_log_prob_results) == B, (
+                f"cot_log_prob_results length {len(cot_log_prob_results)} != batch size {B}"
+            )
+            for i in range(B):
+                row_info = extra_info[i] if isinstance(extra_info[i], dict) else {}
+                row_info["cot_log_probs"] = cot_log_prob_results[i]
+                extra_info[i] = row_info
+            batch_copy.non_tensor_batch["extra_info"] = extra_info
+
             if self.cot_config.log_rewards:
-                total_samples = sum(len(sample_results) for sample_results in cot_log_prob_results)
-                print(f"Successfully computed CoT log probabilities for {total_samples} responses")
-                
-                # Log some sample statistics
-                valid_ratios = []
-                for sample_results in cot_log_prob_results:
-                    for result in sample_results:
-                        if result.get("has_valid_gt", False) and result.get("ratio", 0) > 0:
-                            valid_ratios.append(result["ratio"])
-                
+                # Log simple stats
+                valid_ratios = [r.get("ratio", 0) for r in cot_log_prob_results if r.get("ratio", 0) > 0]
+                print(f"Computed CoT log-probs for {B} rows; valid ratios: {len(valid_ratios)}")
                 if valid_ratios:
                     import numpy as np
-                    print(f"CoT ratio stats - mean: {np.mean(valid_ratios):.3f}, "
-                          f"median: {np.median(valid_ratios):.3f}, "
-                          f"std: {np.std(valid_ratios):.3f}")
-            
+                    print(
+                        f"CoT ratio stats - mean: {np.mean(valid_ratios):.3f}, median: {np.median(valid_ratios):.3f}, std: {np.std(valid_ratios):.3f}"
+                    )
+
             return batch_copy
             
         except Exception as e:
