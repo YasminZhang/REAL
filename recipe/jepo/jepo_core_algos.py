@@ -84,6 +84,20 @@ def _find_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
             return s
     return -1
 
+def _rfind_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
+    """Return start index of the last occurrence of needle_ids in haystack_ids, or -1."""
+    if len(needle_ids) == 0:
+        return -1
+    T = haystack_ids.numel()
+    L = len(needle_ids)
+    if L > T:
+        return -1
+    needle = torch.tensor(needle_ids, device=haystack_ids.device, dtype=haystack_ids.dtype)
+    for s in range(T - L, -1, -1):
+        if torch.equal(haystack_ids[s : s + L], needle):
+            return s
+    return -1
+
 
 def _find_delimiter_position(
     resp_ids: torch.Tensor,
@@ -93,15 +107,15 @@ def _find_delimiter_position(
 ) -> tuple[int, str]:
     """Return (start_index, kind) for delimiter match.
     kind in {"none","full","tail"}. If enable_suffix_anchor, also tries the tail
-    (last min_suffix_len tokens) and picks the earliest match.
+    (last min_suffix_len tokens) and picks the LAST occurrence among candidates.
     """
-    s_full = _find_subsequence(resp_ids, delimiter_ids)
+    s_full = _rfind_subsequence(resp_ids, delimiter_ids)
     best_idx = s_full
     best_kind = "full" if s_full >= 0 else "none"
     if enable_suffix_anchor and len(delimiter_ids) >= min_suffix_len:
         tail = delimiter_ids[-min_suffix_len:]
-        s_tail = _find_subsequence(resp_ids, tail)
-        if s_tail >= 0 and (best_idx < 0 or s_tail < best_idx):
+        s_tail = _rfind_subsequence(resp_ids, tail)
+        if s_tail >= 0 and (best_idx < 0 or s_tail > best_idx):
             best_idx = s_tail
             best_kind = "tail"
     return best_idx, best_kind
