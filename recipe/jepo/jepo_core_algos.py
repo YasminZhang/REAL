@@ -71,86 +71,96 @@ class JEPOConfig:
     accum_steps: int = 4,  # fixed accumulate steps for consistent backwards
     
 
+def _find_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
+    if len(needle_ids) == 0:
+        return -1
+    T = haystack_ids.numel()
+    L = len(needle_ids)
+    if L > T:
+        return -1
+    needle = torch.tensor(needle_ids, device=haystack_ids.device, dtype=haystack_ids.dtype)
+    for s in range(0, T - L + 1):
+        if torch.equal(haystack_ids[s : s + L], needle):
+            return s
+    return -1
+
+
 def compute_single_jepo_advantages(
-    response_tokens: List[List[int]],
-    prompt_tokens: List[List[int]],
-    ground_truth_answer_tokens: List[List[int]],
+    response_tokens: torch.Tensor,
+    prompt_tokens: torch.Tensor,
+    ground_truth_answer_tokens: np.ndarray,
     delimiter_str: str,
     format_penalty: float,
     model,
     device: torch.device,
     pad_token: int,
-    tokenizer
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    # return shape [n],[n],[n],[n]
-    # compute jepo adv for a single question
-    
-    n = len(response_tokens)
-    max_response_length = response_tokens.shape[1]
-    
-    # Parse CoT and delimiter positions
-    has_delimiter = []
-    cot_tokens_list = []
-    delimiter_tokens = tokenizer.encode(delimiter_str, add_special_tokens=False)
-    delimiter_token_length = len(delimiter_tokens)
-    ground_truth_answer_tokens = np.array(ground_truth_answer_tokens.tolist(), dtype=np.int64)
+    tokenizer,
+):
+    # Token-ID based delimiter splitting (avoid decode/encode drift)
+    n = response_tokens.size(0)
+    max_response_length = response_tokens.size(1)
 
-    for i, tokens in enumerate(response_tokens):
-        tokens = tokens.detach().clone()
-        response_str = tokenizer.decode(tokens, skip_special_tokens=True)
-        if delimiter_str in response_str:
-            has_delimiter.append(True)
+    delimiter_ids = tokenizer.encode(delimiter_str, add_special_tokens=False)
+    delimiter_len = len(delimiter_ids)
+    gt_list: List[List[int]] = [list(x) if isinstance(x, (list, tuple)) else list(x.tolist()) for x in ground_truth_answer_tokens]
+
+    has_delimiter: List[bool] = []
+    cot_tokens_list: List[List[int]] = []
+
+    for i in range(n):
+        resp_i = response_tokens[i].detach().clone()
+        s = _find_subsequence(resp_i, delimiter_ids)
+        found = s >= 0
+        has_delimiter.append(bool(found))
+        cot_ids = resp_i[:s].tolist() if found else resp_i.tolist()
+        gt_len = len(gt_list[i])
+        max_cot = max(0, max_response_length - delimiter_len - gt_len)
+        if len(cot_ids) > max_cot:
+            cot_ids = cot_ids[:max_cot]
+        cot_tokens_list.append(cot_ids)
+
+    batch_input_tokens: List[torch.Tensor] = []
+    cot_start_positions: List[int] = []
+    answer_start_positions: List[int] = []
+
+    for i in range(n):
+        prompt_i = prompt_tokens[i] if isinstance(prompt_tokens, torch.Tensor) else torch.tensor(prompt_tokens[i], device=device)
+        prompt_i = prompt_i.to(device=device, dtype=torch.long)
+        cot_i = torch.tensor(cot_tokens_list[i], device=device, dtype=torch.long)
+        delim_i = torch.tensor(delimiter_ids, device=device, dtype=torch.long)
+        gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
+
+        left = torch.cat([prompt_i, cot_i], dim=0)
+        left_plus_delim = torch.cat([left, delim_i], dim=0)
+        full = torch.cat([left_plus_delim, gt_i], dim=0)
+
+        batch_input_tokens.append(full)
+        cot_start_positions.append(len(prompt_i))
+        answer_start_positions.append(len(left_plus_delim))
+
+    max_len = max(int(t.numel()) for t in batch_input_tokens) if batch_input_tokens else 0
+    padded_tokens: List[torch.Tensor] = []
+    attention_masks: List[List[int]] = []
+
+    for t in batch_input_tokens:
+        pad_len = max_len - int(t.numel())
+        if pad_len > 0:
+            padding = torch.full((pad_len,), pad_token, dtype=torch.long, device=device)
+            padded = torch.cat([t, padding], dim=0)
+            mask = [1] * int(t.numel()) + [0] * pad_len
         else:
-            has_delimiter.append(False)
-        cot_str = response_str.split(delimiter_str)[0].strip()
-        cot_tokens = tokenizer.encode(cot_str, add_special_tokens=False)
-        gt_length = len(ground_truth_answer_tokens[i])
-        if len(cot_tokens) + delimiter_token_length + gt_length > max_response_length:
-            cot_tokens = cot_tokens[:(max_response_length - gt_length - delimiter_token_length)]
-        cot_tokens_list.append(cot_tokens)
-    #breakpoint()
-    # Prepare batch input: prompt + cot + delimiter + ground_truth for all responses
-    batch_input_tokens = []
-    cot_start_positions = []
-    answer_start_positions = []
-    
-
-    for i,cot_tokens in enumerate(cot_tokens_list):
-        # Convert all to tensors if they aren't already
-        prompt_tokens_tensor = torch.tensor(prompt_tokens[i], device=device) if not isinstance(prompt_tokens[i], torch.Tensor) else prompt_tokens[i]
-        cot_tokens_tensor = torch.tensor(cot_tokens, device=device) if not isinstance(cot_tokens, torch.Tensor) else cot_tokens
-        delimiter_tokens_tensor = torch.tensor(delimiter_tokens, device=device) if not isinstance(delimiter_tokens, torch.Tensor) else delimiter_tokens
-        ground_truth_tokens_tensor = torch.tensor(ground_truth_answer_tokens[i], device=device, dtype=torch.long) if not isinstance(ground_truth_answer_tokens[i], torch.Tensor) else ground_truth_tokens_tensor
-
-        prompt_with_cot_tokens = torch.cat([prompt_tokens_tensor, cot_tokens_tensor, delimiter_tokens_tensor])
-        full_input_tokens = torch.cat([prompt_with_cot_tokens, ground_truth_tokens_tensor])
-        
-        batch_input_tokens.append(full_input_tokens)
-        cot_start_positions.append(len(prompt_tokens_tensor))
-        answer_start_positions.append(len(prompt_with_cot_tokens))
-    # Pad sequences to same length for batching
-    max_len = max(len(tokens) for tokens in batch_input_tokens)
-    padded_tokens = []
-    attention_masks = []
-    
-    for tokens in batch_input_tokens:
-        pad_length = max_len - len(tokens)
-        padding = torch.full((pad_length,), pad_token, dtype=tokens.dtype, device=tokens.device)
-        padded = torch.cat([tokens, padding])
-        mask = [1] * len(tokens) + [0] * pad_length
+            padded = t
+            mask = [1] * int(t.numel())
         padded_tokens.append(padded)
         attention_masks.append(mask)
-    # Prepare data for DataProto creation
-    batch_input_ids = torch.stack(padded_tokens).to(dtype=torch.long, device=device)
-    attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=device)
-    
-    # Create position_ids (assuming standard sequential positions)
-    position_ids = torch.arange(max_len, dtype=torch.long, device=device).unsqueeze(0).repeat(n, 1)
-    # Mask out positions for padded tokens
-    for i, tokens in enumerate(batch_input_tokens):
-        position_ids[i, len(tokens):] = 0
-    
-    # Return data needed for DataProto instead of doing model forward here
+
+    batch_input_ids = torch.stack(padded_tokens).to(dtype=torch.long, device=device) if padded_tokens else torch.empty((0, 0), dtype=torch.long, device=device)
+    attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=device) if attention_masks else torch.empty((0, 0), dtype=torch.long, device=device)
+    position_ids = torch.arange(max_len, dtype=torch.long, device=device).unsqueeze(0).repeat(n, 1) if max_len > 0 else torch.empty((n, 0), dtype=torch.long, device=device)
+    for i in range(n):
+        if max_len > batch_input_tokens[i].numel():
+            position_ids[i, batch_input_tokens[i].numel():] = 0
+
     return {
         'batch_input_ids': batch_input_ids,
         'attention_mask': attention_mask, 
@@ -158,7 +168,7 @@ def compute_single_jepo_advantages(
         'cot_start_positions': cot_start_positions,
         'answer_start_positions': answer_start_positions,
         'cot_tokens_list': cot_tokens_list,
-        'ground_truth_answer_tokens': ground_truth_answer_tokens,
+        'ground_truth_answer_tokens': gt_list,
         'has_delimiter': has_delimiter,
         'max_len': max_len
     }
@@ -822,10 +832,10 @@ def precompute_adv_for_dd(
         v_i = ans_det.new_full((B,), float("-inf"))
     log_mean_det = lse_all - math.log(B)                     # scalar
 
-    # JEPO advantage A_i over ALL responses (detach)
-    A = (log_mean_det - v_i)
-    A = A / (A.std(unbiased=False) + 1e-8)
-    A = A.clamp(-1.0, 1.0)
+    # JEPO RAW advantage A_i over ALL responses (detach)
+    A_raw = (log_mean_det - v_i)
+    A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
+    A_raw = A_raw.clamp(-1.0, 1.0)
 
     # format penalty term (normalized) – keep same as your pass-2 logic
     has_delim = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
@@ -835,7 +845,7 @@ def precompute_adv_for_dd(
         torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
     )
     fmt = _normalize(fmt)  # you already have this helper
-    A_full = (A + fmt).detach()
+    A_full = (A_raw + fmt).detach()
 
     # weights for exact gradient of logsumexp over ALL responses
     w_full = torch.softmax(ans_det, dim=0).detach()
@@ -844,6 +854,8 @@ def precompute_adv_for_dd(
 
     # cache in dd (CPU or GPU is fine; keep on same dev to avoid copies later)
     dd["A_full"] = A_full
+    dd["A_raw"] = A_raw.detach()
+    dd["fmt_norm"] = fmt.detach()
     dd["w_full"] = w_full
     dd["keep_idx"] = keep_idx
     dd["log_mean_det"] = log_mean_det.detach().item()
@@ -936,7 +948,7 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
     model_inputs = {**data.batch, **data.non_tensor_batch}
     ground_truths = model_inputs.get("reward_model", {})
     ground_truths_tokens = np.array(
-        [cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths],
+        [cached_tokenizer.encode(gt.get("ground_truth", []), add_special_tokens=False) for gt in ground_truths],
         dtype=object,
     )
     pad_token = cached_tokenizer.pad_token_id
@@ -973,6 +985,8 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
     
     # Initialize tensors for advantages and weights
     jepo_adv = torch.zeros(batch_size, device=device)
+    jepo_adv_raw = torch.zeros(batch_size, device=device)
+    format_adv = torch.zeros(batch_size, device=device)
     jepo_weights = torch.zeros(batch_size, device=device) 
     has_delimiter = torch.zeros(batch_size, dtype=torch.bool, device=device)
     
@@ -989,11 +1003,17 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
         
         # Get advantages and weights from precomputed data
         A_full = dd["A_full"]  # [n_responses]
+        A_raw = dd.get("A_raw")  # [n_responses]
+        F_norm = dd.get("fmt_norm") # [n_responses]
         w_full = dd["w_full"]  # [n_responses]
         has_delim = dd["has_delimiter"]  # list of booleans
         
         # Place back into batch tensors
         jepo_adv[current_idx:current_idx + n_responses] = A_full
+        if A_raw is not None:
+            jepo_adv_raw[current_idx:current_idx + n_responses] = A_raw
+        if F_norm is not None:
+            format_adv[current_idx:current_idx + n_responses] = F_norm
         jepo_weights[current_idx:current_idx + n_responses] = w_full
         has_delimiter[current_idx:current_idx + n_responses] = torch.tensor(has_delim, device=device)
         
@@ -1074,6 +1094,8 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
     
     # Add to data.batch
     data.batch["jepo_adv"] = jepo_adv
+    data.batch["jepo_adv_raw"] = jepo_adv_raw
+    data.batch["format_adv"] = format_adv
     data.batch["jepo_weights"] = jepo_weights
     data.batch["has_delimiter"] = has_delimiter
     data.batch["batch_input_ids"] = batch_input_ids

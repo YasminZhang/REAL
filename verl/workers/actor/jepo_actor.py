@@ -47,7 +47,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question, precompute_adv_for_dd, compute_advantages_with_dataproto, compute_jepo_adv_with_dataproto, compute_single_jepo_advantages, dummy_backward_fsdp_safe, compute_jepo_from_logits_efficient
+from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question, precompute_adv_for_dd, compute_advantages_with_dataproto, compute_jepo_adv_with_dataproto, compute_single_jepo_advantages, dummy_backward_fsdp_safe, compute_jepo_from_logits_efficient, _allreduce_sum_scalar
 
 __all__ = ["JEPOActor"]
 
@@ -122,13 +122,8 @@ class JEPOActor(DataParallelPPOActor):
             cached_tokenizer=self._cached_tokenizer
         )
         
-        # -------- filter data where has_delimiter is True --------
-        has_delimiter_mask = data.batch["has_delimiter"]
-        # Convert boolean mask to integer indices for DataProto indexing
-        valid_indices = torch.nonzero(has_delimiter_mask, as_tuple=False).squeeze(-1)
-        # Convert to numpy for DataProto compatibility
-        valid_indices_np = valid_indices.cpu().numpy()
-        filtered_data = data[valid_indices_np]
+        # -------- do not drop samples; keep mask & counts --------
+        has_delimiter_mask = data.batch["has_delimiter"]  # [N]
 
 
         # -------- meters --------
@@ -146,33 +141,13 @@ class JEPOActor(DataParallelPPOActor):
         meter_count = 0
         num_delim = 0
 
-        # Get total number of filtered responses for scaling
-        total_filtered = filtered_data.batch["responses"].shape[0]
-        num_delim = total_filtered
-        # Total number of responses in this JEPO batch (used for normalization)
-        num_responses = data.batch["responses"].shape[0]
-        
-        # Extract stored advantages and weights
-        jepo_advantages = filtered_data.batch["jepo_adv"]  # [N_filtered]
-        jepo_weights = filtered_data.batch["jepo_weights"]  # [N_filtered]
-        
-        # Short-circuit if no samples contain the delimiter (nothing to update for CoT)
-        if total_filtered == 0:
-            print("JEPO: no responses contain delimiter; skipping update step")
-            return {
-                "jepo_actor/jepo_loss": 0.0,
-                "jepo_actor/supp_loss": 0.0,
-                "jepo_actor/total_loss": 0.0,
-                "jepo_actor/grad_norm": 0.0,
-                "jepo_actor/jepo_advs_mean": 0.0,
-                "jepo_actor/jepo_advs_std": 0.0,
-                "jepo_actor/cot_log_probs_mean": 0.0,
-                "jepo_actor/log_mean_answer_probs_mean": 0.0,
-                "jepo_actor/beta_supp": beta_supp,
-                "jepo_actor/num_has_delimiter": 0,
-                "jepo_actor/frac_has_delimiter": 0.0,
-                "jepo_actor/format_penalty": format_penalty,
-            }
+        # Counts
+        num_responses = int(data.batch["responses"].shape[0])
+        num_delim = int(has_delimiter_mask.sum().item())
+        # Extract stored advantages and weights (all responses)
+        jepo_adv_raw_all = data.batch.get("jepo_adv_raw", data.batch["jepo_adv"])  # fallback for raw
+        format_adv_all = data.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_all))
+        jepo_weights_all = data.batch["jepo_weights"]
 
         # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
@@ -180,7 +155,7 @@ class JEPOActor(DataParallelPPOActor):
             
             for k in range(accum_steps):
                 step_start = k * micro_bs
-                step_end = min(step_start + micro_bs, total_filtered)
+                step_end = min(step_start + micro_bs, num_responses)
                 
                 # FSDP: delay allreduce until last accum step
                 sync_ctx = (
@@ -189,13 +164,13 @@ class JEPOActor(DataParallelPPOActor):
                     else nullcontext()
                 )
                 with sync_ctx:
-                    if step_start >= total_filtered:
+                    if step_start >= num_responses:
                         # Still do a dummy backward to keep FSDP sync aligned across ranks
                         dummy_backward_fsdp_safe(self.actor_module, scaler=None)
                     else:
-                        # Get step data by slicing filtered_data
-                        step_indices = torch.arange(step_start, step_end, device=filtered_data.batch["responses"].device)
-                        step_data = filtered_data[step_indices]
+                        # Get step data by slicing full batch
+                        step_indices = torch.arange(step_start, step_end, device=data.batch["responses"].device)
+                        step_data = data[step_indices]
                         B_step = len(step_indices)
                         
                         # Prepare data dict for compute_jepo_from_logits_efficient
@@ -207,7 +182,9 @@ class JEPOActor(DataParallelPPOActor):
                             'ground_truth_answer_tokens': [step_data.batch["ground_truth_tokens"][i][step_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)]
                         }
                         
-                        # Forward pass to get logits
+                        # Forward pass to get logits (eval mode, gradients enabled)
+                        was_training_actor = self.actor_module.training
+                        self.actor_module.eval()
                         with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
                             out = self.actor_module(
                                 input_ids=step_data.batch["batch_input_ids"],
@@ -217,49 +194,67 @@ class JEPOActor(DataParallelPPOActor):
                             )
                             logits = out.logits
                             logits.div_(temperature)
+                        if was_training_actor:
+                            self.actor_module.train()
                         
                         # Compute CoT and answer log probabilities using the efficient function
                         cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
                             logits=logits,
                             data_dict=step_data_dict,
                             format_penalty=format_penalty,
-                            has_delimiter=[True] * B_step,  # All filtered data has delimiter
+                            has_delimiter=has_delimiter_mask[step_indices].tolist(),
                             vocab_chunk=8192
                         )
 
                         # Optionally compute KL term against reference policy on the same tokens
                         kl_loss_part = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
                         if beta_kl > 0 and hasattr(self, "_ref_module") and self._ref_module is not None:
-                            with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
-                                out_ref = self._ref_module(
-                                    input_ids=step_data.batch["batch_input_ids"],
-                                    attention_mask=step_data.batch["batch_attention_mask"],
-                                    position_ids=step_data.batch["batch_position_ids"],
-                                    use_cache=False,
-                                )
-                                ref_logits = out_ref.logits
-                                ref_logits.div_(temperature)
+                            was_training_ref = self._ref_module.training
+                            self._ref_module.eval()
+                            with torch.no_grad():
+                                with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                                    out_ref = self._ref_module(
+                                        input_ids=step_data.batch["batch_input_ids"],
+                                        attention_mask=step_data.batch["batch_attention_mask"],
+                                        position_ids=step_data.batch["batch_position_ids"],
+                                        use_cache=False,
+                                    )
+                                    ref_logits = out_ref.logits
+                                    ref_logits.div_(temperature)
+                            if was_training_ref:
+                                self._ref_module.train()
                             _, ref_answer_log_probs, _ = compute_jepo_from_logits_efficient(
                                 logits=ref_logits,
                                 data_dict=step_data_dict,
                                 format_penalty=format_penalty,
-                                has_delimiter=[True] * B_step,
+                                has_delimiter=has_delimiter_mask[step_indices].tolist(),
                                 vocab_chunk=8192,
                             )
                             # kld over answer sums per sample; normalize by contributing samples
                             kld = kl_penalty(
                                 logprob=answer_log_probs, ref_logprob=ref_answer_log_probs, kl_penalty=kl_loss_type
                             )
-                            kl_loss_part = (kld.sum() / denom) * beta_kl
+                            # denom handled below
                         
-                        # Get advantages and weights for this step
-                        step_advantages = jepo_advantages[step_indices]
-                        step_weights = jepo_weights[step_indices]
-                        
-                        # Compute losses. Normalize by the number of contributing samples to avoid vanishing gradients
-                        denom = max(total_filtered, 1)
-                        jepo_loss_part = (step_advantages * cot_log_probs).sum() / denom
-                        supp_loss_part = beta_supp * (step_weights * log_mean_answer_prob).sum() / denom
+                        # Global denominators for consistent scaling
+                        dev = step_data.batch["batch_input_ids"].device
+                        denom_all = max(_allreduce_sum_scalar(num_responses, device=dev), 1.0)
+                        denom_jepo = max(_allreduce_sum_scalar(num_delim, device=dev), 1.0)
+
+                        # Per-sample weights for this step
+                        step_mask = has_delimiter_mask[step_indices].float()
+                        step_adv_raw = jepo_adv_raw_all[step_indices]
+                        step_fmt = format_adv_all[step_indices]
+                        step_weights = jepo_weights_all[step_indices]
+
+                        # CoT terms
+                        jepo_cot_part = (step_mask * step_adv_raw * cot_log_probs).sum() / denom_jepo
+                        fmt_cot_part = (step_fmt * cot_log_probs).sum() / denom_all
+                        # Support term on answer tokens
+                        supp_loss_part = beta_supp * (step_weights * answer_log_probs).sum() / denom_all
+
+                        jepo_loss_part = jepo_cot_part + fmt_cot_part
+                        kl_loss_part = (kld.sum() / denom_all) * beta_kl if 'kld' in locals() else torch.tensor(0.0, device=dev, dtype=cot_log_probs.dtype)
                         
                         loss_chunk = (jepo_loss_part + supp_loss_part + kl_loss_part) / accum_steps
                         print("finish calculate jepo loss")
@@ -269,8 +264,8 @@ class JEPOActor(DataParallelPPOActor):
                         meters["total_loss"] += float(loss_chunk.detach())
                         meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
                         meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
-                        meters["jepo_advs_mean"] += float(step_advantages.mean().detach())
-                        meters["jepo_advs_std"] += float(step_advantages.std().detach())
+                        meters["jepo_advs_mean"] += float(step_adv_raw.mean().detach())
+                        meters["jepo_advs_std"] += float(step_adv_raw.std().detach())
                         meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
                         meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
                         meters["kl_loss"] += float(kl_loss_part.detach()) / accum_steps
