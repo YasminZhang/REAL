@@ -278,7 +278,7 @@ class JEPOActor(DataParallelPPOActor):
             grad_norm = self._optimizer_step()
             meters["grad_norm"] += float(grad_norm.detach())
 
-        print("number of responses has delimiter:", num_delim)
+        print("number of responses has delimiter for this rank:", num_delim)
 
         # average meters
         if meter_count > 0:
