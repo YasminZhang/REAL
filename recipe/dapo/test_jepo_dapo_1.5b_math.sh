@@ -44,9 +44,10 @@ jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
+# please make sure jepo_micro_batch_size_per_gpu * jepo_accum_steps >= num_responses_per_gpu to use all responses
 jepo_accum_steps=1
 jepo_mini_batch_size_per_gpu=8 # question per optimization step
-jepo_micro_batch_size_per_gpu=1 # question per backward
+jepo_micro_batch_size_per_gpu=512 # question per backward
 jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
 
 # Ray - single node setup for 1.5B
