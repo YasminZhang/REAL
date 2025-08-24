@@ -85,6 +85,28 @@ def _find_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
     return -1
 
 
+def _find_delimiter_position(
+    resp_ids: torch.Tensor,
+    delimiter_ids: List[int],
+    enable_suffix_anchor: bool = True,
+    min_suffix_len: int = 2,
+) -> tuple[int, str]:
+    """Return (start_index, kind) for delimiter match.
+    kind in {"none","full","tail"}. If enable_suffix_anchor, also tries the tail
+    (last min_suffix_len tokens) and picks the earliest match.
+    """
+    s_full = _find_subsequence(resp_ids, delimiter_ids)
+    best_idx = s_full
+    best_kind = "full" if s_full >= 0 else "none"
+    if enable_suffix_anchor and len(delimiter_ids) >= min_suffix_len:
+        tail = delimiter_ids[-min_suffix_len:]
+        s_tail = _find_subsequence(resp_ids, tail)
+        if s_tail >= 0 and (best_idx < 0 or s_tail < best_idx):
+            best_idx = s_tail
+            best_kind = "tail"
+    return best_idx, best_kind
+
+
 def compute_single_jepo_advantages(
     response_tokens: torch.Tensor,
     prompt_tokens: torch.Tensor,
@@ -95,6 +117,9 @@ def compute_single_jepo_advantages(
     device: torch.device,
     pad_token: int,
     tokenizer,
+    *,
+    delimiter_suffix_anchor: bool = True,
+    delimiter_suffix_min_len: int = 2,
 ):
     # Token-ID based delimiter splitting (avoid decode/encode drift)
     n = response_tokens.size(0)
@@ -106,12 +131,18 @@ def compute_single_jepo_advantages(
 
     has_delimiter: List[bool] = []
     cot_tokens_list: List[List[int]] = []
+    delimiter_match_kind: List[str] = []
 
     for i in range(n):
         resp_i = response_tokens[i].detach().clone()
-        s = _find_subsequence(resp_i, delimiter_ids)
+        s, match_kind = _find_delimiter_position(
+            resp_i, delimiter_ids,
+            enable_suffix_anchor=delimiter_suffix_anchor,
+            min_suffix_len=max(1, delimiter_suffix_min_len),
+        )
         found = s >= 0
         has_delimiter.append(bool(found))
+        delimiter_match_kind.append(match_kind)
         cot_ids = resp_i[:s].tolist() if found else resp_i.tolist()
         gt_len = len(gt_list[i])
         max_cot = max(0, max_response_length - delimiter_len - gt_len)
@@ -170,6 +201,7 @@ def compute_single_jepo_advantages(
         'cot_tokens_list': cot_tokens_list,
         'ground_truth_answer_tokens': gt_list,
         'has_delimiter': has_delimiter,
+        'delimiter_match_kind': delimiter_match_kind,
         'max_len': max_len
     }
 
@@ -349,6 +381,9 @@ def compute_jepo_advantages(
     pad_token,
     index,
     tokenizer,
+    *,
+    delimiter_suffix_anchor: bool = True,
+    delimiter_suffix_min_len: int = 2,
 ):
 
     # response_tokens has shape [bsz, max_response_length]
@@ -376,7 +411,9 @@ def compute_jepo_advantages(
             model=model,
             device=device,
             pad_token=pad_token,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            delimiter_suffix_anchor=delimiter_suffix_anchor,
+            delimiter_suffix_min_len=delimiter_suffix_min_len,
         )
         
         if 'data_dicts' not in locals():
@@ -943,6 +980,9 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
     temperature = float(data.meta_info["temperature"])
     resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))
     delimiter = jepo_cfg.get("delimiter", "\n\n")
+    # Configurable suffix-anchor matching for delimiters
+    use_suffix_anchor = bool(jepo_cfg.get("delimiter_suffix_anchor", True))
+    suffix_min_len = int(jepo_cfg.get("delimiter_suffix_min_len", 2))
     
     # Prepare model inputs
     model_inputs = {**data.batch, **data.non_tensor_batch}
@@ -964,7 +1004,9 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
         device=model.device,
         pad_token=pad_token,
         index=data.non_tensor_batch["uid"],
-        tokenizer=cached_tokenizer
+        tokenizer=cached_tokenizer,
+        delimiter_suffix_anchor=use_suffix_anchor,
+        delimiter_suffix_min_len=suffix_min_len,
     )
     
     # Precompute advantages for all data dicts

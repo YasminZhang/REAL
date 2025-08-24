@@ -113,7 +113,10 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "delimiter": self.jepo_config.delimiter,
             "format_penalty": self.jepo_config.format_penalty,
             "beta_supp": self.jepo_config.beta_supp,
-            "beta_kl": self.jepo_config.beta_kl
+            "beta_kl": self.jepo_config.beta_kl,
+            # Suffix-anchor delimiter matching config (optional)
+            "delimiter_suffix_anchor": getattr(self.config.algorithm, 'jepo_delimiter_suffix_anchor', True),
+            "delimiter_suffix_min_len": getattr(self.config.algorithm, 'jepo_delimiter_suffix_min_len', 2),
         }
         
         # Call the JEPO-specific actor update with the properly formatted DataProto
@@ -349,7 +352,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     # NOTE: For accuracy-style metrics in {0,1}, the “all incorrect” case means mean == 0.
                     # Using ">= 0" incorrectly included almost all prompts and diluted JEPO training.
                     all_incorrect_uids = [
-                        uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
+                        uid for uid, mean in prompt_uid2metric_mean.items() if mean >= 0 #np.isclose(mean, 0.0)
                     ]
                     # Prompts where all responses are correct (acc == 1 across n samples)
                     all_correct_uids = [

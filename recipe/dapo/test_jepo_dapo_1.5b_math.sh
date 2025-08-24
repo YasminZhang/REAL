@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-4k-True-grpo-deepscaler_reward'
+exp_name='deepscaler-1.5b-4k-isolate'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -39,11 +39,11 @@ use_jepo=True
 jepo_delimiter="\\boxed\{"
 jepo_format_penalty=10
 jepo_beta_supp=0.001
-jepo_beta_kl=0.1
+jepo_beta_kl=0.001
 jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
-jepo_epochs=3
+jepo_epochs=1
 jepo_accum_steps=4
 jepo_mini_batch_size_per_gpu=8 # question per optimization step
 jepo_micro_batch_size_per_gpu=1 # question per backward
@@ -99,6 +99,8 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
     +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
+    +algorithm.jepo_delimiter_suffix_anchor=True \
+    +algorithm.jepo_delimiter_suffix_min_len=2 \
     +algorithm.jepo_accum_steps=${jepo_accum_steps} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
@@ -159,7 +161,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
-    trainer.test_freq=20 \
+    trainer.test_freq=10 \
     trainer.save_freq=20 \
     trainer.total_epochs=50 \
     trainer.total_training_steps=1000 \
