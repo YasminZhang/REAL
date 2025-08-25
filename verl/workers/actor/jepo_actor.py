@@ -155,6 +155,15 @@ class JEPOActor(DataParallelPPOActor):
         except Exception:
             fmt_max = 0.0
 
+        # Globalized delimiter fraction across FSDP ranks
+        try:
+            _dev_glob = has_delimiter_mask.device
+            num_resp_glob = _allreduce_sum_scalar(num_responses, device=_dev_glob)
+            num_delim_glob = _allreduce_sum_scalar(num_delim, device=_dev_glob)
+            frac_delim_glob = float(num_delim_glob / max(num_resp_glob, 1.0))
+        except Exception:
+            frac_delim_glob = float(num_delim / max(num_responses, 1))
+
         # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
@@ -334,6 +343,7 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/beta_kl": beta_kl,
             "jepo_buffer/num_has_delimiter": int(num_delim),
             "jepo_buffer/frac_has_delimiter": float(num_delim / max(num_responses, 1)),
+            "jepo_buffer/frac_has_delimiter_global": frac_delim_glob,
             "jepo_buffer/format_adv_max": fmt_max,
             "jepo_actor/format_penalty": format_penalty,
         }
