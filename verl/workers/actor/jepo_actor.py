@@ -185,7 +185,9 @@ class JEPOActor(DataParallelPPOActor):
                             'cot_start_positions': step_data.batch["cot_start_positions"].cpu().tolist(),
                             'answer_start_positions': step_data.batch["answer_start_positions"].cpu().tolist(),
                             'cot_tokens_list': [step_data.batch["cot_tokens"][i][step_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)],
-                            'ground_truth_answer_tokens': [step_data.batch["ground_truth_tokens"][i][step_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)]
+                            'ground_truth_answer_tokens': [step_data.batch["ground_truth_tokens"][i][step_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)],
+                            # Provide teacher-forced input ids so delimiter span can be labeled
+                            'batch_input_ids': step_data.batch["batch_input_ids"],
                         }
                         
                         # Forward pass to get logits (eval mode, gradients enabled)
