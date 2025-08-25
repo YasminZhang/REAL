@@ -630,6 +630,23 @@ def compute_jepo_from_logits_efficient(
             if ans_len > 0:
                 shift_labels[i, ans_s:ans_end] = torch.tensor(ans_tokens[:ans_len], device=device, dtype=torch.long)
                 ans_mask[i, ans_s:ans_end] = True
+
+        # Include delimiter tokens (between CoT end and answer start) into CoT mask
+        # so g1 and formatting updates can act on them when applicable.
+        # We do not need the delimiter IDs explicitly: use the teacher-forced tokens
+        # already present in batch_input_ids to set labels for these positions.
+        # CoT end index (clamped within [0, T-1])
+        cot_end_idx = min(cot_s + (len(cot_tokens) if len(cot_tokens) > 0 else 0), T-1)
+        # Delimiter occupies [del_start, del_end) right before answer_start
+        del_start = max(0, cot_end_idx)
+        del_end = min(ans_s, T-1)
+        if del_end > del_start:
+            # Labels for these positions are just the next tokens in the input stream
+            # represented by batch_input_ids (after shifting by one handled globally).
+            # Since our shift_labels convention elsewhere uses direct tokens for the
+            # segment, we follow the same here.
+            shift_labels[i, del_start:del_end] = data_dict["batch_input_ids"][i, del_start:del_end]
+            cot_mask[i, del_start:del_end] = True
     
     # Compute log probabilities efficiently without OOM
     # Chunk the computation to handle long sequences with large vocab

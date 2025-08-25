@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-4k-format'
+exp_name='deepscaler-1.5b-4k-format-test-g1-delimiter'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -37,7 +37,7 @@ max_num_gen_batches=10
 # JEPO specific parameters
 use_jepo=True
 jepo_delimiter="\\boxed\{"
-jepo_format_penalty=10
+jepo_format_penalty=100
 jepo_beta_supp=0.001
 jepo_beta_kl=0.001
 jepo_buffer_size=64 # number of questions
@@ -57,7 +57,7 @@ NGPUS_PER_NODE=8
 # Use 1.5B model
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=data/train.parquet
+TRAIN_FILE=data/train_sub.parquet
 TEST_FILE=data/aime.parquet
 
 # Algorithm
@@ -126,7 +126,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
-    +actor_rollout_ref.jepo_actor.optim.lr=4e-7 \
+    +actor_rollout_ref.jepo_actor.optim.lr=1e-6 \
     +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
@@ -164,7 +164,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.val_before_train=False \
     trainer.test_freq=10 \
     trainer.save_freq=20 \
-    trainer.total_epochs=50 \
+    trainer.total_epochs=500 \
     trainer.total_training_steps=1000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
