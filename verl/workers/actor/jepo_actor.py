@@ -149,6 +149,12 @@ class JEPOActor(DataParallelPPOActor):
         format_adv_all = data.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_all))
         jepo_weights_all = data.batch["jepo_weights"]
 
+        # Buffer-wide diagnostics for format advantage
+        try:
+            fmt_max = float(torch.max(format_adv_all).detach().item())
+        except Exception:
+            fmt_max = 0.0
+
         # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
@@ -250,8 +256,35 @@ class JEPOActor(DataParallelPPOActor):
                         # CoT terms (policy gradient-style: negative sign to maximize log-probs with positive advantages)
                         jepo_cot_part = - (step_mask * step_adv_raw * cot_log_probs).sum() / denom_jepo
                         fmt_cot_part = - (step_fmt * cot_log_probs).sum() / denom_all
-                        # Support term on answer tokens (encourage higher answer log-probs)
-                        supp_loss_part = - beta_supp * (step_weights * answer_log_probs).sum() / denom_all
+                        # Support term (g2): exact gradient of per-question log-mean over answers
+                        # Group by uid to compute log-mean per question using current logits
+                        sum_log_mean = torch.zeros((), device=dev, dtype=answer_log_probs.dtype)
+                        try:
+                            uids = step_data.non_tensor_batch.get("uid", None)
+                        except Exception:
+                            uids = None
+                        if uids is not None:
+                            # Convert to python list of strings
+                            try:
+                                uid_list = [str(u) for u in (uids.tolist() if hasattr(uids, "tolist") else list(uids))]
+                            except Exception:
+                                uid_list = [str(u) for u in uids]
+                            uid_to_idx = {}
+                            for idx_i, uid in enumerate(uid_list):
+                                uid_to_idx.setdefault(uid, []).append(idx_i)
+                            for idxs_py in uid_to_idx.values():
+                                idxs = torch.as_tensor(idxs_py, device=dev, dtype=torch.long)
+                                if idxs.numel() == 0:
+                                    continue
+                                grp_ans = answer_log_probs.index_select(0, idxs).float()
+                                lse = torch.logsumexp(grp_ans, dim=0)
+                                sum_log_mean = sum_log_mean + (lse - math.log(max(int(idxs.numel()), 1)))
+                        else:
+                            # Fallback to whole-step log-mean if uids unavailable
+                            sum_log_mean = torch.logsumexp(answer_log_probs.float(), dim=0) - math.log(max(B_step, 1))
+
+                        # Normalize by global denominator for consistency across ranks
+                        supp_loss_part = - beta_supp * (sum_log_mean / denom_all)
 
                         jepo_loss_part = jepo_cot_part + fmt_cot_part
                         kl_loss_part = (kld.sum() / denom_all) * beta_kl if 'kld' in locals() else torch.tensor(0.0, device=dev, dtype=cot_log_probs.dtype)
@@ -299,5 +332,6 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/beta_kl": beta_kl,
             "jepo_buffer/num_has_delimiter": int(num_delim),
             "jepo_buffer/frac_has_delimiter": float(num_delim / max(num_responses, 1)),
+            "jepo_buffer/format_adv_max": fmt_max,
             "jepo_actor/format_penalty": format_penalty,
         }

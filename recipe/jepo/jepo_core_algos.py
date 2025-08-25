@@ -290,14 +290,9 @@ def compute_jepo_advantages_from_logprobs(
     # Format penalty
     has_delimiter_tensor = torch.tensor(has_delimiter, dtype=torch.bool, device=device)
     A_i_format_tensor = torch.where(has_delimiter_tensor, 0.0, -format_penalty)
-    
+    # Mean-only normalization (preserve scale set by format_penalty)
     format_mean = torch.mean(A_i_format_tensor)
-    format_std = torch.std(A_i_format_tensor)
-    
-    if format_std > 1e-8:
-        tilde_A_i_ref = (A_i_format_tensor - format_mean) / format_std
-    else:
-        tilde_A_i_ref = torch.zeros_like(A_i_format_tensor)
+    tilde_A_i_ref = A_i_format_tensor - format_mean
     
     # Detach advantages but keep gradients for CoT log probs
     tilde_A_i = tilde_A_i.detach()
@@ -375,9 +370,13 @@ def compute_jepo_from_logprobs_fast_with_grad_mean(
         A = (A / (A.std(unbiased=False) + 1e-8)).clamp(-1.0, 1.0)
 
         has_delim = torch.as_tensor(has_delimiter, device=device, dtype=torch.bool)
-        fmt = torch.where(has_delim, torch.zeros(B, device=device, dtype=dtype),
-                          torch.tensor(-format_penalty, device=device, dtype=dtype))
-        fmt = (fmt - fmt.mean()) / (fmt.std(unbiased=False) + 1e-8)
+        fmt = torch.where(
+            has_delim,
+            torch.zeros(B, device=device, dtype=dtype),
+            torch.tensor(-format_penalty, device=device, dtype=dtype),
+        )
+        # Mean-only normalization (do not divide by std)
+        fmt = fmt - fmt.mean()
 
         jepo_advantage = A #+ fmt                                     # detached
 
@@ -573,10 +572,13 @@ def compute_jepo_from_logits_sparse(
         A = torch.clamp(_normalize(A), -1.0, 1.0)
 
         has_delim = torch.as_tensor(has_delimiter, device=device, dtype=torch.bool)
-        fmt = torch.where(has_delim,
-                          torch.zeros(B, device=device, dtype=torch.float32),
-                          torch.tensor(-float(format_penalty), device=device, dtype=torch.float32))
-        fmt = _normalize(fmt)
+        fmt = torch.where(
+            has_delim,
+            torch.zeros(B, device=device, dtype=torch.float32),
+            torch.tensor(-float(format_penalty), device=device, dtype=torch.float32),
+        )
+        # Mean-only normalization
+        fmt = fmt - fmt.mean()
 
         jepo_advantage = A  # + fmt if you want to include format penalty
         jepo_advantage = jepo_advantage.to(dtype)
@@ -895,7 +897,8 @@ def precompute_adv_for_dd(
         torch.zeros(B, device=dev, dtype=torch.float32),
         torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
     )
-    fmt = _normalize(fmt)  # you already have this helper
+    # Mean-only normalization so the penalty scale remains effective
+    fmt = fmt - fmt.mean()
     A_full = (A_raw + fmt).detach()
 
     # weights for exact gradient of logsumexp over ALL responses
