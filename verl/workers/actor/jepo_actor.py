@@ -247,11 +247,11 @@ class JEPOActor(DataParallelPPOActor):
                         step_fmt = format_adv_all[step_indices]
                         step_weights = jepo_weights_all[step_indices]
 
-                        # CoT terms
-                        jepo_cot_part = (step_mask * step_adv_raw * cot_log_probs).sum() / denom_jepo
-                        fmt_cot_part = (step_fmt * cot_log_probs).sum() / denom_all
-                        # Support term on answer tokens
-                        supp_loss_part = beta_supp * (step_weights * answer_log_probs).sum() / denom_all
+                        # CoT terms (policy gradient-style: negative sign to maximize log-probs with positive advantages)
+                        jepo_cot_part = - (step_mask * step_adv_raw * cot_log_probs).sum() / denom_jepo
+                        fmt_cot_part = - (step_fmt * cot_log_probs).sum() / denom_all
+                        # Support term on answer tokens (encourage higher answer log-probs)
+                        supp_loss_part = - beta_supp * (step_weights * answer_log_probs).sum() / denom_all
 
                         jepo_loss_part = jepo_cot_part + fmt_cot_part
                         kl_loss_part = (kld.sum() / denom_all) * beta_kl if 'kld' in locals() else torch.tensor(0.0, device=dev, dtype=cot_log_probs.dtype)
