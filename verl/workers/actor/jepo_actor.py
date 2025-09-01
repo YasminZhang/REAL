@@ -203,81 +203,123 @@ class JEPOActor(DataParallelPPOActor):
                         )
                         was_training_actor = self.actor_module.training
                         self.actor_module.eval()
-                        cot_lp_list: list[torch.Tensor] = []
-                        cot_adv_list: list[torch.Tensor] = []
-                        ans_lp_list: list[torch.Tensor] = []
-                        ans_adv_list: list[torch.Tensor] = []
-
-                        pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
-
-                        for idx_local in range(B_step):
-                            a_s = int(step_data.batch["answer_start_positions"][idx_local].item())
-                            c_s = int(step_data.batch["cot_start_positions"][idx_local].item())
-
-                            ids_full = step_data.batch["batch_input_ids"][idx_local]
-                            attn_full = step_data.batch["attention_mask"][idx_local]
-                            pos_full = step_data.batch["position_ids"][idx_local]
-
-                            # CoT+delimiter segment sits at tail: input_ids = [.. up to answer_start)
-                            ids_cot = ids_full[:a_s].unsqueeze(0)
-                            attn_cot = attn_full[:a_s].unsqueeze(0)
-                            pos_cot = pos_full[:a_s].unsqueeze(0)
-                            resp_cot = ids_full[c_s:a_s].unsqueeze(0)
-
-                            if resp_cot.numel() > 0:
-                                micro_cot = {
-                                    "input_ids": ids_cot,
-                                    "attention_mask": attn_cot,
-                                    "position_ids": pos_cot,
-                                    "responses": resp_cot,
-                                }
-                                # keep grad; _forward_micro_batch handles autocast internally
-                                _, lp_cot = self._forward_micro_batch(micro_cot, temperature=temperature, calculate_entropy=False)
-                                cot_lp_list.append(lp_cot.squeeze(0))  # [len_cot]
-                                cot_adv_list.append(torch.full_like(lp_cot.squeeze(0), fill_value=A_vec[idx_local].float()))
-
-                            # Answer segment sits at tail of full sequence
-                            # Determine true answer length from ground-truth tokens (variable length list)
-                            try:
-                                gt_tokens = step_data.non_tensor_batch["ground_truth_answer_tokens"][idx_local]
-                                ans_len = int(len(gt_tokens)) if gt_tokens is not None else max(0, int(ids_full.numel()) - a_s)
-                            except Exception:
-                                ans_len = max(0, int(ids_full.numel()) - a_s)
-                            resp_ans = ids_full[a_s:a_s + ans_len].unsqueeze(0)
-                            ids_ans = ids_full.unsqueeze(0)
-                            attn_ans = attn_full.unsqueeze(0)
-                            pos_ans = pos_full.unsqueeze(0)
-
-                            if resp_ans.numel() > 0:
-                                micro_ans = {
-                                    "input_ids": ids_ans,
-                                    "attention_mask": attn_ans,
-                                    "position_ids": pos_ans,
-                                    "responses": resp_ans,
-                                }
-                                _, lp_ans = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
-                                ans_lp_list.append(lp_ans.squeeze(0))  # [len_ans]
-                                # Direct token-level logp for support (uniform, no w_i)
-                                ans_adv_list.append(torch.ones_like(lp_ans.squeeze(0)))
-
-                        if was_training_actor:
-                            self.actor_module.train()
-                        # Pad into matrices and compute policy loss via GPG (token-wise -logp*A)
                         dev = step_data.batch["batch_input_ids"].device
                         loss_agg_mode = "token-mean"
 
-                        if cot_lp_list:
-                            max_cot = max(int(x.numel()) for x in cot_lp_list)
-                            cot_lp_mat = torch.zeros((len(cot_lp_list), max_cot), device=dev)
-                            cot_mask = torch.zeros((len(cot_lp_list), max_cot), device=dev)
-                            cot_adv_mat = torch.zeros((len(cot_adv_list), max_cot), device=dev)
-                            for i2, (lpv, advv) in enumerate(zip(cot_lp_list, cot_adv_list)):
-                                L = int(lpv.numel())
-                                if L > 0:
-                                    cot_lp_mat[i2, :L] = lpv
-                                    cot_adv_mat[i2, :L] = advv
-                                    cot_mask[i2, :L] = 1
-                            gpg_fn = get_policy_loss_fn("gpg")
+                        pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
+
+                        # Precompute lengths
+                        a_s_all = step_data.batch["answer_start_positions"].tolist()
+                        c_s_all = step_data.batch["cot_start_positions"].tolist()
+                        ids_full_all = step_data.batch["batch_input_ids"]
+                        attn_full_all = step_data.batch["attention_mask"]
+                        pos_full_all = step_data.batch["position_ids"]
+                        gt_tokens_all = step_data.non_tensor_batch.get("ground_truth_answer_tokens", [None] * B_step)
+
+                        cot_len_all = [max(0, int(a - c)) for a, c in zip(a_s_all, c_s_all)]
+                        ans_len_all = [int(len(t)) if t is not None else max(0, int(ids_full_all[i].numel()) - int(a_s_all[i])) for i, t in enumerate(gt_tokens_all)]
+
+                        max_cot_len = max(cot_len_all) if cot_len_all else 0
+                        max_ans_len = max(ans_len_all) if ans_len_all else 0
+
+                        # Initialize combined mats
+                        cot_lp_mat = torch.zeros((B_step, max_cot_len), device=dev)
+                        cot_mask = torch.zeros((B_step, max_cot_len), device=dev)
+                        cot_adv_mat = torch.zeros((B_step, max_cot_len), device=dev)
+
+                        ans_lp_mat = torch.zeros((B_step, max_ans_len), device=dev)
+                        ans_mask = torch.zeros((B_step, max_ans_len), device=dev)
+                        ans_adv_mat = torch.zeros((B_step, max_ans_len), device=dev)
+
+                        # Batch CoT over sub-chunks
+                        for s in range(0, B_step, resp_micro_bs):
+                            e = min(s + resp_micro_bs, B_step)
+                            rows = list(range(s, e))
+                            # Build sub-batch for rows with non-zero CoT length
+                            cot_rows = [r for r in rows if cot_len_all[r] > 0]
+                            if not cot_rows:
+                                continue
+                            # Build ragged lists
+                            in_ids_list, in_attn_list, in_pos_list, resp_list = [], [], [], []
+                            for r in cot_rows:
+                                a = int(a_s_all[r]); c = int(c_s_all[r])
+                                in_ids_list.append(ids_full_all[r][:a])
+                                in_attn_list.append(attn_full_all[r][:a])
+                                in_pos_list.append(pos_full_all[r][:a])
+                                resp_list.append(ids_full_all[r][c:a])
+                            L_max = max(int(x.size(0)) for x in in_ids_list)
+                            R_max = max(int(x.size(0)) for x in resp_list)
+                            bsz = len(cot_rows)
+                            # Pad and stack
+                            def _pad1d_list(lst, fill_val):
+                                out = torch.full((bsz, L_max), fill_val, dtype=lst[0].dtype, device=dev)
+                                for i, t in enumerate(lst):
+                                    l = int(t.size(0)); out[i, :l] = t
+                                return out
+                            def _pad1d_resp(lst, fill_val):
+                                out = torch.full((bsz, R_max), fill_val, dtype=lst[0].dtype, device=dev)
+                                for i, t in enumerate(lst):
+                                    l = int(t.size(0)); out[i, :l] = t
+                                return out
+                            in_ids = _pad1d_list(in_ids_list, pad_id)
+                            in_attn = _pad1d_list(in_attn_list, 0)
+                            in_pos = _pad1d_list(in_pos_list, 0)
+                            resp_tok = _pad1d_resp(resp_list, pad_id)
+                            micro_cot = {
+                                "input_ids": in_ids,
+                                "attention_mask": in_attn,
+                                "position_ids": in_pos,
+                                "responses": resp_tok,
+                            }
+                            _, lp_cot_sub = self._forward_micro_batch(micro_cot, temperature=temperature, calculate_entropy=False)
+                            # Scatter back
+                            for j, r in enumerate(cot_rows):
+                                Lr = cot_len_all[r]
+                                cot_lp_mat[r, :Lr] = lp_cot_sub[j, :Lr]
+                                cot_mask[r, :Lr] = 1
+                                cot_adv_mat[r, :Lr] = A_vec[r]
+
+                        # Batch Answer over sub-chunks
+                        for s in range(0, B_step, resp_micro_bs):
+                            e = min(s + resp_micro_bs, B_step)
+                            rows = list(range(s, e))
+                            ans_rows = [r for r in rows if ans_len_all[r] > 0]
+                            if not ans_rows:
+                                continue
+                            ids_batch = ids_full_all[ans_rows]
+                            attn_batch = attn_full_all[ans_rows]
+                            pos_batch = pos_full_all[ans_rows]
+                            resp_list = []
+                            R_max = 0
+                            for r in ans_rows:
+                                a = int(a_s_all[r]); Lr = ans_len_all[r]
+                                t = ids_full_all[r][a:a+Lr]
+                                resp_list.append(t)
+                                R_max = max(R_max, int(t.size(0)))
+                            if R_max == 0:
+                                continue
+                            resp_tok = torch.full((len(ans_rows), R_max), pad_id, dtype=ids_batch.dtype, device=dev)
+                            for j, t in enumerate(resp_list):
+                                l = int(t.size(0)); resp_tok[j, :l] = t
+                            micro_ans = {
+                                "input_ids": ids_batch,
+                                "attention_mask": attn_batch,
+                                "position_ids": pos_batch,
+                                "responses": resp_tok,
+                            }
+                            _, lp_ans_sub = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
+                            for j, r in enumerate(ans_rows):
+                                Lr = ans_len_all[r]
+                                ans_lp_mat[r, :Lr] = lp_ans_sub[j, :Lr]
+                                ans_mask[r, :Lr] = 1
+                                ans_adv_mat[r, :Lr] = 1.0  # uniform support
+
+                        if was_training_actor:
+                            self.actor_module.train()
+
+                        # Compute policy losses via GPG (token-wise -logp*A)
+                        gpg_fn = get_policy_loss_fn("gpg")
+                        if max_cot_len > 0 and cot_mask.any():
                             jepo_loss_part, _, _, _ = gpg_fn(
                                 old_log_prob=None,
                                 log_prob=cot_lp_mat,
@@ -290,22 +332,11 @@ class JEPOActor(DataParallelPPOActor):
                             jepo_loss_part = torch.tensor(0.0, device=dev)
                             cot_log_probs = torch.zeros((B_step,), device=dev)
 
-                        if ans_lp_list:
-                            max_ans = max(int(x.numel()) for x in ans_lp_list)
-                            ans_lp_mat = torch.zeros((len(ans_lp_list), max_ans), device=dev)
-                            ans_mask = torch.zeros((len(ans_lp_list), max_ans), device=dev)
-                            ans_adv_mat = torch.zeros((len(ans_adv_list), max_ans), device=dev)
-                            for i2, (lpv, advv) in enumerate(zip(ans_lp_list, ans_adv_list)):
-                                L = int(lpv.numel())
-                                if L > 0:
-                                    ans_lp_mat[i2, :L] = lpv
-                                    ans_adv_mat[i2, :L] = advv * float(beta_supp)
-                                    ans_mask[i2, :L] = 1
-                            gpg_fn = get_policy_loss_fn("gpg")
+                        if max_ans_len > 0 and ans_mask.any():
                             supp_loss_part, _, _, _ = gpg_fn(
                                 old_log_prob=None,
                                 log_prob=ans_lp_mat,
-                                advantages=ans_adv_mat,
+                                advantages=ans_adv_mat * float(beta_supp),
                                 response_mask=ans_mask,
                                 loss_agg_mode=loss_agg_mode,
                             )

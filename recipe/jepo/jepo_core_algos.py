@@ -353,9 +353,28 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
 
     dev = data.batch["responses"].device
     if flat_batch_input_ids:
-        data.batch["batch_input_ids"] = torch.cat(flat_batch_input_ids, dim=0)
-        data.batch["attention_mask"] = torch.cat(flat_attention_mask, dim=0)
-        data.batch["position_ids"] = torch.cat(flat_position_ids, dim=0)
+        # Pad all chunks to a global max length before concatenation
+        lens = [int(t.size(1)) for t in flat_batch_input_ids]
+        global_max_len = max(lens)
+        padded_ids = []
+        padded_attn = []
+        padded_pos = []
+        for ids_t, attn_t, pos_t in zip(flat_batch_input_ids, flat_attention_mask, flat_position_ids):
+            cur_len = int(ids_t.size(1))
+            if cur_len < global_max_len:
+                pad_w = global_max_len - cur_len
+                pad_ids = torch.full((ids_t.size(0), pad_w), pad_token, dtype=ids_t.dtype, device=ids_t.device)
+                pad_mask = torch.zeros((attn_t.size(0), pad_w), dtype=attn_t.dtype, device=attn_t.device)
+                pad_pos = torch.zeros((pos_t.size(0), pad_w), dtype=pos_t.dtype, device=pos_t.device)
+                ids_t = torch.cat([ids_t, pad_ids], dim=1)
+                attn_t = torch.cat([attn_t, pad_mask], dim=1)
+                pos_t = torch.cat([pos_t, pad_pos], dim=1)
+            padded_ids.append(ids_t)
+            padded_attn.append(attn_t)
+            padded_pos.append(pos_t)
+        data.batch["batch_input_ids"] = torch.cat(padded_ids, dim=0)
+        data.batch["attention_mask"] = torch.cat(padded_attn, dim=0)
+        data.batch["position_ids"] = torch.cat(padded_pos, dim=0)
     if flat_cot_start:
         data.batch["cot_start_positions"] = torch.as_tensor(flat_cot_start, dtype=torch.long, device=dev)
     if flat_ans_start:
