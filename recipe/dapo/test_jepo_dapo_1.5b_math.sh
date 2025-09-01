@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-4k-format-test-g1-delimiter-token'
+exp_name='deepscaler-1.5b-512-format-test-g1-delimiter-token'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=4096
+max_response_length=512
 enable_overlong_buffer=False
-overlong_buffer_len=4096
+overlong_buffer_len=512
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -45,9 +45,9 @@ jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
 # please make sure jepo_micro_batch_size_per_gpu * jepo_accum_steps >= num_responses_per_gpu to use all responses
-jepo_accum_steps=1
+jepo_accum_steps=8
 jepo_mini_batch_size_per_gpu=8 # question per optimization step
-jepo_micro_batch_size_per_gpu=512 # question per backward
+jepo_micro_batch_size_per_gpu=16 # question per backward
 jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
 
 # Ray - single node setup for 1.5B

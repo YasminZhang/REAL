@@ -60,17 +60,17 @@ def _maybe_dummy_backward(model):
 class JEPOConfig:
     delimiter: str = "\n\n"
     format_penalty: float = 0.1
-    beta_supp: float = 1.0
-    beta_kl: float = 0.1
+    beta_supp: float = 1e-3
+    beta_kl: float = 1e-3
     buffer_size: int = 1000
-    jepo_steps: int = 5,
-    epochs: int = 1,
-    mini_batch_size_per_gpu: int = 8,  # questions per optimizer step per rank
-    micro_batch_size_per_gpu: int = 1,  # questions per backward pass per rank
-    responses_micro_batch_size: int = 8  # responses per question when calculating loss
-    num_response_per_question: int = 8,
-    accum_steps: int = 4,  # fixed accumulate steps for consistent backwards
-    
+    jepo_steps: int = 5
+    epochs: int = 1
+    mini_batch_size_per_gpu: int = 8  # questions per optimizer step per rank
+    micro_batch_size_per_gpu: int = 1  # questions per backward pass per rank
+    num_response_per_question: int = 8
+    accum_steps: int = 4  # fixed accumulate steps for consistent backwards
+    responses_micro_batch_size: int = 8
+
 
 def _find_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
     if len(needle_ids) == 0:
@@ -294,7 +294,7 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     # Extract config
     format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
     temperature = float(data.meta_info["temperature"])
-    resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))
+    # dynamic chunking is used downstream; no fixed responses_micro_batch_size
     delimiter = jepo_cfg.get("delimiter", "\n\n")
     # Configurable suffix-anchor matching for delimiters
     use_suffix_anchor = bool(jepo_cfg.get("delimiter_suffix_anchor", True))
@@ -382,5 +382,9 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     if flat_has_delim:
         data.batch["has_delimiter"] = torch.as_tensor(flat_has_delim, dtype=torch.bool, device=dev)
     # keep ground_truth_answer_tokens in non_tensor for variable lengths
-    data.non_tensor_batch["ground_truth_answer_tokens"] = flat_gt_tokens
+    # store as numpy object array to enable safe slicing/indexing
+    try:
+        data.non_tensor_batch["ground_truth_answer_tokens"] = np.array(flat_gt_tokens, dtype=object)
+    except Exception:
+        data.non_tensor_batch["ground_truth_answer_tokens"] = flat_gt_tokens
     return data

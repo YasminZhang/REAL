@@ -108,9 +108,9 @@ class JEPOActor(DataParallelPPOActor):
         jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
         epochs = int(jepo_cfg.get("epochs", 1))
         mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))        # questions per optimizer step per rank
-        micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 1))      # questions per backward call
+        micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))      # questions per backward call
         resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))  # responses per backward inside a question
-        accum_steps = int(jepo_cfg.get("accum_steps", 4))               # fixed accumulate steps for consistent backwards
+        accum_steps = int(jepo_cfg.get("accum_steps", 32))               # fixed accumulate steps for consistent backwards
         format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
@@ -125,9 +125,15 @@ class JEPOActor(DataParallelPPOActor):
             jepo_cfg=jepo_cfg,
             cached_tokenizer=self._cached_tokenizer
         )
-        # Precompute A_raw, format_adv, and weights using VERL internals on teacher-forced batches
+        # Precompute A_raw, format_adv, and weights using teacher-forced batches per question
+        # Note: jepo_data_dicts carries per-question grouping; it's only needed for precompute.
         if "jepo_data_dicts" in data.non_tensor_batch:
             data = self._precompute_adv_w_with_verl(data, temperature=temperature, format_penalty=format_penalty)
+            # Drop grouping artifact to allow generic per-response slicing downstream
+            try:
+                del data.non_tensor_batch["jepo_data_dicts"]
+            except Exception:
+                pass
         
         # -------- do not drop samples; keep mask & counts --------
         has_delimiter_mask = data.batch["has_delimiter"]  # [N]
@@ -152,7 +158,12 @@ class JEPOActor(DataParallelPPOActor):
         num_responses = int(data.batch["responses"].shape[0])
         num_delim = int(has_delimiter_mask.sum().item())
         # Extract stored advantages and weights (all responses)
-        jepo_adv_raw_all = data.batch.get("jepo_adv_raw", data.batch["jepo_adv"])  # fallback for raw
+        # Safely read JEPO advantages: prefer 'jepo_adv_raw' if present; fallback to 'jepo_adv' without
+        # eagerly indexing a missing key (TensorDict.get default is evaluated before call)
+        if "jepo_adv_raw" in set(data.batch.keys()):
+            jepo_adv_raw_all = data.batch["jepo_adv_raw"]
+        else:
+            jepo_adv_raw_all = data.batch["jepo_adv"]
         format_adv_all = data.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_all))
 
         # Buffer-wide diagnostics for format advantage
@@ -189,22 +200,23 @@ class JEPOActor(DataParallelPPOActor):
                         # Still do a dummy backward to keep FSDP sync aligned across ranks
                         dummy_backward_fsdp_safe(self.actor_module, scaler=None)
                     else:
-                        # Get step data by slicing full batch
-                        step_indices = torch.arange(step_start, step_end, device=data.batch["responses"].device)
-                        step_data = data[step_indices]
-                        B_step = len(step_indices)
+                        # Get step data via slicing to avoid non-tensor indexing issues
+                        step_data = data[step_start:step_end]
+
+                        B_step = int(step_end - step_start)
                         
                         
                         # Build GRPO-style token-level loss using VERL internals (_forward_micro_batch)
                         # Mask A_raw by has_delimiter and add mean-centered format advantage
                         A_vec = (
-                            jepo_adv_raw_all[step_indices] * has_delimiter_mask[step_indices].float()
-                            + format_adv_all[step_indices]
+                            jepo_adv_raw_all[step_start:step_end] * has_delimiter_mask[step_start:step_end].float()
+                            + format_adv_all[step_start:step_end]
                         )
                         was_training_actor = self.actor_module.training
                         self.actor_module.eval()
                         dev = step_data.batch["batch_input_ids"].device
-                        loss_agg_mode = "token-mean"
+                        cot_loss_agg_mode = "seq-mean-token-mean"
+                        ans_loss_agg_mode = "token-mean"
 
                         pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
 
@@ -214,7 +226,17 @@ class JEPOActor(DataParallelPPOActor):
                         ids_full_all = step_data.batch["batch_input_ids"]
                         attn_full_all = step_data.batch["attention_mask"]
                         pos_full_all = step_data.batch["position_ids"]
-                        gt_tokens_all = step_data.non_tensor_batch.get("ground_truth_answer_tokens", [None] * B_step)
+                        gt_tokens_nd = step_data.non_tensor_batch.get("ground_truth_answer_tokens", None)
+                        if gt_tokens_nd is None:
+                            gt_tokens_all = [None] * B_step
+                        else:
+                            try:
+                                import numpy as _np
+                                gt_tokens_all = gt_tokens_nd.tolist() if isinstance(gt_tokens_nd, _np.ndarray) else gt_tokens_nd
+                            except Exception:
+                                gt_tokens_all = gt_tokens_nd
+                        # Mixture weights per response for Grad2; default to 1.0
+                        w_step = step_data.batch.get("jepo_weights", torch.ones((B_step,), device=dev))
 
                         cot_len_all = [max(0, int(a - c)) for a, c in zip(a_s_all, c_s_all)]
                         ans_len_all = [int(len(t)) if t is not None else max(0, int(ids_full_all[i].numel()) - int(a_s_all[i])) for i, t in enumerate(gt_tokens_all)]
@@ -231,9 +253,10 @@ class JEPOActor(DataParallelPPOActor):
                         ans_mask = torch.zeros((B_step, max_ans_len), device=dev)
                         ans_adv_mat = torch.zeros((B_step, max_ans_len), device=dev)
 
-                        # Batch CoT over sub-chunks
-                        for s in range(0, B_step, resp_micro_bs):
-                            e = min(s + resp_micro_bs, B_step)
+                        # Batch CoT over sub-chunks without relying on config chunk size
+                        chunk_sz = max(1, min(B_step, 64))
+                        for s in range(0, B_step, chunk_sz):
+                            e = min(s + chunk_sz, B_step)
                             rows = list(range(s, e))
                             # Build sub-batch for rows with non-zero CoT length
                             cot_rows = [r for r in rows if cot_len_all[r] > 0]
@@ -279,9 +302,9 @@ class JEPOActor(DataParallelPPOActor):
                                 cot_mask[r, :Lr] = 1
                                 cot_adv_mat[r, :Lr] = A_vec[r]
 
-                        # Batch Answer over sub-chunks
-                        for s in range(0, B_step, resp_micro_bs):
-                            e = min(s + resp_micro_bs, B_step)
+                        # Batch Answer over sub-chunks (dynamic chunking)
+                        for s in range(0, B_step, chunk_sz):
+                            e = min(s + chunk_sz, B_step)
                             rows = list(range(s, e))
                             ans_rows = [r for r in rows if ans_len_all[r] > 0]
                             if not ans_rows:
@@ -312,7 +335,7 @@ class JEPOActor(DataParallelPPOActor):
                                 Lr = ans_len_all[r]
                                 ans_lp_mat[r, :Lr] = lp_ans_sub[j, :Lr]
                                 ans_mask[r, :Lr] = 1
-                                ans_adv_mat[r, :Lr] = 1.0  # uniform support
+                                ans_adv_mat[r, :Lr] = w_step[r]
 
                         if was_training_actor:
                             self.actor_module.train()
@@ -325,7 +348,7 @@ class JEPOActor(DataParallelPPOActor):
                                 log_prob=cot_lp_mat,
                                 advantages=cot_adv_mat,
                                 response_mask=cot_mask,
-                                loss_agg_mode=loss_agg_mode,
+                                loss_agg_mode=cot_loss_agg_mode,
                             )
                             cot_log_probs = cot_lp_mat.sum(dim=-1).detach()
                         else:
@@ -338,7 +361,7 @@ class JEPOActor(DataParallelPPOActor):
                                 log_prob=ans_lp_mat,
                                 advantages=ans_adv_mat * float(beta_supp),
                                 response_mask=ans_mask,
-                                loss_agg_mode=loss_agg_mode,
+                                loss_agg_mode=ans_loss_agg_mode,
                             )
                             answer_log_probs = ans_lp_mat.sum(dim=-1).detach()
                         else:
@@ -357,10 +380,10 @@ class JEPOActor(DataParallelPPOActor):
                                     "responses": step_data.batch["responses"],
                                 }
                                 _, lp_orig = self._forward_micro_batch(micro_orig, temperature=temperature, calculate_entropy=False)
-                                ref_lp_orig = data.batch["ref_log_prob"][step_indices]
+                                ref_lp_orig = data.batch["ref_log_prob"][step_start:step_end]
                                 resp_mask_orig = compute_response_mask(step_data)
                                 kld = kl_penalty(logprob=lp_orig, ref_logprob=ref_lp_orig, kl_penalty=kl_loss_type)
-                                kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode=loss_agg_mode) * beta_kl
+                                kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode="token-mean") * beta_kl
                             except Exception:
                                 kl_loss_part = torch.tensor(0.0, device=dev)
                         
@@ -426,26 +449,45 @@ class JEPOActor(DataParallelPPOActor):
         for dd in data_dicts:
             B = len(dd["has_delimiter"]) if isinstance(dd["has_delimiter"], list) else int(dd["has_delimiter"].numel())
             ans_logprob = torch.zeros(B, device=dev)
+            # Build per-row answer lengths
+            ans_lens = []
             for i in range(B):
-                a_s = int(dd["answer_start_positions"][i])
-                ids_full = dd["batch_input_ids"][i]
-                attn_full = dd["attention_mask"][i]
-                pos_full = dd["position_ids"][i]
                 gt_row = dd["ground_truth_answer_tokens"][i]
-                if isinstance(gt_row, list):
-                    ans_len = len(gt_row)
-                else:
-                    ans_len = int((torch.as_tensor(gt_row, device=dev) != pad_id).sum().item())
-                if ans_len <= 0:
-                    continue
-                micro_ans = {
-                    "input_ids": ids_full.unsqueeze(0),
-                    "attention_mask": attn_full.unsqueeze(0),
-                    "position_ids": pos_full.unsqueeze(0),
-                    "responses": ids_full[a_s:a_s + ans_len].unsqueeze(0),
-                }
-                _, lp_ans = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
-                ans_logprob[i] = lp_ans.sum().detach()
+                ans_lens.append(len(gt_row) if isinstance(gt_row, list) else int(torch.as_tensor(gt_row, device=dev).numel()))
+            # Indices with non-zero answer length
+            ans_rows = [i for i, L in enumerate(ans_lens) if L > 0]
+            if ans_rows:
+                chunk_sz = max(1, min(len(ans_rows), 64))
+                for s in range(0, len(ans_rows), chunk_sz):
+                    e = min(s + chunk_sz, len(ans_rows))
+                    rows = ans_rows[s:e]
+                    ids_batch = dd["batch_input_ids"][rows]
+                    attn_batch = dd["attention_mask"][rows]
+                    pos_batch = dd["position_ids"][rows]
+                    # Build ragged answer tokens batch
+                    R_max = 0
+                    resp_list = []
+                    for r in rows:
+                        a_s = int(dd["answer_start_positions"][r])
+                        Lr = int(ans_lens[r])
+                        t = dd["batch_input_ids"][r][a_s:a_s+Lr]
+                        resp_list.append(t)
+                        R_max = max(R_max, int(t.size(0)))
+                    if R_max == 0:
+                        continue
+                    resp_tok = torch.full((len(rows), R_max), pad_id, dtype=ids_batch.dtype, device=dev)
+                    for j, t in enumerate(resp_list):
+                        l = int(t.size(0)); resp_tok[j, :l] = t
+                    micro_ans = {
+                        "input_ids": ids_batch,
+                        "attention_mask": attn_batch,
+                        "position_ids": pos_batch,
+                        "responses": resp_tok,
+                    }
+                    _, lp_ans_sub = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
+                    for j, r in enumerate(rows):
+                        Lr = int(ans_lens[r])
+                        ans_logprob[r] = lp_ans_sub[j, :Lr].sum().detach()
 
             lse_all = torch.logsumexp(ans_logprob, dim=0)
             if B > 1:
