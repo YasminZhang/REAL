@@ -47,7 +47,13 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import compute_jepo_advantages, compute_jepo_from_logits_sparse, jepo_two_pass_step_for_one_question, precompute_adv_for_dd, compute_advantages_with_dataproto, compute_jepo_adv_with_dataproto, compute_single_jepo_advantages, dummy_backward_fsdp_safe, compute_jepo_from_logits_efficient, _allreduce_sum_scalar
+from jepo_core_algos import (
+    attach_jepo_adv_to_dataproto,
+    dummy_backward_fsdp_safe,
+    compute_segment_logprobs_shifted as compute_jepo_from_logits_efficient,
+    token_level_jepo_loss as compute_jepo_token_level_pg_loss_from_logits,
+    _allreduce_sum_scalar,
+)
 
 __all__ = ["JEPOActor"]
 
@@ -115,7 +121,7 @@ class JEPOActor(DataParallelPPOActor):
         n = int(jepo_cfg.get("num_response_per_question", 8))  # number of responses per question
 
         # -------- compute advantages and add to data --------
-        data = compute_jepo_adv_with_dataproto(
+        data = attach_jepo_adv_to_dataproto(
             data=data,
             model=self.actor_module,
             jepo_cfg=jepo_cfg,
@@ -214,14 +220,24 @@ class JEPOActor(DataParallelPPOActor):
                         if was_training_actor:
                             self.actor_module.train()
                         
-                        # Compute CoT and answer log probabilities using the efficient function
-                        cot_log_probs, answer_log_probs, log_mean_answer_prob = compute_jepo_from_logits_efficient(
+                        # Build GRPO-style token-level loss for JEPO
+                        A_vec = jepo_adv_raw_all[step_indices] + format_adv_all[step_indices]
+                        w_vec = jepo_weights_all[step_indices]
+                        loss_parts = compute_jepo_token_level_pg_loss_from_logits(
                             logits=logits,
                             data_dict=step_data_dict,
-                            format_penalty=format_penalty,
-                            has_delimiter=has_delimiter_mask[step_indices].tolist(),
-                            vocab_chunk=8192
+                            A_vec=A_vec,
+                            w_vec=w_vec,
+                            beta_supp=float(beta_supp),
+                            normalize_by="tokens",
+                            vocab_chunk=8192,
                         )
+                        # For monitoring and optional KL
+                        jepo_loss_part = loss_parts["jepo_loss_part"]
+                        supp_loss_part = loss_parts["supp_loss_part"]
+                        cot_log_probs = loss_parts["cot_log_probs"]
+                        answer_log_probs = loss_parts["answer_log_probs"]
+                        denom_all = loss_parts["denom"]
 
                         # Optionally compute KL term against reference policy on the same tokens
                         kl_loss_part = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
@@ -253,52 +269,8 @@ class JEPOActor(DataParallelPPOActor):
                             )
                             # denom handled below
                         
-                        # Global denominators for consistent scaling
-                        dev = step_data.batch["batch_input_ids"].device
-                        denom_all = max(_allreduce_sum_scalar(num_responses, device=dev), 1.0)
-                        denom_jepo = max(_allreduce_sum_scalar(num_delim, device=dev), 1.0)
-
-                        # Per-sample weights for this step
-                        step_mask = has_delimiter_mask[step_indices].float()
-                        step_adv_raw = jepo_adv_raw_all[step_indices]
-                        step_fmt = format_adv_all[step_indices]
-                        step_weights = jepo_weights_all[step_indices]
-
-                        # CoT terms (policy gradient-style: negative sign to maximize log-probs with positive advantages)
-                        jepo_cot_part = - (step_mask * step_adv_raw * cot_log_probs).sum() / denom_jepo
-                        fmt_cot_part = - (step_fmt * cot_log_probs).sum() / denom_all
-                        # Support term (g2): exact gradient of per-question log-mean over answers
-                        # Group by uid to compute log-mean per question using current logits
-                        sum_log_mean = torch.zeros((), device=dev, dtype=answer_log_probs.dtype)
-                        try:
-                            uids = step_data.non_tensor_batch.get("uid", None)
-                        except Exception:
-                            uids = None
-                        if uids is not None:
-                            # Convert to python list of strings
-                            try:
-                                uid_list = [str(u) for u in (uids.tolist() if hasattr(uids, "tolist") else list(uids))]
-                            except Exception:
-                                uid_list = [str(u) for u in uids]
-                            uid_to_idx = {}
-                            for idx_i, uid in enumerate(uid_list):
-                                uid_to_idx.setdefault(uid, []).append(idx_i)
-                            for idxs_py in uid_to_idx.values():
-                                idxs = torch.as_tensor(idxs_py, device=dev, dtype=torch.long)
-                                if idxs.numel() == 0:
-                                    continue
-                                grp_ans = answer_log_probs.index_select(0, idxs).float()
-                                lse = torch.logsumexp(grp_ans, dim=0)
-                                sum_log_mean = sum_log_mean + (lse - math.log(max(int(idxs.numel()), 1)))
-                        else:
-                            # Fallback to whole-step log-mean if uids unavailable
-                            sum_log_mean = torch.logsumexp(answer_log_probs.float(), dim=0) - math.log(max(B_step, 1))
-
-                        # Normalize by global denominator for consistency across ranks
-                        supp_loss_part = - beta_supp * (sum_log_mean / denom_all)
-
-                        jepo_loss_part = jepo_cot_part + fmt_cot_part
-                        kl_loss_part = (kld.sum() / denom_all) * beta_kl if 'kld' in locals() else torch.tensor(0.0, device=dev, dtype=cot_log_probs.dtype)
+                        # KL term already computed above if enabled. Normalize by token denom for consistency
+                        kl_loss_part = (kld.sum() / denom_all) * beta_kl if 'kld' in locals() else torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
                         
                         loss_chunk = (jepo_loss_part + supp_loss_part + kl_loss_part) / accum_steps
                         print("finish calculate jepo loss")
@@ -308,8 +280,9 @@ class JEPOActor(DataParallelPPOActor):
                         meters["total_loss"] += float(loss_chunk.detach())
                         meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
                         meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
-                        meters["jepo_advs_mean"] += float(step_adv_raw.mean().detach())
-                        meters["jepo_advs_std"] += float(step_adv_raw.std().detach())
+                        with torch.no_grad():
+                            meters["jepo_advs_mean"] += float(A_vec.mean().detach())
+                            meters["jepo_advs_std"] += float(A_vec.std().detach())
                         meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
                         meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
                         meters["kl_loss"] += float(kl_loss_part.detach()) / accum_steps

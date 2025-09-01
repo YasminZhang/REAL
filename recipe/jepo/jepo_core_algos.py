@@ -121,7 +121,7 @@ def _find_delimiter_position(
     return best_idx, best_kind
 
 
-def compute_single_jepo_advantages(
+def build_jepo_teacher_forced_batch(
     response_tokens: torch.Tensor,
     prompt_tokens: torch.Tensor,
     ground_truth_answer_tokens: np.ndarray,
@@ -219,171 +219,8 @@ def compute_single_jepo_advantages(
         'max_len': max_len
     }
 
-def compute_jepo_advantages_from_logprobs(
-    log_probs_batch: torch.Tensor,
-    data_dict: dict,
-    format_penalty: float,
-    has_delimiter: list,
-    device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute JEPO advantages from log probabilities tensor"""
-    
-    n = log_probs_batch.shape[0]
-    cot_start_positions = data_dict['cot_start_positions']
-    answer_start_positions = data_dict['answer_start_positions']
-    cot_tokens_list = data_dict['cot_tokens_list']
-    ground_truth_answer_tokens = data_dict['ground_truth_answer_tokens']
-    
-    # Extract log probabilities for CoT and answers using positions
-    cot_log_probs = []
-    answer_log_probs = []
-    
-    for i in range(n):
-        cot_tokens = cot_tokens_list[i]
-        cot_start = cot_start_positions[i]
-        answer_start = answer_start_positions[i]
-        
-        # CoT log probabilities - keep gradients
-        cot_log_prob_sum = torch.tensor(0.0, device=device, dtype=torch.float32)
-        for j, token_id in enumerate(cot_tokens):
-            pos = cot_start + j
-            if pos > 0 and pos < log_probs_batch.shape[1]:
-                token_log_prob = log_probs_batch[i, pos - 1, token_id]
-                cot_log_prob_sum += token_log_prob
-        
-        # Answer log probabilities - detach for advantage calculation
-        answer_log_prob_sum = torch.tensor(0.0, device=device, dtype=torch.float32)
-        for j, token_id in enumerate(ground_truth_answer_tokens[i]):
-            pos = answer_start + j
-            if pos > 0 and pos < log_probs_batch.shape[1]:
-                token_log_prob = log_probs_batch[i, pos - 1, token_id].detach()
-                answer_log_prob_sum += token_log_prob
-        
-        cot_log_probs.append(cot_log_prob_sum)
-        answer_log_probs.append(answer_log_prob_sum)
-    
-    cot_log_probs_tensor = torch.stack(cot_log_probs)
-    answer_log_probs_tensor = torch.stack(answer_log_probs)
-    
-    # Compute advantages (detached)
-    log_mean_prob = torch.logsumexp(answer_log_probs_tensor, dim=0) - torch.log(torch.tensor(n, dtype=torch.float32, device=device))
-    
-    if n > 1:
-        indices = torch.arange(n, device=device)
-        mask = indices.unsqueeze(1) != indices.unsqueeze(0)
-        
-        masked_log_probs = answer_log_probs_tensor.unsqueeze(0).expand(n, -1)
-        masked_log_probs = torch.where(mask, masked_log_probs, torch.tensor(float('-inf'), device=device))
-        
-        v_i = torch.logsumexp(masked_log_probs, dim=1) - torch.log(torch.tensor(n-1, dtype=torch.float32, device=device))
-    else:
-        v_i = torch.tensor(float('-inf'), device=device).expand(n)
-    
-    A_tensor = log_mean_prob - v_i
-    
-    A_std = torch.std(A_tensor)
-    if A_std > 1e-8:
-        tilde_A_i = torch.clamp(A_tensor / A_std, -1.0, 1.0)
-    else:
-        tilde_A_i = torch.zeros_like(A_tensor)
-    
-    # Format penalty
-    has_delimiter_tensor = torch.tensor(has_delimiter, dtype=torch.bool, device=device)
-    A_i_format_tensor = torch.where(has_delimiter_tensor, 0.0, -format_penalty)
-    # Mean-only normalization (preserve scale set by format_penalty)
-    format_mean = torch.mean(A_i_format_tensor)
-    tilde_A_i_ref = A_i_format_tensor - format_mean
-    
-    # Detach advantages but keep gradients for CoT log probs
-    tilde_A_i = tilde_A_i.detach()
-    tilde_A_i_ref = tilde_A_i_ref.detach()
-    jepo_advantage = tilde_A_i + tilde_A_i_ref
-    log_mean_answer_prob = log_mean_prob.repeat(n)
 
-    return (jepo_advantage.to(device), cot_log_probs_tensor, answer_log_probs_tensor, log_mean_answer_prob)
-
-
-import math
-import torch
-import torch.nn.functional as F
-def compute_jepo_from_logprobs_fast_with_grad_mean(
-    log_probs_batch, data_dict, format_penalty, has_delimiter
-):
-    device, dtype = log_probs_batch.device, log_probs_batch.dtype
-    B, T, V = log_probs_batch.shape
-
-    cot_start = data_dict['cot_start_positions']
-    ans_start = data_dict['answer_start_positions']
-    cot_tok_list = data_dict['cot_tokens_list']
-    ans_tok_list = data_dict['ground_truth_answer_tokens']
-
-    # --- Gather CoT token log-probs (keeps grad) ---
-    b_c, t_c, v_c = [], [], []
-    for i, (s, toks) in enumerate(zip(cot_start, cot_tok_list)):
-        if len(toks)==0: continue
-        t = torch.arange(s, s+len(toks), device=device) - 1
-        m = (t >= 0) & (t < T)
-        if m.any():
-            b_c.append(torch.full((m.sum(),), i, device=device, dtype=torch.long))
-            t_c.append(t[m].long())
-            v_c.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
-    if b_c:
-        b_c = torch.cat(b_c); t_c = torch.cat(t_c); v_c = torch.cat(v_c)
-        cot_lp_flat = log_probs_batch[b_c, t_c, v_c]                 # grad flows
-        cot_log_probs = torch.zeros(B, device=device, dtype=dtype).index_add_(0, b_c, cot_lp_flat)
-    else:
-        cot_log_probs = torch.zeros(B, device=device, dtype=dtype)
-
-    # --- Gather ANSWER token log-probs (keep grad for mean term) ---
-    b_a, t_a, v_a = [], [], []
-    for i, (s, toks) in enumerate(zip(ans_start, ans_tok_list)):
-        if len(toks)==0: continue
-        t = torch.arange(s, s+len(toks), device=device) - 1
-        m = (t >= 0) & (t < T)
-        if m.any():
-            b_a.append(torch.full((m.sum(),), i, device=device, dtype=torch.long))
-            t_a.append(t[m].long())
-            v_a.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
-    if b_a:
-        b_a = torch.cat(b_a); t_a = torch.cat(t_a); v_a = torch.cat(v_a)
-        ans_lp_flat = log_probs_batch[b_a, t_a, v_a]                 # <-- NO detach
-        answer_log_probs = torch.zeros(B, device=device, dtype=dtype).index_add_(0, b_a, ans_lp_flat)
-    else:
-        answer_log_probs = torch.zeros(B, device=device, dtype=dtype)
-
-    # ---- log-mean over answers (WITH grad) ----
-    lse_all = torch.logsumexp(answer_log_probs, dim=0)               # scalar, has grad
-    log_mean_prob = lse_all - math.log(max(B, 1))                    # scalar, has grad
-
-    # ---- JEPO advantage parts OUTSIDE the graph ----
-    with torch.no_grad():
-        # exclude-self in O(B) using stable trick, done on detached copy
-        ans_det = answer_log_probs.detach()
-        lse_all_d = torch.logsumexp(ans_det, dim=0)
-        d = ans_det - lse_all_d
-        if B > 1:
-            lse_others = lse_all_d + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-            v_i = lse_others - math.log(B - 1)
-        else:
-            v_i = ans_det.new_full((B,), float("-inf"))
-        A = (log_mean_prob.detach() - v_i)                           # no grad path
-        A = (A / (A.std(unbiased=False) + 1e-8)).clamp(-1.0, 1.0)
-
-        has_delim = torch.as_tensor(has_delimiter, device=device, dtype=torch.bool)
-        fmt = torch.where(
-            has_delim,
-            torch.zeros(B, device=device, dtype=dtype),
-            torch.tensor(-format_penalty, device=device, dtype=dtype),
-        )
-        # Mean-only normalization (do not divide by std)
-        fmt = fmt - fmt.mean()
-
-        jepo_advantage = A #+ fmt                                     # detached
-
-    return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob
-
-
-def compute_jepo_advantages(
+def build_jepo_batches_by_prompt(
     response_tokens,
     prompt_tokens,
     ground_truth_answer_tokens,
@@ -415,7 +252,7 @@ def compute_jepo_advantages(
         
         if len(response_tokens_uid) == 0:
             continue
-        data_dict = compute_single_jepo_advantages(
+        data_dict = build_jepo_teacher_forced_batch(
             response_tokens=response_tokens_uid,
             prompt_tokens=prompt_tokens_uid,
             ground_truth_answer_tokens=ground_truth_answer_tokens_uid,
@@ -435,6 +272,15 @@ def compute_jepo_advantages(
             data_dicts.append(data_dict)
     
     return data_dicts
+
+"""
+Backwards-compatibility aliases to minimize churn in existing code.
+Prefer the new names in future code paths.
+"""
+compute_single_jepo_advantages = build_jepo_teacher_forced_batch
+compute_jepo_advantages = build_jepo_batches_by_prompt
+compute_jepo_from_logits_efficient = compute_segment_logprobs_shifted
+compute_jepo_from_logits_sparse = compute_segment_logprobs_sparse
 
 
 
@@ -506,7 +352,7 @@ def _sparse_logprob_sum(logits: torch.Tensor,
     out.index_add_(0, b_idx, logprob_flat)
     return out.to(logits.dtype)                                     # match model dtype (bf16/fp16/fp32)
 
-def compute_jepo_from_logits_sparse(
+def compute_segment_logprobs_sparse(
     logits, data_dict, format_penalty, has_delimiter, vocab_chunk=8192
 ):
     """
@@ -586,7 +432,7 @@ def compute_jepo_from_logits_sparse(
     return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob
 
 
-def compute_jepo_from_logits_efficient(
+def compute_segment_logprobs_shifted(
     logits, data_dict, format_penalty, has_delimiter, vocab_chunk=8192
 ):
     """
@@ -696,6 +542,140 @@ def compute_jepo_from_logits_efficient(
 
     return cot_log_probs, answer_log_probs, log_mean_prob
 
+
+def token_level_jepo_loss(
+    logits,
+    data_dict,
+    A_vec: torch.Tensor,
+    w_vec: torch.Tensor,
+    beta_supp: float,
+    normalize_by: str = "tokens",
+    vocab_chunk: int = 8192,
+):
+    """
+    Token-level JEPO loss in a GRPO-style formulation.
+
+    - For CoT + delimiter tokens, per-token advantage = A_vec[i]
+    - For answer tokens, per-token advantage = beta_supp * w_vec[i]
+
+    Args:
+        logits: [B, T, V]
+        data_dict: contains positions and token lists built by build_dataset-like util
+        A_vec: [B] normalized JEPO advantages (including format if desired)
+        w_vec: [B] softmax weights for exact grad of log-mean over answers
+        beta_supp: scalar multiplier for support (answer) term
+        normalize_by: "tokens" | "responses" — denominator for averaging
+        vocab_chunk: chunking knob for memory safety
+
+    Returns dict with:
+        loss: scalar
+        jepo_loss_part: scalar (CoT part only)
+        supp_loss_part: scalar (answer part only)
+        cot_log_probs: [B] summed CoT token log-probs (for metrics)
+        ans_log_probs: [B] summed answer token log-probs (for metrics)
+    """
+    device, dtype = logits.device, logits.dtype
+    B, T, V = logits.shape
+
+    cot_start = data_dict['cot_start_positions']
+    ans_start = data_dict['answer_start_positions']
+    cot_tok_list = data_dict['cot_tokens_list']
+    ans_tok_list = data_dict['ground_truth_answer_tokens']
+
+    # Standard language modeling setup: shift logits and create targets
+    shift_logits = logits[..., :-1, :].contiguous()  # [B, T-1, V]
+    shift_labels = torch.full((B, T-1), -100, dtype=torch.long, device=device)  # [B, T-1]
+
+    # Create masks for CoT and answer regions
+    cot_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
+    ans_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
+
+    # Fill in the target tokens and masks
+    for i in range(B):
+        # CoT tokens
+        cot_tokens = cot_tok_list[i]
+        cot_s = cot_start[i]
+        if len(cot_tokens) > 0:
+            cot_end = min(cot_s + len(cot_tokens), T-1)
+            cot_len = cot_end - cot_s
+            if cot_len > 0:
+                shift_labels[i, cot_s:cot_end] = torch.tensor(cot_tokens[:cot_len], device=device, dtype=torch.long)
+                cot_mask[i, cot_s:cot_end] = True
+
+        # Answer tokens
+        ans_tokens = ans_tok_list[i]
+        ans_s = ans_start[i]
+        if len(ans_tokens) > 0:
+            ans_end = min(ans_s + len(ans_tokens), T-1)
+            ans_len = ans_end - ans_s
+            if ans_len > 0:
+                shift_labels[i, ans_s:ans_end] = torch.tensor(ans_tokens[:ans_len], device=device, dtype=torch.long)
+                ans_mask[i, ans_s:ans_end] = True
+
+        # Include delimiter tokens (between CoT end and answer start) into CoT mask
+        cot_end_idx = min(cot_s + (len(cot_tokens) if len(cot_tokens) > 0 else 0), T-1)
+        del_start = max(0, cot_end_idx)
+        del_end = min(ans_s, T-1)
+        if del_end > del_start:
+            shift_labels[i, del_start:del_end] = data_dict["batch_input_ids"][i, del_start:del_end]
+            cot_mask[i, del_start:del_end] = True
+
+    # Compute per-position token log-probs
+    token_log_probs = torch.zeros((B, T-1), device=device, dtype=dtype)
+    valid_mask = (shift_labels != -100)
+    if valid_mask.any():
+        valid_b, valid_t = torch.where(valid_mask)
+        valid_labels = shift_labels[valid_mask]
+        num_valid = len(valid_b)
+
+        chunk_size = min(vocab_chunk // 100, 1024)
+        for start_idx in range(0, num_valid, chunk_size):
+            end_idx = min(start_idx + chunk_size, num_valid)
+            cb = valid_b[start_idx:end_idx]
+            ct = valid_t[start_idx:end_idx]
+            cl = valid_labels[start_idx:end_idx]
+            chunk_logits = shift_logits[cb, ct]
+            chunk_log_probs = torch.log_softmax(chunk_logits, dim=-1)
+            chunk_target = chunk_log_probs.gather(-1, cl.unsqueeze(-1)).squeeze(-1)
+            token_log_probs[cb, ct] = chunk_target
+            del chunk_logits, chunk_log_probs, chunk_target
+
+    # Build per-token advantages
+    adv_mat = torch.zeros((B, T-1), device=device, dtype=token_log_probs.dtype)
+    if B > 0:
+        adv_mat[cot_mask] = A_vec.to(device=device, dtype=token_log_probs.dtype).repeat_interleave(
+            cot_mask.sum(dim=1).clamp_min(0)
+        )[: int(cot_mask.sum().item())]
+        # For answer tokens, use beta_supp * w_i
+        w_scaled = (w_vec.to(device=device, dtype=token_log_probs.dtype) * float(beta_supp))
+        adv_mat[ans_mask] = w_scaled.repeat_interleave(ans_mask.sum(dim=1).clamp_min(0))[: int(ans_mask.sum().item())]
+
+    resp_mask = (cot_mask | ans_mask)
+
+    # Separate parts for metrics
+    cot_lp_vec = (token_log_probs * cot_mask.float()).sum(dim=-1)  # [B]
+    ans_lp_vec = (token_log_probs * ans_mask.float()).sum(dim=-1)  # [B]
+
+    # Losses
+    jepo_term = -(adv_mat * token_log_probs * cot_mask.float()).sum()
+    supp_term = -(adv_mat * token_log_probs * ans_mask.float()).sum()
+
+    if normalize_by == "tokens":
+        denom = resp_mask.float().sum().clamp_min(1.0)
+    else:  # responses
+        denom = resp_mask.any(dim=1).float().sum().clamp_min(1.0)
+
+    loss = (jepo_term + supp_term) / denom
+
+    return {
+        "loss": loss,
+        "jepo_loss_part": jepo_term / denom,
+        "supp_loss_part": supp_term / denom,
+        "cot_log_probs": cot_lp_vec.detach(),
+        "answer_log_probs": ans_lp_vec.detach(),
+        "denom": denom.detach(),
+    }
+
 import math
 import numpy as np
 import torch
@@ -719,135 +699,6 @@ def _slice_data_dict(dd, idxs):
 def _chunk_list(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
-
-def jepo_two_pass_step_for_one_question(
-    model,
-    data_dict,
-    temperature: float,
-    beta_supp: float,
-    format_penalty: float,
-    responses_micro_bs: int = 16,
-    vocab_chunk: int = 8192,
-    device_name: str = "cuda",
-    accum_scale: float = 1.0,
-):
-    """
-    Uses precomputed A_full / w_full (if present). Filters to has_delimiter==True
-    BEFORE any with-grad work. Falls back to old pass-1 if cache missing.
-    """
-    dev = data_dict["batch_input_ids"].device
-
-    # --- pull or build cached pass-1 items ---
-    if ("A_full" not in data_dict) or ("w_full" not in data_dict) or ("keep_idx" not in data_dict):
-        precompute_adv_for_dd(
-            model=model,
-            dd=data_dict,
-            temperature=temperature,
-            format_penalty=format_penalty,
-            responses_micro_bs=responses_micro_bs,
-            vocab_chunk=vocab_chunk,
-            device_name=device_name,
-        )
-
-    A_full = data_dict["A_full"]        # [B], detached
-    w_full = data_dict["w_full"]        # [B], detached
-    keep_idx = data_dict["keep_idx"]    # [K]
-    B_all = A_full.shape[0]             # original responses count
-    K = int(keep_idx.numel())
-
-    # --- Global denom for consistent scaling across ranks ---
-    denom_global = _allreduce_sum_scalar(K, device=dev)  # sum of kept responses over all ranks
-    if denom_global <= 0.0:
-        # no valid responses anywhere -> do a tiny dummy backward and return zeros
-        _maybe_dummy_backward(model)
-        return {
-            "total_loss": 0.0,
-            "jepo_loss": 0.0,
-            "supp_loss": 0.0,
-            "jepo_advs_mean": 0.0,
-            "jepo_advs_std": 0.0,
-            "cot_log_probs_mean": 0.0,
-            "log_mean_answer_probs_mean": float(data_dict.get("log_mean_det", 0.0)),
-        }
-
-    # If this rank has no valid responses, still do dummy backward so it participates in all-reduce
-    if K == 0:
-        _maybe_dummy_backward(model)
-        return {
-            "total_loss": 0.0,
-            "jepo_loss": 0.0,
-            "supp_loss": 0.0,
-            "jepo_advs_mean": 0.0,
-            "jepo_advs_std": 0.0,
-            "cot_log_probs_mean": 0.0,
-            "log_mean_answer_probs_mean": float(data_dict.get("log_mean_det", 0.0)),
-        }
-
-    # --- Filter FIRST (this is the key change) ---
-    dd_keep = _slice_data_dict(data_dict, keep_idx.tolist())
-    # No need to carry has_delimiter mask anymore; all kept are True
-    B = K
-    all_idx = torch.arange(B, device=dev)
-
-    # Attach the precomputed A/w restricted to kept indices
-    A_keep = A_full.index_select(0, keep_idx).to(dev)  # [K]
-    w_keep = w_full.index_select(0, keep_idx).to(dev)  # [K]
-
-    total_loss_val = 0.0
-    jepo_loss_tot = 0.0
-    supp_loss_tot = 0.0
-    cot_lp_tot = 0.0
-    ans_lp_tot = 0.0
-
-    # Chunk over kept responses only
-    for s in range(0, B, responses_micro_bs):
-        idxs = all_idx[s:s+responses_micro_bs]
-        dd = _slice_data_dict(dd_keep, idxs.tolist())
-
-        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            out = model(
-                input_ids=dd["batch_input_ids"].detach(),
-                attention_mask=dd["attention_mask"],
-                position_ids=dd["position_ids"],
-                use_cache=False,
-            )
-            logits = out.logits
-            logits.div_(temperature)
-
-        # compute sparse logprobs only for these kept responses
-        _, cot_lp_chunk, ans_lp_chunk, _ = compute_jepo_from_logits_sparse(
-            logits, dd, format_penalty, [True]*len(idxs), vocab_chunk=vocab_chunk
-        )
-        A_chunk = A_keep.index_select(0, idxs)
-        w_chunk = w_keep.index_select(0, idxs)
-
-        # Normalize by GLOBAL number of kept responses so loss scale is consistent across ranks
-        jepo_loss_part = (A_chunk * cot_lp_chunk).sum() / denom_global
-        supp_loss_part = beta_supp * (w_chunk * ans_lp_chunk).sum() / denom_global
-
-        loss_chunk = (jepo_loss_part + supp_loss_part) * accum_scale
-        loss_chunk.backward()
-
-        total_loss_val += float(loss_chunk.detach())
-        jepo_loss_tot += float(jepo_loss_part.detach())
-        supp_loss_tot += float(supp_loss_part.detach())
-        cot_lp_tot += float(cot_lp_chunk.detach().sum())
-        ans_lp_tot += float(ans_lp_chunk.detach().sum())
-
-        del out, logits, cot_lp_chunk, ans_lp_chunk, dd
-        torch.cuda.empty_cache()
-
-    # Metrics (A stats over kept responses; log_mean from all responses)
-    metrics_q = {
-        "total_loss": total_loss_val,
-        "jepo_loss": jepo_loss_tot,
-        "supp_loss": supp_loss_tot,
-        "jepo_advs_mean": float(A_keep.mean().item()),
-        "jepo_advs_std": float(A_keep.std(unbiased=False).item()),
-        "cot_log_probs_mean": float(cot_lp_tot / max(1, B)),
-        "log_mean_answer_probs_mean": float(data_dict.get("log_mean_det", 0.0)),
-    }
-    return metrics_q
 
 
 
@@ -886,7 +737,7 @@ def precompute_adv_for_dd(
             logits = out.logits
             logits.div_(temperature)
         # only need detached answer log-probs here
-        _, _, ans_lp, _ = compute_jepo_from_logits_sparse(
+        _, _, ans_lp, _ = compute_segment_logprobs_sparse(
             logits, dd_s, format_penalty, dd_s["has_delimiter"], vocab_chunk=vocab_chunk
         )
         ans_det_chunks.append(ans_lp.detach().float().cpu())
@@ -932,70 +783,9 @@ def precompute_adv_for_dd(
     dd["log_mean_det"] = log_mean_det.detach().item()
 
 
-@torch.no_grad()
-def compute_advantages_with_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
-    """
-    Compute advantages and necessary info for data, maintaining DataProto class.
-    This function does not require any gradients.
-    
-    Args:
-        data: DataProto object containing batch data
-        model: The actor model 
-        jepo_cfg: JEPO configuration dictionary
-        cached_tokenizer: Tokenizer for encoding/decoding
-        
-    Returns:
-        DataProto object with added advantage information
-    """
-    # Extract config
-    format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
-    temperature = float(data.meta_info["temperature"])
-    resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))
-    delimiter = jepo_cfg.get("delimiter", "\n\n")
-    
-    # Prepare model inputs
-    model_inputs = {**data.batch, **data.non_tensor_batch}
-    ground_truths = model_inputs.get("reward_model", {})
-    ground_truths_tokens = np.array(
-        [cached_tokenizer.encode(gt.get("ground_truth", [])) for gt in ground_truths],
-        dtype=object,
-    )
-    pad_token = cached_tokenizer.pad_token_id
-    
-    # Compute advantages for all questions
-    data_dicts = compute_jepo_advantages(
-        response_tokens=data.batch["responses"],
-        prompt_tokens=data.batch["prompts"],
-        ground_truth_answer_tokens=ground_truths_tokens,
-        delimiter_str=delimiter,
-        format_penalty=format_penalty,
-        model=model,
-        device=model.device,
-        pad_token=pad_token,
-        index=data.non_tensor_batch["uid"],
-        tokenizer=cached_tokenizer
-    )
-    
-    # Precompute advantages for all data dicts
-    for dd in data_dicts:
-        precompute_adv_for_dd(
-            model=model,
-            dd=dd,
-            temperature=temperature,
-            format_penalty=format_penalty,
-            responses_micro_bs=resp_micro_bs,
-            vocab_chunk=8192,
-            device_name="cuda" if torch.cuda.is_available() else "cpu",
-        )
-    
-    # Add advantage information to the DataProto
-    data.non_tensor_batch["jepo_data_dicts"] = data_dicts
-    
-    return data
-
 
 @torch.no_grad()
-def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
+def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
     """
     Compute JEPO advantages and necessary info for data, maintaining DataProto class.
     This function does not require any gradients and only adds keys and values to data proto.
@@ -1028,7 +818,7 @@ def compute_jepo_adv_with_dataproto(data: DataProto, model, jepo_cfg: dict, cach
     pad_token = cached_tokenizer.pad_token_id
     
     # Compute advantages for all questions
-    data_dicts = compute_jepo_advantages(
+    data_dicts = build_jepo_batches_by_prompt(
         response_tokens=data.batch["responses"],
         prompt_tokens=data.batch["prompts"],
         ground_truth_answer_tokens=ground_truths_tokens,
