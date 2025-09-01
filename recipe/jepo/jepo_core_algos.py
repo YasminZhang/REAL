@@ -702,85 +702,9 @@ def _chunk_list(lst, n):
 
 
 
-@torch.no_grad()
-def precompute_adv_for_dd(
-    model,
-    dd: dict,
-    temperature: float,
-    format_penalty: float,
-    responses_micro_bs: int,
-    vocab_chunk: int,
-    device_name: str,
-):
-    """
-    Fills dd with:
-      - 'A_full' [B] (detached, computed over ALL responses)
-      - 'w_full' [B] (detached, softmax weights over ALL responses)
-      - 'keep_idx' [K] (indices with has_delimiter=True)
-      - 'log_mean_det' (scalar, detached)
-    """
-    dev = dd["batch_input_ids"].device
-    B = len(dd["cot_start_positions"])
-    all_idx = torch.arange(B, device=dev)
-    ans_det_chunks = []
-
-    for s in range(0, B, responses_micro_bs):
-        idxs = all_idx[s:s+responses_micro_bs]
-        dd_s = _slice_data_dict(dd, idxs.tolist())
-        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            out = model(
-                input_ids=dd_s["batch_input_ids"].detach(),
-                attention_mask=dd_s["attention_mask"],
-                position_ids=dd_s["position_ids"],
-                use_cache=False,
-            )
-            logits = out.logits
-            logits.div_(temperature)
-        # only need detached answer log-probs here
-        _, _, ans_lp, _ = compute_segment_logprobs_sparse(
-            logits, dd_s, format_penalty, dd_s["has_delimiter"], vocab_chunk=vocab_chunk
-        )
-        ans_det_chunks.append(ans_lp.detach().float().cpu())
-        del out, logits
-
-    ans_det = torch.cat(ans_det_chunks, dim=0).to(dev)       # [B]
-    lse_all = torch.logsumexp(ans_det, dim=0)                # scalar
-    d = ans_det - lse_all
-    if B > 1:
-        lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-        v_i = lse_others - math.log(B - 1)
-    else:
-        v_i = ans_det.new_full((B,), float("-inf"))
-    log_mean_det = lse_all - math.log(B)                     # scalar
-
-    # JEPO RAW advantage A_i over ALL responses (detach)
-    A_raw = (log_mean_det - v_i)
-    A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
-    A_raw = A_raw.clamp(-1.0, 1.0)
-
-    # format penalty term (normalized) – keep same as your pass-2 logic
-    has_delim = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
-    fmt = torch.where(
-        has_delim,
-        torch.zeros(B, device=dev, dtype=torch.float32),
-        torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
-    )
-    # Mean-only normalization so the penalty scale remains effective
-    fmt = fmt - fmt.mean()
-    A_full = (A_raw + fmt).detach()
-
-    # weights for exact gradient of logsumexp over ALL responses
-    w_full = torch.softmax(ans_det, dim=0).detach()
-
-    keep_idx = _nonzero_idx(dd["has_delimiter"], device=dev)
-
-    # cache in dd (CPU or GPU is fine; keep on same dev to avoid copies later)
-    dd["A_full"] = A_full
-    dd["A_raw"] = A_raw.detach()
-    dd["fmt_norm"] = fmt.detach()
-    dd["w_full"] = w_full
-    dd["keep_idx"] = keep_idx
-    dd["log_mean_det"] = log_mean_det.detach().item()
+"""
+Removed precompute_adv_for_dd: A and w are computed inside the JEPO actor using VERL internals.
+"""
 
 
 
@@ -817,7 +741,7 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     )
     pad_token = cached_tokenizer.pad_token_id
     
-    # Compute advantages for all questions
+    # Build teacher-forced batches per question
     data_dicts = build_jepo_batches_by_prompt(
         response_tokens=data.batch["responses"],
         prompt_tokens=data.batch["prompts"],
@@ -832,144 +756,6 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
         delimiter_suffix_anchor=use_suffix_anchor,
         delimiter_suffix_min_len=suffix_min_len,
     )
-    
-    # Precompute advantages for all data dicts
-    for dd in data_dicts:
-        precompute_adv_for_dd(
-            model=model,
-            dd=dd,
-            temperature=temperature,
-            format_penalty=format_penalty,
-            responses_micro_bs=resp_micro_bs,
-            vocab_chunk=8192,
-            device_name="cuda" if torch.cuda.is_available() else "cpu",
-        )
-    
-    # Extract A and w from data_dicts and reconstruct batch tensors
-    batch_size = data.batch["responses"].shape[0]
-    device = data.batch["responses"].device
-    
-    # Initialize tensors for advantages and weights
-    jepo_adv = torch.zeros(batch_size, device=device)
-    jepo_adv_raw = torch.zeros(batch_size, device=device)
-    format_adv = torch.zeros(batch_size, device=device)
-    jepo_weights = torch.zeros(batch_size, device=device) 
-    has_delimiter = torch.zeros(batch_size, dtype=torch.bool, device=device)
-    
-    # Initialize lists for position information needed for log prob calculation
-    all_cot_start_positions = []
-    all_answer_start_positions = []
-    all_cot_tokens_list = []
-    all_ground_truth_answer_tokens = []
-    
-    # Map data_dict results back to original batch indices
-    current_idx = 0
-    for dd in data_dicts:
-        n_responses = len(dd["has_delimiter"])
-        
-        # Get advantages and weights from precomputed data
-        A_full = dd["A_full"]  # [n_responses]
-        A_raw = dd.get("A_raw")  # [n_responses]
-        F_norm = dd.get("fmt_norm") # [n_responses]
-        w_full = dd["w_full"]  # [n_responses]
-        has_delim = dd["has_delimiter"]  # list of booleans
-        
-        # Place back into batch tensors
-        jepo_adv[current_idx:current_idx + n_responses] = A_full
-        if A_raw is not None:
-            jepo_adv_raw[current_idx:current_idx + n_responses] = A_raw
-        if F_norm is not None:
-            format_adv[current_idx:current_idx + n_responses] = F_norm
-        jepo_weights[current_idx:current_idx + n_responses] = w_full
-        has_delimiter[current_idx:current_idx + n_responses] = torch.tensor(has_delim, device=device)
-        
-        # Collect position information for log prob calculation
-        all_cot_start_positions.extend(dd["cot_start_positions"])
-        all_answer_start_positions.extend(dd["answer_start_positions"])
-        all_cot_tokens_list.extend(dd["cot_tokens_list"])
-        all_ground_truth_answer_tokens.extend(dd["ground_truth_answer_tokens"])
-        
-        current_idx += n_responses
-    
-    # Reconstruct batch_input_ids, attention_mask, position_ids from data_dicts
-    # First, find the maximum sequence length across all data_dicts
-    max_seq_len = 0
-    all_batch_input_ids = []
-    all_attention_mask = []
-    all_position_ids = []
-    
-    for dd in data_dicts:
-        max_seq_len = max(max_seq_len, dd["batch_input_ids"].shape[1])
-        all_batch_input_ids.append(dd["batch_input_ids"])
-        all_attention_mask.append(dd["attention_mask"])
-        all_position_ids.append(dd["position_ids"])
-    
-    # Pad all tensors to the same length
-    pad_token_id = cached_tokenizer.pad_token_id
-    padded_batch_input_ids = []
-    padded_attention_mask = []
-    padded_position_ids = []
-    
-    for i, (input_ids, attn_mask, pos_ids) in enumerate(zip(all_batch_input_ids, all_attention_mask, all_position_ids)):
-        current_len = input_ids.shape[1]
-        if current_len < max_seq_len:
-            pad_len = max_seq_len - current_len
-            
-            # Pad input_ids with pad_token_id
-            padded_input_ids = F.pad(input_ids, (0, pad_len), value=pad_token_id)
-            
-            # Pad attention_mask with 0s
-            padded_attn_mask = F.pad(attn_mask, (0, pad_len), value=0)
-            
-            # Pad position_ids with 0s
-            padded_pos_ids = F.pad(pos_ids, (0, pad_len), value=0)
-            
-            padded_batch_input_ids.append(padded_input_ids)
-            padded_attention_mask.append(padded_attn_mask)
-            padded_position_ids.append(padded_pos_ids)
-        else:
-            padded_batch_input_ids.append(input_ids)
-            padded_attention_mask.append(attn_mask)
-            padded_position_ids.append(pos_ids)
-    
-    # Concatenate all tensors
-    batch_input_ids = torch.cat(padded_batch_input_ids, dim=0)
-    attention_mask = torch.cat(padded_attention_mask, dim=0)
-    position_ids = torch.cat(padded_position_ids, dim=0)
-    
-    # Convert position information to tensors for data.batch
-    # Pad cot_tokens_list and ground_truth_answer_tokens to same length for batching
-    max_cot_len = max(len(tokens) for tokens in all_cot_tokens_list) if all_cot_tokens_list else 0
-    max_ans_len = max(len(tokens) for tokens in all_ground_truth_answer_tokens) if all_ground_truth_answer_tokens else 0
-    
-    # Create padded tensors
-    cot_start_positions_tensor = torch.tensor(all_cot_start_positions, device=device, dtype=torch.long)
-    answer_start_positions_tensor = torch.tensor(all_answer_start_positions, device=device, dtype=torch.long)
-    
-    # Pad token lists
-    padded_cot_tokens = torch.full((batch_size, max_cot_len), pad_token_id, device=device, dtype=torch.long)
-    padded_ans_tokens = torch.full((batch_size, max_ans_len), pad_token_id, device=device, dtype=torch.long)
-    
-    for i, cot_tokens in enumerate(all_cot_tokens_list):
-        if len(cot_tokens) > 0:
-            padded_cot_tokens[i, :len(cot_tokens)] = torch.tensor(cot_tokens, device=device, dtype=torch.long)
-    
-    for i, ans_tokens in enumerate(all_ground_truth_answer_tokens):
-        if len(ans_tokens) > 0:
-            padded_ans_tokens[i, :len(ans_tokens)] = torch.tensor(ans_tokens, device=device, dtype=torch.long)
-    
-    # Add to data.batch
-    data.batch["jepo_adv"] = jepo_adv
-    data.batch["jepo_adv_raw"] = jepo_adv_raw
-    data.batch["format_adv"] = format_adv
-    data.batch["jepo_weights"] = jepo_weights
-    data.batch["has_delimiter"] = has_delimiter
-    data.batch["batch_input_ids"] = batch_input_ids
-    data.batch["batch_attention_mask"] = attention_mask
-    data.batch["batch_position_ids"] = position_ids
-    data.batch["cot_start_positions"] = cot_start_positions_tensor
-    data.batch["answer_start_positions"] = answer_start_positions_tensor
-    data.batch["cot_tokens"] = padded_cot_tokens
-    data.batch["ground_truth_tokens"] = padded_ans_tokens
-    
+    # Only attach per-question teacher-forced packs; JEPO actor computes A/w later using VERL internals
+    data.non_tensor_batch["jepo_data_dicts"] = data_dicts
     return data

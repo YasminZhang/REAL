@@ -120,13 +120,16 @@ class JEPOActor(DataParallelPPOActor):
         temperature = float(data.meta_info["temperature"])
         n = int(jepo_cfg.get("num_response_per_question", 8))  # number of responses per question
 
-        # -------- compute advantages and add to data --------
+        # -------- build teacher-forced packs per question --------
         data = attach_jepo_adv_to_dataproto(
             data=data,
             model=self.actor_module,
             jepo_cfg=jepo_cfg,
             cached_tokenizer=self._cached_tokenizer
         )
+        # Precompute A_raw, format_adv, and weights using VERL internals on teacher-forced batches
+        if "jepo_data_dicts" in data.non_tensor_batch:
+            data = self._precompute_adv_w_with_verl(data, temperature=temperature, format_penalty=format_penalty)
         
         # -------- do not drop samples; keep mask & counts --------
         has_delimiter_mask = data.batch["has_delimiter"]  # [N]
@@ -205,72 +208,139 @@ class JEPOActor(DataParallelPPOActor):
                             'batch_input_ids': step_data.batch["batch_input_ids"],
                         }
                         
-                        # Forward pass to get logits (eval mode, gradients enabled)
-                        was_training_actor = self.actor_module.training
-                        self.actor_module.eval()
-                        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
-                            out = self.actor_module(
-                                input_ids=step_data.batch["batch_input_ids"],
-                                attention_mask=step_data.batch["batch_attention_mask"],
-                                position_ids=step_data.batch["batch_position_ids"],
-                                use_cache=False,
-                            )
-                            logits = out.logits
-                            logits.div_(temperature)
-                        if was_training_actor:
-                            self.actor_module.train()
-                        
-                        # Build GRPO-style token-level loss for JEPO
+                        # Build GRPO-style token-level loss using VERL internals (_forward_micro_batch)
                         A_vec = jepo_adv_raw_all[step_indices] + format_adv_all[step_indices]
                         w_vec = jepo_weights_all[step_indices]
-                        loss_parts = compute_jepo_token_level_pg_loss_from_logits(
-                            logits=logits,
-                            data_dict=step_data_dict,
-                            A_vec=A_vec,
-                            w_vec=w_vec,
-                            beta_supp=float(beta_supp),
-                            normalize_by="tokens",
-                            vocab_chunk=8192,
-                        )
-                        # For monitoring and optional KL
-                        jepo_loss_part = loss_parts["jepo_loss_part"]
-                        supp_loss_part = loss_parts["supp_loss_part"]
-                        cot_log_probs = loss_parts["cot_log_probs"]
-                        answer_log_probs = loss_parts["answer_log_probs"]
-                        denom_all = loss_parts["denom"]
+                        was_training_actor = self.actor_module.training
+                        self.actor_module.eval()
+                        cot_lp_list: list[torch.Tensor] = []
+                        cot_adv_list: list[torch.Tensor] = []
+                        ans_lp_list: list[torch.Tensor] = []
+                        ans_adv_list: list[torch.Tensor] = []
 
-                        # Optionally compute KL term against reference policy on the same tokens
-                        kl_loss_part = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-                        if beta_kl > 0 and hasattr(self, "_ref_module") and self._ref_module is not None:
-                            was_training_ref = self._ref_module.training
-                            self._ref_module.eval()
-                            with torch.no_grad():
-                                with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
-                                    out_ref = self._ref_module(
-                                        input_ids=step_data.batch["batch_input_ids"],
-                                        attention_mask=step_data.batch["batch_attention_mask"],
-                                        position_ids=step_data.batch["batch_position_ids"],
-                                        use_cache=False,
-                                    )
-                                    ref_logits = out_ref.logits
-                                    ref_logits.div_(temperature)
-                            if was_training_ref:
-                                self._ref_module.train()
-                            _, ref_answer_log_probs, _ = compute_jepo_from_logits_efficient(
-                                logits=ref_logits,
-                                data_dict=step_data_dict,
-                                format_penalty=format_penalty,
-                                has_delimiter=has_delimiter_mask[step_indices].tolist(),
-                                vocab_chunk=8192,
+                        pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
+
+                        for idx_local in range(B_step):
+                            a_s = int(step_data.batch["answer_start_positions"][idx_local].item())
+                            c_s = int(step_data.batch["cot_start_positions"][idx_local].item())
+
+                            ids_full = step_data.batch["batch_input_ids"][idx_local]
+                            attn_full = step_data.batch["batch_attention_mask"][idx_local]
+                            pos_full = step_data.batch["batch_position_ids"][idx_local]
+
+                            # CoT+delimiter segment sits at tail: input_ids = [.. up to answer_start)
+                            ids_cot = ids_full[:a_s].unsqueeze(0)
+                            attn_cot = attn_full[:a_s].unsqueeze(0)
+                            pos_cot = pos_full[:a_s].unsqueeze(0)
+                            resp_cot = ids_full[c_s:a_s].unsqueeze(0)
+
+                            if resp_cot.numel() > 0:
+                                micro_cot = {
+                                    "input_ids": ids_cot,
+                                    "attention_mask": attn_cot,
+                                    "position_ids": pos_cot,
+                                    "responses": resp_cot,
+                                }
+                                # keep grad; _forward_micro_batch handles autocast internally
+                                _, lp_cot = self._forward_micro_batch(micro_cot, temperature=temperature, calculate_entropy=False)
+                                cot_lp_list.append(lp_cot.squeeze(0))  # [len_cot]
+                                cot_adv_list.append(torch.full_like(lp_cot.squeeze(0), fill_value=A_vec[idx_local].float()))
+
+                            # Answer segment sits at tail of full sequence
+                            # Determine true answer length from ground-truth tokens
+                            gt_row = step_data.batch["ground_truth_tokens"][idx_local]
+                            if (gt_row == pad_id).all():
+                                ans_len = max(0, int(ids_full.numel()) - a_s)
+                            else:
+                                ans_len = int((gt_row != pad_id).sum().item())
+                            resp_ans = ids_full[a_s:a_s + ans_len].unsqueeze(0)
+                            ids_ans = ids_full.unsqueeze(0)
+                            attn_ans = attn_full.unsqueeze(0)
+                            pos_ans = pos_full.unsqueeze(0)
+
+                            if resp_ans.numel() > 0:
+                                micro_ans = {
+                                    "input_ids": ids_ans,
+                                    "attention_mask": attn_ans,
+                                    "position_ids": pos_ans,
+                                    "responses": resp_ans,
+                                }
+                                _, lp_ans = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
+                                ans_lp_list.append(lp_ans.squeeze(0))  # [len_ans]
+                                ans_adv_list.append(torch.full_like(lp_ans.squeeze(0), fill_value=(w_vec[idx_local].float())))
+
+                        if was_training_actor:
+                            self.actor_module.train()
+                        # Pad into matrices and compute policy loss via GPG (token-wise -logp*A)
+                        dev = step_data.batch["batch_input_ids"].device
+                        loss_agg_mode = "token-mean"
+
+                        if cot_lp_list:
+                            max_cot = max(int(x.numel()) for x in cot_lp_list)
+                            cot_lp_mat = torch.zeros((len(cot_lp_list), max_cot), device=dev)
+                            cot_mask = torch.zeros((len(cot_lp_list), max_cot), device=dev)
+                            cot_adv_mat = torch.zeros((len(cot_adv_list), max_cot), device=dev)
+                            for i2, (lpv, advv) in enumerate(zip(cot_lp_list, cot_adv_list)):
+                                L = int(lpv.numel())
+                                if L > 0:
+                                    cot_lp_mat[i2, :L] = lpv
+                                    cot_adv_mat[i2, :L] = advv
+                                    cot_mask[i2, :L] = 1
+                            gpg_fn = get_policy_loss_fn("gpg")
+                            jepo_loss_part, _, _, _ = gpg_fn(
+                                old_log_prob=None,
+                                log_prob=cot_lp_mat,
+                                advantages=cot_adv_mat,
+                                response_mask=cot_mask,
+                                loss_agg_mode=loss_agg_mode,
                             )
-                            # kld over answer sums per sample; normalize by contributing samples
-                            kld = kl_penalty(
-                                logprob=answer_log_probs, ref_logprob=ref_answer_log_probs, kl_penalty=kl_loss_type
+                            cot_log_probs = cot_lp_mat.sum(dim=-1).detach()
+                        else:
+                            jepo_loss_part = torch.tensor(0.0, device=dev)
+                            cot_log_probs = torch.zeros((B_step,), device=dev)
+
+                        if ans_lp_list:
+                            max_ans = max(int(x.numel()) for x in ans_lp_list)
+                            ans_lp_mat = torch.zeros((len(ans_lp_list), max_ans), device=dev)
+                            ans_mask = torch.zeros((len(ans_lp_list), max_ans), device=dev)
+                            ans_adv_mat = torch.zeros((len(ans_adv_list), max_ans), device=dev)
+                            for i2, (lpv, advv) in enumerate(zip(ans_lp_list, ans_adv_list)):
+                                L = int(lpv.numel())
+                                if L > 0:
+                                    ans_lp_mat[i2, :L] = lpv
+                                    ans_adv_mat[i2, :L] = advv * float(beta_supp)
+                                    ans_mask[i2, :L] = 1
+                            gpg_fn = get_policy_loss_fn("gpg")
+                            supp_loss_part, _, _, _ = gpg_fn(
+                                old_log_prob=None,
+                                log_prob=ans_lp_mat,
+                                advantages=ans_adv_mat,
+                                response_mask=ans_mask,
+                                loss_agg_mode=loss_agg_mode,
                             )
-                            # denom handled below
-                        
-                        # KL term already computed above if enabled. Normalize by token denom for consistency
-                        kl_loss_part = (kld.sum() / denom_all) * beta_kl if 'kld' in locals() else torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+                            answer_log_probs = ans_lp_mat.sum(dim=-1).detach()
+                        else:
+                            supp_loss_part = torch.tensor(0.0, device=dev)
+                            answer_log_probs = torch.zeros((B_step,), device=dev)
+
+                        # KL divergence on raw responses (use precomputed ref_log_prob from batch)
+                        kl_loss_part = torch.tensor(0.0, device=dev)
+                        if beta_kl > 0 and ("ref_log_prob" in data.batch.keys()):
+                            # compute actor log_prob on original responses for this step
+                            try:
+                                micro_orig = {
+                                    "input_ids": step_data.batch["input_ids"],
+                                    "attention_mask": step_data.batch["attention_mask"],
+                                    "position_ids": step_data.batch["position_ids"],
+                                    "responses": step_data.batch["responses"],
+                                }
+                                _, lp_orig = self._forward_micro_batch(micro_orig, temperature=temperature, calculate_entropy=False)
+                                ref_lp_orig = data.batch["ref_log_prob"][step_indices]
+                                resp_mask_orig = compute_response_mask(step_data)
+                                kld = kl_penalty(logprob=lp_orig, ref_logprob=ref_lp_orig, kl_penalty=kl_loss_type)
+                                kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode=loss_agg_mode) * beta_kl
+                            except Exception:
+                                kl_loss_part = torch.tensor(0.0, device=dev)
                         
                         loss_chunk = (jepo_loss_part + supp_loss_part + kl_loss_part) / accum_steps
                         print("finish calculate jepo loss")
@@ -320,3 +390,72 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_buffer/format_adv_max": fmt_max,
             "jepo_actor/format_penalty": format_penalty,
         }
+
+    @torch.no_grad()
+    def _precompute_adv_w_with_verl(self, data: DataProto, temperature: float, format_penalty: float) -> DataProto:
+        dev = data.batch["responses"].device
+        pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
+        data_dicts = data.non_tensor_batch.get("jepo_data_dicts", [])
+        N = data.batch["responses"].shape[0]
+        jepo_adv_raw = torch.zeros(N, device=dev)
+        format_adv = torch.zeros(N, device=dev)
+        jepo_weights = torch.zeros(N, device=dev)
+        has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
+
+        current_idx = 0
+        for dd in data_dicts:
+            B = len(dd["has_delimiter"]) if isinstance(dd["has_delimiter"], list) else int(dd["has_delimiter"].numel())
+            ans_logprob = torch.zeros(B, device=dev)
+            for i in range(B):
+                a_s = int(dd["answer_start_positions"][i])
+                ids_full = dd["batch_input_ids"][i]
+                attn_full = dd["attention_mask"][i]
+                pos_full = dd["position_ids"][i]
+                gt_row = dd["ground_truth_answer_tokens"][i]
+                if isinstance(gt_row, list):
+                    ans_len = len(gt_row)
+                else:
+                    ans_len = int((torch.as_tensor(gt_row, device=dev) != pad_id).sum().item())
+                if ans_len <= 0:
+                    continue
+                micro_ans = {
+                    "input_ids": ids_full.unsqueeze(0),
+                    "attention_mask": attn_full.unsqueeze(0),
+                    "position_ids": pos_full.unsqueeze(0),
+                    "responses": ids_full[a_s:a_s + ans_len].unsqueeze(0),
+                }
+                _, lp_ans = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
+                ans_logprob[i] = lp_ans.sum().detach()
+
+            lse_all = torch.logsumexp(ans_logprob, dim=0)
+            if B > 1:
+                d = ans_logprob - lse_all
+                lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+                v_i = lse_others - math.log(B - 1)
+            else:
+                v_i = ans_logprob.new_full((B,), float("-inf"))
+            log_mean = lse_all - math.log(max(B, 1))
+            A_raw = (log_mean - v_i)
+            A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
+            A_raw = A_raw.clamp(-1.0, 1.0)
+
+            has_delim = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
+            fmt = torch.where(
+                has_delim,
+                torch.zeros(B, device=dev, dtype=torch.float32),
+                torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
+            )
+            fmt = fmt - fmt.mean()
+            w_full = torch.softmax(ans_logprob, dim=0)
+
+            jepo_adv_raw[current_idx:current_idx + B] = A_raw
+            format_adv[current_idx:current_idx + B] = fmt
+            jepo_weights[current_idx:current_idx + B] = w_full
+            has_delim_all[current_idx:current_idx + B] = has_delim
+            current_idx += B
+
+        data.batch["jepo_adv_raw"] = jepo_adv_raw
+        data.batch["format_adv"] = format_adv
+        data.batch["jepo_weights"] = jepo_weights
+        data.batch["has_delimiter"] = has_delim_all
+        return data
