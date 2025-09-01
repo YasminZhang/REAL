@@ -50,8 +50,6 @@ elif is_npu_available:
 from jepo_core_algos import (
     attach_jepo_adv_to_dataproto,
     dummy_backward_fsdp_safe,
-    compute_segment_logprobs_shifted as compute_jepo_from_logits_efficient,
-    token_level_jepo_loss as compute_jepo_token_level_pg_loss_from_logits,
     _allreduce_sum_scalar,
 )
 
@@ -156,7 +154,6 @@ class JEPOActor(DataParallelPPOActor):
         # Extract stored advantages and weights (all responses)
         jepo_adv_raw_all = data.batch.get("jepo_adv_raw", data.batch["jepo_adv"])  # fallback for raw
         format_adv_all = data.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_all))
-        jepo_weights_all = data.batch["jepo_weights"]
 
         # Buffer-wide diagnostics for format advantage
         try:
@@ -197,20 +194,13 @@ class JEPOActor(DataParallelPPOActor):
                         step_data = data[step_indices]
                         B_step = len(step_indices)
                         
-                        # Prepare data dict for compute_jepo_from_logits_efficient
-                        # Convert tensors back to lists for the function interface
-                        step_data_dict = {
-                            'cot_start_positions': step_data.batch["cot_start_positions"].cpu().tolist(),
-                            'answer_start_positions': step_data.batch["answer_start_positions"].cpu().tolist(),
-                            'cot_tokens_list': [step_data.batch["cot_tokens"][i][step_data.batch["cot_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)],
-                            'ground_truth_answer_tokens': [step_data.batch["ground_truth_tokens"][i][step_data.batch["ground_truth_tokens"][i] != self._cached_tokenizer.pad_token_id].cpu().tolist() for i in range(B_step)],
-                            # Provide teacher-forced input ids so delimiter span can be labeled
-                            'batch_input_ids': step_data.batch["batch_input_ids"],
-                        }
                         
                         # Build GRPO-style token-level loss using VERL internals (_forward_micro_batch)
-                        A_vec = jepo_adv_raw_all[step_indices] + format_adv_all[step_indices]
-                        w_vec = jepo_weights_all[step_indices]
+                        # Mask A_raw by has_delimiter and add mean-centered format advantage
+                        A_vec = (
+                            jepo_adv_raw_all[step_indices] * has_delimiter_mask[step_indices].float()
+                            + format_adv_all[step_indices]
+                        )
                         was_training_actor = self.actor_module.training
                         self.actor_module.eval()
                         cot_lp_list: list[torch.Tensor] = []
@@ -225,8 +215,8 @@ class JEPOActor(DataParallelPPOActor):
                             c_s = int(step_data.batch["cot_start_positions"][idx_local].item())
 
                             ids_full = step_data.batch["batch_input_ids"][idx_local]
-                            attn_full = step_data.batch["batch_attention_mask"][idx_local]
-                            pos_full = step_data.batch["batch_position_ids"][idx_local]
+                            attn_full = step_data.batch["attention_mask"][idx_local]
+                            pos_full = step_data.batch["position_ids"][idx_local]
 
                             # CoT+delimiter segment sits at tail: input_ids = [.. up to answer_start)
                             ids_cot = ids_full[:a_s].unsqueeze(0)
@@ -247,12 +237,12 @@ class JEPOActor(DataParallelPPOActor):
                                 cot_adv_list.append(torch.full_like(lp_cot.squeeze(0), fill_value=A_vec[idx_local].float()))
 
                             # Answer segment sits at tail of full sequence
-                            # Determine true answer length from ground-truth tokens
-                            gt_row = step_data.batch["ground_truth_tokens"][idx_local]
-                            if (gt_row == pad_id).all():
+                            # Determine true answer length from ground-truth tokens (variable length list)
+                            try:
+                                gt_tokens = step_data.non_tensor_batch["ground_truth_answer_tokens"][idx_local]
+                                ans_len = int(len(gt_tokens)) if gt_tokens is not None else max(0, int(ids_full.numel()) - a_s)
+                            except Exception:
                                 ans_len = max(0, int(ids_full.numel()) - a_s)
-                            else:
-                                ans_len = int((gt_row != pad_id).sum().item())
                             resp_ans = ids_full[a_s:a_s + ans_len].unsqueeze(0)
                             ids_ans = ids_full.unsqueeze(0)
                             attn_ans = attn_full.unsqueeze(0)
@@ -267,7 +257,8 @@ class JEPOActor(DataParallelPPOActor):
                                 }
                                 _, lp_ans = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
                                 ans_lp_list.append(lp_ans.squeeze(0))  # [len_ans]
-                                ans_adv_list.append(torch.full_like(lp_ans.squeeze(0), fill_value=(w_vec[idx_local].float())))
+                                # Direct token-level logp for support (uniform, no w_i)
+                                ans_adv_list.append(torch.ones_like(lp_ans.squeeze(0)))
 
                         if was_training_actor:
                             self.actor_module.train()
@@ -357,8 +348,6 @@ class JEPOActor(DataParallelPPOActor):
                         meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
                         meters["kl_loss"] += float(kl_loss_part.detach()) / accum_steps
                         meter_count += 1
-                        
-                        del out, logits, cot_log_probs, answer_log_probs
                         torch.cuda.empty_cache()
 
             # one optimizer step per epoch

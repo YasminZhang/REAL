@@ -20,6 +20,7 @@ from copy import deepcopy
 import numpy as np
 from collections import defaultdict
 import verl.utils.torch_functional as verl_F
+from verl import DataProto
 
 def dummy_backward_fsdp_safe(model, scaler=None):
     device = next(model.parameters()).device
@@ -273,439 +274,6 @@ def build_jepo_batches_by_prompt(
     
     return data_dicts
 
-"""
-Backwards-compatibility aliases to minimize churn in existing code.
-Prefer the new names in future code paths.
-"""
-compute_single_jepo_advantages = build_jepo_teacher_forced_batch
-compute_jepo_advantages = build_jepo_batches_by_prompt
-compute_jepo_from_logits_efficient = compute_segment_logprobs_shifted
-compute_jepo_from_logits_sparse = compute_segment_logprobs_sparse
-
-
-
-import math
-import torch
-import torch.nn.functional as F
-
-@torch.no_grad()
-def _normalize(vec: torch.Tensor) -> torch.Tensor:
-    return (vec - vec.mean()) / (vec.std(unbiased=False) + 1e-8)
-
-def _rowwise_logsumexp_streaming(logits: torch.Tensor,
-                                 b_rows: torch.Tensor,
-                                 t_rows: torch.Tensor,
-                                 vocab_chunk: int = 8192) -> torch.Tensor:
-    """
-    Compute logsumexp over vocab for selected (b,t) rows in a memory-friendly way.
-    Returns: lse [U] for U = len(b_rows).
-    """
-    U = b_rows.numel()
-    device = logits.device
-    lse = torch.full((U,), float("-inf"), device=device, dtype=torch.float32)
-    V = logits.size(-1)
-
-    # stream over vocab to avoid materializing [U, V]
-    for start in range(0, V, vocab_chunk):
-        end = min(start + vocab_chunk, V)
-        # [U, w]
-        chunk = logits[b_rows, t_rows, start:end].float()
-        m = chunk.max(dim=-1).values                          # [U]
-        # logsumexp per chunk
-        lse_chunk = m + torch.log(torch.clamp(
-            torch.sum(torch.exp(chunk - m.unsqueeze(-1)), dim=-1), min=1e-45
-        ))
-        # combine across chunks in log-space
-        lse = torch.logaddexp(lse, lse_chunk)
-    return lse  # float32 for stability
-
-def _sparse_logprob_sum(logits: torch.Tensor,
-                        b_idx: torch.Tensor,
-                        t_idx: torch.Tensor,
-                        v_idx: torch.Tensor,
-                        B: int,
-                        vocab_chunk: int = 8192) -> torch.Tensor:
-    """
-    Compute sum of log-probs per batch item for a sparse set of (b,t,v) indices.
-    Returns: per-sample sums [B] with grad.
-    """
-    if b_idx.numel() == 0:
-        return torch.zeros(B, device=logits.device, dtype=logits.dtype)
-
-    # Group by unique (b,t) rows
-    rows = torch.stack([b_idx, t_idx], dim=1)                       # [K, 2]
-    uniq_rows, inv = torch.unique(rows, dim=0, return_inverse=True) # uniq_rows: [U,2], inv: [K]
-    b_rows = uniq_rows[:, 0].long()
-    t_rows = uniq_rows[:, 1].long()
-
-    # Row-wise logsumexp over vocab, streamed
-    lse_rows = _rowwise_logsumexp_streaming(logits, b_rows, t_rows, vocab_chunk=vocab_chunk)  # [U], float32
-
-    # Label logits for each sparse index
-    label_logits = logits[b_idx, t_idx, v_idx].float()              # [K], float32
-
-    # Sparse log-prob per index: log p = logit(label) - logsumexp(row)
-    logprob_flat = label_logits - lse_rows[inv]                     # [K], float32
-
-    # Sum per batch element
-    out = torch.zeros(B, device=logits.device, dtype=torch.float32)
-    out.index_add_(0, b_idx, logprob_flat)
-    return out.to(logits.dtype)                                     # match model dtype (bf16/fp16/fp32)
-
-def compute_segment_logprobs_sparse(
-    logits, data_dict, format_penalty, has_delimiter, vocab_chunk=8192
-):
-    """
-    Memory-friendly replacement for compute_jepo_from_logprobs_*.
-    Takes raw logits [B, T, V] (already temperature-scaled), never builds BxTxV log_softmax.
-    """
-    device, dtype = logits.device, logits.dtype
-    B, T, V = logits.shape
-
-    cot_start = data_dict['cot_start_positions']
-    ans_start = data_dict['answer_start_positions']
-    cot_tok_list = data_dict['cot_tokens_list']
-    ans_tok_list = data_dict['ground_truth_answer_tokens']
-
-    # --- build sparse indices for CoT tokens ---
-    b_c, t_c, v_c = [], [], []
-    for i, (s, toks) in enumerate(zip(cot_start, cot_tok_list)):
-        if len(toks) == 0: continue
-        t = torch.arange(s, s + len(toks), device=device) - 1
-        m = (t >= 0) & (t < T)
-        if m.any():
-            b_c.append(torch.full((int(m.sum().item()),), i, device=device, dtype=torch.long))
-            t_c.append(t[m].long())
-            v_c.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
-    if b_c:
-        b_c = torch.cat(b_c); t_c = torch.cat(t_c); v_c = torch.cat(v_c)
-        cot_log_probs = _sparse_logprob_sum(logits, b_c, t_c, v_c, B, vocab_chunk=vocab_chunk)  # [B]
-    else:
-        cot_log_probs = torch.zeros(B, device=device, dtype=dtype)
-
-    # --- build sparse indices for ANSWER tokens ---
-    b_a, t_a, v_a = [], [], []
-    for i, (s, toks) in enumerate(zip(ans_start, ans_tok_list)):
-        if len(toks) == 0: continue
-        t = torch.arange(s, s + len(toks), device=device) - 1
-        m = (t >= 0) & (t < T)
-        if m.any():
-            b_a.append(torch.full((int(m.sum().item()),), i, device=device, dtype=torch.long))
-            t_a.append(t[m].long())
-            v_a.append(torch.as_tensor(toks, device=device, dtype=torch.long)[m])
-    if b_a:
-        b_a = torch.cat(b_a); t_a = torch.cat(t_a); v_a = torch.cat(v_a)
-        answer_log_probs = _sparse_logprob_sum(logits, b_a, t_a, v_a, B, vocab_chunk=vocab_chunk)  # [B]
-    else:
-        answer_log_probs = torch.zeros(B, device=device, dtype=dtype)
-
-    # ---- log-mean over answers (WITH grad) ----
-    # scalar: log_mean = logsumexp(answer_log_probs) - log(B)
-    lse_all = torch.logsumexp(answer_log_probs.float(), dim=0)      # float32 for stability
-    log_mean_prob = (lse_all - math.log(max(B, 1))).to(dtype)
-
-    # ---- JEPO advantage (outside graph where appropriate) ----
-    with torch.no_grad():
-        ans_det = answer_log_probs.detach().float()
-        lse_all_d = torch.logsumexp(ans_det, dim=0)
-        d = ans_det - lse_all_d
-        if B > 1:
-            lse_others = lse_all_d + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-            v_i = lse_others - math.log(B - 1)
-        else:
-            v_i = ans_det.new_full((B,), float("-inf"))
-        A = (log_mean_prob.detach().float() - v_i)
-        A = torch.clamp(_normalize(A), -1.0, 1.0)
-
-        has_delim = torch.as_tensor(has_delimiter, device=device, dtype=torch.bool)
-        fmt = torch.where(
-            has_delim,
-            torch.zeros(B, device=device, dtype=torch.float32),
-            torch.tensor(-float(format_penalty), device=device, dtype=torch.float32),
-        )
-        # Mean-only normalization
-        fmt = fmt - fmt.mean()
-
-        jepo_advantage = A  # + fmt if you want to include format penalty
-        jepo_advantage = jepo_advantage.to(dtype)
-
-    return jepo_advantage, cot_log_probs, answer_log_probs, log_mean_prob
-
-
-def compute_segment_logprobs_shifted(
-    logits, data_dict, format_penalty, has_delimiter, vocab_chunk=8192
-):
-    """
-    Efficient replacement using standard shift and gather operations.
-    Much faster than sparse indexing approach.
-    """
-    device, dtype = logits.device, logits.dtype
-    B, T, V = logits.shape
-
-    cot_start = data_dict['cot_start_positions']
-    ans_start = data_dict['answer_start_positions']
-    cot_tok_list = data_dict['cot_tokens_list']
-    ans_tok_list = data_dict['ground_truth_answer_tokens']
-
-    # Standard language modeling setup: shift logits and create targets
-    shift_logits = logits[..., :-1, :].contiguous()  # [B, T-1, V]
-    shift_labels = torch.full((B, T-1), -100, dtype=torch.long, device=device)  # [B, T-1]
-    
-    # Create masks for CoT and answer regions
-    cot_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
-    ans_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
-    
-    # Fill in the target tokens and masks
-    for i in range(B):
-        # CoT tokens
-        cot_tokens = cot_tok_list[i]
-        cot_s = cot_start[i]
-        if len(cot_tokens) > 0:
-            cot_end = min(cot_s + len(cot_tokens), T-1)
-            cot_len = cot_end - cot_s
-            if cot_len > 0:
-                shift_labels[i, cot_s:cot_end] = torch.tensor(cot_tokens[:cot_len], device=device, dtype=torch.long)
-                cot_mask[i, cot_s:cot_end] = True
-        
-        # Answer tokens  
-        ans_tokens = ans_tok_list[i]
-        ans_s = ans_start[i]
-        if len(ans_tokens) > 0:
-            ans_end = min(ans_s + len(ans_tokens), T-1)
-            ans_len = ans_end - ans_s
-            if ans_len > 0:
-                shift_labels[i, ans_s:ans_end] = torch.tensor(ans_tokens[:ans_len], device=device, dtype=torch.long)
-                ans_mask[i, ans_s:ans_end] = True
-
-        # Include delimiter tokens (between CoT end and answer start) into CoT mask
-        # so g1 and formatting updates can act on them when applicable.
-        # We do not need the delimiter IDs explicitly: use the teacher-forced tokens
-        # already present in batch_input_ids to set labels for these positions.
-        # CoT end index (clamped within [0, T-1])
-        cot_end_idx = min(cot_s + (len(cot_tokens) if len(cot_tokens) > 0 else 0), T-1)
-        # Delimiter occupies [del_start, del_end) right before answer_start
-        del_start = max(0, cot_end_idx)
-        del_end = min(ans_s, T-1)
-        if del_end > del_start:
-            # Labels for these positions are just the next tokens in the input stream
-            # represented by batch_input_ids (after shifting by one handled globally).
-            # Since our shift_labels convention elsewhere uses direct tokens for the
-            # segment, we follow the same here.
-            shift_labels[i, del_start:del_end] = data_dict["batch_input_ids"][i, del_start:del_end]
-            cot_mask[i, del_start:del_end] = True
-    
-    # Compute log probabilities efficiently without OOM
-    # Chunk the computation to handle long sequences with large vocab
-    token_log_probs = torch.zeros((B, T-1), device=device, dtype=dtype)
-    valid_mask = (shift_labels != -100)
-    
-    if valid_mask.any():
-        # Get indices where we need to compute log probs
-        valid_b, valid_t = torch.where(valid_mask)
-        valid_labels = shift_labels[valid_mask]  # [num_valid]
-        num_valid = len(valid_b)
-        
-        # Chunk size to avoid OOM - adjust based on available memory
-        # Conservative estimate: ~1K positions at a time for large vocab
-        chunk_size = min(vocab_chunk // 100, 1024)  # vocab_chunk is typically 8192, so this gives ~80 positions
-        
-        for start_idx in range(0, num_valid, chunk_size):
-            end_idx = min(start_idx + chunk_size, num_valid)
-            
-            # Get chunk indices
-            chunk_b = valid_b[start_idx:end_idx]
-            chunk_t = valid_t[start_idx:end_idx]
-            chunk_labels = valid_labels[start_idx:end_idx]
-            
-            # Compute log softmax only for this chunk
-            chunk_logits = shift_logits[chunk_b, chunk_t]  # [chunk_size, V]
-            chunk_log_probs = F.log_softmax(chunk_logits, dim=-1)  # [chunk_size, V]
-            
-            # Gather the target token probabilities
-            chunk_target_probs = chunk_log_probs.gather(-1, chunk_labels.unsqueeze(-1)).squeeze(-1)  # [chunk_size]
-            
-            # Put back into the full tensor
-            chunk_mask = torch.zeros_like(valid_mask)
-            chunk_mask[valid_b[start_idx:end_idx], valid_t[start_idx:end_idx]] = True
-            token_log_probs[chunk_mask] = chunk_target_probs
-            
-            # Clean up intermediate tensors
-            del chunk_logits, chunk_log_probs, chunk_target_probs, chunk_mask
-    
-    # Sum over CoT and answer regions
-    cot_log_probs = (token_log_probs * cot_mask.float()).sum(dim=-1)  # [B]
-    answer_log_probs = (token_log_probs * ans_mask.float()).sum(dim=-1)  # [B]
-    
-    # ---- log-mean over answers (WITH grad) ----
-    lse_all = torch.logsumexp(answer_log_probs.float(), dim=0)
-    log_mean_prob = (lse_all - math.log(max(B, 1))).to(dtype)
-
-    return cot_log_probs, answer_log_probs, log_mean_prob
-
-
-def token_level_jepo_loss(
-    logits,
-    data_dict,
-    A_vec: torch.Tensor,
-    w_vec: torch.Tensor,
-    beta_supp: float,
-    normalize_by: str = "tokens",
-    vocab_chunk: int = 8192,
-):
-    """
-    Token-level JEPO loss in a GRPO-style formulation.
-
-    - For CoT + delimiter tokens, per-token advantage = A_vec[i]
-    - For answer tokens, per-token advantage = beta_supp * w_vec[i]
-
-    Args:
-        logits: [B, T, V]
-        data_dict: contains positions and token lists built by build_dataset-like util
-        A_vec: [B] normalized JEPO advantages (including format if desired)
-        w_vec: [B] softmax weights for exact grad of log-mean over answers
-        beta_supp: scalar multiplier for support (answer) term
-        normalize_by: "tokens" | "responses" — denominator for averaging
-        vocab_chunk: chunking knob for memory safety
-
-    Returns dict with:
-        loss: scalar
-        jepo_loss_part: scalar (CoT part only)
-        supp_loss_part: scalar (answer part only)
-        cot_log_probs: [B] summed CoT token log-probs (for metrics)
-        ans_log_probs: [B] summed answer token log-probs (for metrics)
-    """
-    device, dtype = logits.device, logits.dtype
-    B, T, V = logits.shape
-
-    cot_start = data_dict['cot_start_positions']
-    ans_start = data_dict['answer_start_positions']
-    cot_tok_list = data_dict['cot_tokens_list']
-    ans_tok_list = data_dict['ground_truth_answer_tokens']
-
-    # Standard language modeling setup: shift logits and create targets
-    shift_logits = logits[..., :-1, :].contiguous()  # [B, T-1, V]
-    shift_labels = torch.full((B, T-1), -100, dtype=torch.long, device=device)  # [B, T-1]
-
-    # Create masks for CoT and answer regions
-    cot_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
-    ans_mask = torch.zeros((B, T-1), dtype=torch.bool, device=device)
-
-    # Fill in the target tokens and masks
-    for i in range(B):
-        # CoT tokens
-        cot_tokens = cot_tok_list[i]
-        cot_s = cot_start[i]
-        if len(cot_tokens) > 0:
-            cot_end = min(cot_s + len(cot_tokens), T-1)
-            cot_len = cot_end - cot_s
-            if cot_len > 0:
-                shift_labels[i, cot_s:cot_end] = torch.tensor(cot_tokens[:cot_len], device=device, dtype=torch.long)
-                cot_mask[i, cot_s:cot_end] = True
-
-        # Answer tokens
-        ans_tokens = ans_tok_list[i]
-        ans_s = ans_start[i]
-        if len(ans_tokens) > 0:
-            ans_end = min(ans_s + len(ans_tokens), T-1)
-            ans_len = ans_end - ans_s
-            if ans_len > 0:
-                shift_labels[i, ans_s:ans_end] = torch.tensor(ans_tokens[:ans_len], device=device, dtype=torch.long)
-                ans_mask[i, ans_s:ans_end] = True
-
-        # Include delimiter tokens (between CoT end and answer start) into CoT mask
-        cot_end_idx = min(cot_s + (len(cot_tokens) if len(cot_tokens) > 0 else 0), T-1)
-        del_start = max(0, cot_end_idx)
-        del_end = min(ans_s, T-1)
-        if del_end > del_start:
-            shift_labels[i, del_start:del_end] = data_dict["batch_input_ids"][i, del_start:del_end]
-            cot_mask[i, del_start:del_end] = True
-
-    # Compute per-position token log-probs
-    token_log_probs = torch.zeros((B, T-1), device=device, dtype=dtype)
-    valid_mask = (shift_labels != -100)
-    if valid_mask.any():
-        valid_b, valid_t = torch.where(valid_mask)
-        valid_labels = shift_labels[valid_mask]
-        num_valid = len(valid_b)
-
-        chunk_size = min(vocab_chunk // 100, 1024)
-        for start_idx in range(0, num_valid, chunk_size):
-            end_idx = min(start_idx + chunk_size, num_valid)
-            cb = valid_b[start_idx:end_idx]
-            ct = valid_t[start_idx:end_idx]
-            cl = valid_labels[start_idx:end_idx]
-            chunk_logits = shift_logits[cb, ct]
-            chunk_log_probs = torch.log_softmax(chunk_logits, dim=-1)
-            chunk_target = chunk_log_probs.gather(-1, cl.unsqueeze(-1)).squeeze(-1)
-            token_log_probs[cb, ct] = chunk_target
-            del chunk_logits, chunk_log_probs, chunk_target
-
-    # Build per-token advantages
-    adv_mat = torch.zeros((B, T-1), device=device, dtype=token_log_probs.dtype)
-    if B > 0:
-        adv_mat[cot_mask] = A_vec.to(device=device, dtype=token_log_probs.dtype).repeat_interleave(
-            cot_mask.sum(dim=1).clamp_min(0)
-        )[: int(cot_mask.sum().item())]
-        # For answer tokens, use beta_supp * w_i
-        w_scaled = (w_vec.to(device=device, dtype=token_log_probs.dtype) * float(beta_supp))
-        adv_mat[ans_mask] = w_scaled.repeat_interleave(ans_mask.sum(dim=1).clamp_min(0))[: int(ans_mask.sum().item())]
-
-    resp_mask = (cot_mask | ans_mask)
-
-    # Separate parts for metrics
-    cot_lp_vec = (token_log_probs * cot_mask.float()).sum(dim=-1)  # [B]
-    ans_lp_vec = (token_log_probs * ans_mask.float()).sum(dim=-1)  # [B]
-
-    # Losses
-    jepo_term = -(adv_mat * token_log_probs * cot_mask.float()).sum()
-    supp_term = -(adv_mat * token_log_probs * ans_mask.float()).sum()
-
-    if normalize_by == "tokens":
-        denom = resp_mask.float().sum().clamp_min(1.0)
-    else:  # responses
-        denom = resp_mask.any(dim=1).float().sum().clamp_min(1.0)
-
-    loss = (jepo_term + supp_term) / denom
-
-    return {
-        "loss": loss,
-        "jepo_loss_part": jepo_term / denom,
-        "supp_loss_part": supp_term / denom,
-        "cot_log_probs": cot_lp_vec.detach(),
-        "answer_log_probs": ans_lp_vec.detach(),
-        "denom": denom.detach(),
-    }
-
-import math
-import numpy as np
-import torch
-from contextlib import nullcontext
-from verl import DataProto
-
-# --- helper: slice a single question's data_dict by response indices ---
-def _slice_data_dict(dd, idxs):
-    def take_list(lst): return [lst[i] for i in idxs]
-    return {
-        "batch_input_ids": dd["batch_input_ids"][idxs],
-        "attention_mask": dd["attention_mask"][idxs],
-        "position_ids": dd["position_ids"][idxs],
-        "cot_start_positions": take_list(dd["cot_start_positions"]),
-        "answer_start_positions": take_list(dd["answer_start_positions"]),
-        "cot_tokens_list": take_list(dd["cot_tokens_list"]),
-        "ground_truth_answer_tokens": take_list(dd["ground_truth_answer_tokens"]),
-        "has_delimiter": take_list(dd["has_delimiter"]),
-    }
-
-def _chunk_list(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
-
-
-"""
-Removed precompute_adv_for_dd: A and w are computed inside the JEPO actor using VERL internals.
-"""
-
 
 
 @torch.no_grad()
@@ -749,7 +317,7 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
         delimiter_str=delimiter,
         format_penalty=format_penalty,
         model=model,
-        device=model.device,
+        device=(next(model.parameters()).device),
         pad_token=pad_token,
         index=data.non_tensor_batch["uid"],
         tokenizer=cached_tokenizer,
@@ -758,4 +326,42 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     )
     # Only attach per-question teacher-forced packs; JEPO actor computes A/w later using VERL internals
     data.non_tensor_batch["jepo_data_dicts"] = data_dicts
+
+    # Flatten teacher-forced fields into top-level batch for per-response slicing in the JEPO actor
+    flat_batch_input_ids = []
+    flat_attention_mask = []
+    flat_position_ids = []
+    flat_cot_start = []
+    flat_ans_start = []
+    flat_has_delim = []
+    flat_gt_tokens = []
+
+    for dd in data_dicts:
+        if dd.get("batch_input_ids") is not None and dd["batch_input_ids"].numel() > 0:
+            flat_batch_input_ids.append(dd["batch_input_ids"])  # [B_i, T_i]
+            # attention_mask is long 0/1; keep as long to match typical masks
+            flat_attention_mask.append(dd["attention_mask"].to(dtype=dd["batch_input_ids"].dtype))
+            flat_position_ids.append(dd["position_ids"])
+        if "cot_start_positions" in dd:
+            flat_cot_start.extend([int(x) for x in dd["cot_start_positions"]])
+        if "answer_start_positions" in dd:
+            flat_ans_start.extend([int(x) for x in dd["answer_start_positions"]])
+        if "has_delimiter" in dd:
+            flat_has_delim.extend([bool(x) for x in dd["has_delimiter"]])
+        if "ground_truth_answer_tokens" in dd:
+            flat_gt_tokens.extend([list(x) for x in dd["ground_truth_answer_tokens"]])
+
+    dev = data.batch["responses"].device
+    if flat_batch_input_ids:
+        data.batch["batch_input_ids"] = torch.cat(flat_batch_input_ids, dim=0)
+        data.batch["attention_mask"] = torch.cat(flat_attention_mask, dim=0)
+        data.batch["position_ids"] = torch.cat(flat_position_ids, dim=0)
+    if flat_cot_start:
+        data.batch["cot_start_positions"] = torch.as_tensor(flat_cot_start, dtype=torch.long, device=dev)
+    if flat_ans_start:
+        data.batch["answer_start_positions"] = torch.as_tensor(flat_ans_start, dtype=torch.long, device=dev)
+    if flat_has_delim:
+        data.batch["has_delimiter"] = torch.as_tensor(flat_has_delim, dtype=torch.bool, device=dev)
+    # keep ground_truth_answer_tokens in non_tensor for variable lengths
+    data.non_tensor_batch["ground_truth_answer_tokens"] = flat_gt_tokens
     return data
