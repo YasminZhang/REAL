@@ -181,231 +181,223 @@ class JEPOActor(DataParallelPPOActor):
         except Exception:
             frac_delim_glob = float(num_delim / max(num_responses, 1))
 
-        # -------- training loop with fixed accumulate steps --------
+        # -------- training loop using token-capped micro-batches and single forward --------
+        def _pack_rows_by_token_budget(row_indices, prefix_lens, cot_lens, ans_lens, max_tokens, max_rows=None):
+            packs = []
+            cur = []
+            cur_tokens = 0
+            for r in row_indices:
+                t = int(prefix_lens[r]) + int(cot_lens[r]) + int(ans_lens[r])
+                # if any single row exceeds budget, put it alone
+                if t > max_tokens and not cur:
+                    packs.append([r])
+                    continue
+                # if adding this row exceeds budget or row cap, flush
+                if (cur and (cur_tokens + t > max_tokens)) or (max_rows is not None and len(cur) >= max_rows):
+                    packs.append(cur)
+                    cur = []
+                    cur_tokens = 0
+                cur.append(r)
+                cur_tokens += t
+            if cur:
+                packs.append(cur)
+            return packs
+
+        use_dynamic_bsz = getattr(self.config, "use_dynamic_bsz", True)
+        max_token_len = (getattr(self.config, "ppo_max_token_len_per_gpu", 16384) * getattr(self, "ulysses_sequence_parallel_size", 1))
+        resp_row_cap = int(jepo_cfg.get("responses_micro_batch_size", 0)) or None
+
+        rows_all = list(range(num_responses))
+        # Pre-gather full tensors once
+        dev_all = data.batch["batch_input_ids"].device
+        pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
+        ids_full_all = data.batch["batch_input_ids"]
+        attn_full_all = data.batch["attention_mask"]
+        pos_full_all = data.batch["position_ids"]
+        a_s_all = data.batch["answer_start_positions"].tolist()
+        c_s_all = data.batch["cot_start_positions"].tolist()
+        gt_tokens_nd = data.non_tensor_batch.get("ground_truth_answer_tokens", None)
+        if gt_tokens_nd is None:
+            gt_tokens_all = [None] * num_responses
+        else:
+            try:
+                import numpy as _np
+                gt_tokens_all = gt_tokens_nd.tolist() if isinstance(gt_tokens_nd, _np.ndarray) else gt_tokens_nd
+            except Exception:
+                gt_tokens_all = gt_tokens_nd
+        # A, weights per response
+        A_all = (jepo_adv_raw_all + format_adv_all)
+        w_all = data.batch.get("jepo_weights", torch.ones((num_responses,), device=dev_all))
+
+        cot_lens = [max(0, int(a - c)) for a, c in zip(a_s_all, c_s_all)]
+        ans_lens = [int(len(t)) if t is not None else max(0, int(ids_full_all[i].numel()) - int(a_s_all[i])) for i, t in enumerate(gt_tokens_all)]
+        prefix_lens = [int(c) for c in c_s_all]
+
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
-            breakpoint()
-            for k in range(accum_steps):
-                step_start = k * micro_bs
-                step_end = min(step_start + micro_bs, num_responses)
-                
-                # FSDP: delay allreduce until last accum step
+            self.actor_module.train()
+            was_training_actor = True
+            accum_counter = 0
+
+            # build packs
+            if use_dynamic_bsz:
+                packs = _pack_rows_by_token_budget(rows_all, prefix_lens, cot_lens, ans_lens, max_token_len, resp_row_cap)
+            else:
+                # fall back to simple fixed-size packs based on micro_bs
+                packs = [rows_all[i : i + micro_bs] for i in range(0, len(rows_all), micro_bs)]
+
+            for pi, pack_rows in enumerate(packs):
+                if len(pack_rows) == 0:
+                    continue
+                # FSDP sync: only sync when finishing an accumulation block
+                is_last_in_accum = (accum_counter == accum_steps - 1)
                 sync_ctx = (
                     self.actor_module.no_sync()
-                    if isinstance(self.actor_module, (FSDP, FSDPModule)) and (k < accum_steps - 1)
+                    if isinstance(self.actor_module, (FSDP, FSDPModule)) and not is_last_in_accum
                     else nullcontext()
                 )
                 with sync_ctx:
-                    if step_start >= num_responses:
-                        # Still do a dummy backward to keep FSDP sync aligned across ranks
+                    Bp = len(pack_rows)
+                    # Build combined teacher-forced inputs: prefix up to cot_start, then [CoT|Answer]; right-pad both dimensions
+                    # Compute per-row sizes in this pack
+                    pre_ls = [prefix_lens[r] for r in pack_rows]
+                    cot_ls = [cot_lens[r] for r in pack_rows]
+                    ans_ls = [ans_lens[r] for r in pack_rows]
+                    R_ls = [cot_ls[i] + ans_ls[i] for i in range(Bp)]
+                    P_max = max(pre_ls) if pre_ls else 0
+                    R_max = max(R_ls) if R_ls else 0
+
+                    if P_max == 0 and R_max == 0:
+                        # do a cheap dummy backward to preserve FSDP sync count
                         dummy_backward_fsdp_safe(self.actor_module, scaler=None)
-                    else:
-                        # Get step data via slicing to avoid non-tensor indexing issues
-                        step_data = data[step_start:step_end]
+                        continue
 
-                        B_step = int(step_end - step_start)
-                        
-                        
-                        # Build GRPO-style token-level loss using VERL internals (_forward_micro_batch)
-                        # Mask A_raw by has_delimiter and add mean-centered format advantage
-                        A_vec = (
-                            jepo_adv_raw_all[step_start:step_end] #* has_delimiter_mask[step_start:step_end].float()
-                            + format_adv_all[step_start:step_end]
-                        )
-                        was_training_actor = self.actor_module.training
-                        self.actor_module.eval()
-                        dev = step_data.batch["batch_input_ids"].device
-                        cot_loss_agg_mode = "seq-mean-token-mean"
-                        ans_loss_agg_mode = "token-mean"
+                    # Allocate tensors
+                    ids_pack = torch.full((Bp, P_max + R_max), pad_id, dtype=ids_full_all.dtype, device=dev_all)
+                    attn_pack = torch.zeros((Bp, P_max + R_max), dtype=attn_full_all.dtype, device=dev_all)
+                    pos_pack = torch.zeros((Bp, P_max + R_max), dtype=pos_full_all.dtype, device=dev_all)
+                    resp_pack = torch.full((Bp, R_max), pad_id, dtype=ids_full_all.dtype, device=dev_all)
+                    mask_cot = torch.zeros((Bp, R_max), dtype=torch.float32, device=dev_all)
+                    mask_ans = torch.zeros((Bp, R_max), dtype=torch.float32, device=dev_all)
+                    A_pack = torch.zeros((Bp, R_max), dtype=torch.float32, device=dev_all)
 
-                        pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
-
-                        # Precompute lengths
-                        a_s_all = step_data.batch["answer_start_positions"].tolist()
-                        c_s_all = step_data.batch["cot_start_positions"].tolist()
-                        ids_full_all = step_data.batch["batch_input_ids"]
-                        attn_full_all = step_data.batch["attention_mask"]
-                        pos_full_all = step_data.batch["position_ids"]
-                        gt_tokens_nd = step_data.non_tensor_batch.get("ground_truth_answer_tokens", None)
-                        if gt_tokens_nd is None:
-                            gt_tokens_all = [None] * B_step
-                        else:
+                    # Fill rows
+                    for j, r in enumerate(pack_rows):
+                        c = int(c_s_all[r]); a = int(a_s_all[r])
+                        Lp = int(pre_ls[j]); Lc = int(cot_ls[j]); La = int(ans_ls[j])
+                        # prefix ids/attn/pos up to cot_start
+                        if Lp > 0:
+                            ids_pack[j, :Lp] = ids_full_all[r][:c]
+                            attn_pack[j, :Lp] = attn_full_all[r][:c]
+                            pos_pack[j, :Lp] = pos_full_all[r][:c]
+                        # responses: CoT tokens then GT answer tokens
+                        # CoT tokens from existing ids
+                        if Lc > 0:
+                            ids_pack[j, Lp : Lp + Lc] = ids_full_all[r][c:a]
+                            attn_pack[j, Lp : Lp + Lc] = 1
+                            pos_pack[j, Lp : Lp + Lc] = pos_full_all[r][c:a]
+                            resp_pack[j, :Lc] = ids_full_all[r][c:a]
+                            mask_cot[j, :Lc] = 1
+                            # advantages for CoT span
+                            A_pack[j, :Lc] = A_all[r]
+                        # Answer tokens: prefer provided GT tokens; fallback to ids_full
+                        if La > 0:
+                            # choose token ids
+                            gt_row = gt_tokens_all[r]
+                            if gt_row is None:
+                                ans_ids = ids_full_all[r][a : a + La]
+                            else:
+                                ans_ids = torch.as_tensor(gt_row, device=dev_all, dtype=ids_full_all.dtype)
+                            ids_pack[j, Lp + Lc : Lp + Lc + La] = ans_ids
+                            attn_pack[j, Lp + Lc : Lp + Lc + La] = 1
+                            # try position_ids from full tensor; if out of bound, extend sequentially
                             try:
-                                import numpy as _np
-                                gt_tokens_all = gt_tokens_nd.tolist() if isinstance(gt_tokens_nd, _np.ndarray) else gt_tokens_nd
+                                pos_pack[j, Lp + Lc : Lp + Lc + La] = pos_full_all[r][a : a + La]
                             except Exception:
-                                gt_tokens_all = gt_tokens_nd
-                        # Mixture weights per response for Grad2; default to 1.0
-                        w_step = step_data.batch.get("jepo_weights", torch.ones((B_step,), device=dev))
+                                if Lp + Lc > 0:
+                                    start_pos = int(pos_pack[j, Lp + Lc - 1].item()) + 1
+                                else:
+                                    start_pos = 0
+                                pos_pack[j, Lp + Lc : Lp + Lc + La] = torch.arange(start_pos, start_pos + La, device=dev_all, dtype=pos_pack.dtype)
+                            resp_pack[j, Lc : Lc + La] = ans_ids
+                            mask_ans[j, Lc : Lc + La] = 1
+                            # advantages for Answer span
+                            A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[r]
 
-                        cot_len_all = [max(0, int(a - c)) for a, c in zip(a_s_all, c_s_all)]
-                        ans_len_all = [int(len(t)) if t is not None else max(0, int(ids_full_all[i].numel()) - int(a_s_all[i])) for i, t in enumerate(gt_tokens_all)]
+                    # Forward once to get combined CoT+Answer log-probs tail of length R_max
+                    micro = {
+                        "input_ids": ids_pack,
+                        "attention_mask": attn_pack,
+                        "position_ids": pos_pack,
+                        "responses": resp_pack,
+                    }
+                    _, lp_combined = self._forward_micro_batch(micro, temperature=temperature, calculate_entropy=False)
 
-                        max_cot_len = max(cot_len_all) if cot_len_all else 0
-                        max_ans_len = max(ans_len_all) if ans_len_all else 0
+                    # Compute losses (GPG) using masks for CoT and Answer; backward on combined
+                    gpg_fn = get_policy_loss_fn("gpg")
+                    # Combined mask and advantages
+                    comb_mask = (mask_cot + mask_ans).clamp_max(1)
+                    comb_adv = A_pack
+                    jepo_loss_part, _, _, _ = gpg_fn(
+                        old_log_prob=None,
+                        log_prob=lp_combined,
+                        advantages=comb_adv,
+                        response_mask=comb_mask,
+                        loss_agg_mode="token-mean",
+                    )
+                    # For logging, extract means
+                    cot_log_probs = (lp_combined * (mask_cot > 0)).sum(dim=-1).detach()
+                    answer_log_probs = (lp_combined * (mask_ans > 0)).sum(dim=-1).detach()
 
-                        # Initialize combined mats
-                        cot_lp_mat = torch.zeros((B_step, max_cot_len), device=dev)
-                        cot_mask = torch.zeros((B_step, max_cot_len), device=dev)
-                        cot_adv_mat = torch.zeros((B_step, max_cot_len), device=dev)
-
-                        ans_lp_mat = torch.zeros((B_step, max_ans_len), device=dev)
-                        ans_mask = torch.zeros((B_step, max_ans_len), device=dev)
-                        ans_adv_mat = torch.zeros((B_step, max_ans_len), device=dev)
-                        # Batch CoT over sub-chunks without relying on config chunk size
-                        chunk_sz = max(1, min(B_step, 64))
-                        for s in range(0, B_step, chunk_sz):
-                            e = min(s + chunk_sz, B_step)
-                            rows = list(range(s, e))
-                            # Build sub-batch for rows with non-zero CoT length
-                            cot_rows = [r for r in rows if cot_len_all[r] > 0]
-                            if not cot_rows:
-                                continue
-                            # Build ragged lists
-                            in_ids_list, in_attn_list, in_pos_list, resp_list = [], [], [], []
-                            for r in cot_rows:
-                                a = int(a_s_all[r]); c = int(c_s_all[r])
-                                in_ids_list.append(ids_full_all[r][:a])
-                                in_attn_list.append(attn_full_all[r][:a])
-                                in_pos_list.append(pos_full_all[r][:a])
-                                resp_list.append(ids_full_all[r][c:a])
-                            L_max = max(int(x.size(0)) for x in in_ids_list)
-                            R_max = max(int(x.size(0)) for x in resp_list)
-                            bsz = len(cot_rows)
-                            # Pad and stack
-                            def _pad1d_list(lst, fill_val):
-                                out = torch.full((bsz, L_max), fill_val, dtype=lst[0].dtype, device=dev)
-                                for i, t in enumerate(lst):
-                                    l = int(t.size(0)); out[i, :l] = t
-                                return out
-                            def _pad1d_resp(lst, fill_val):
-                                out = torch.full((bsz, R_max), fill_val, dtype=lst[0].dtype, device=dev)
-                                for i, t in enumerate(lst):
-                                    l = int(t.size(0)); out[i, :l] = t
-                                return out
-                            in_ids = _pad1d_list(in_ids_list, pad_id)
-                            in_attn = _pad1d_list(in_attn_list, 0)
-                            in_pos = _pad1d_list(in_pos_list, 0)
-                            resp_tok = _pad1d_resp(resp_list, pad_id)
-                            micro_cot = {
-                                "input_ids": in_ids,
-                                "attention_mask": in_attn,
-                                "position_ids": in_pos,
-                                "responses": resp_tok,
+                    kl_loss_part = torch.tensor(0.0, device=dev_all)
+                    # Optional KL on original responses (separate token-capped pass)
+                    if beta_kl > 0 and ("ref_log_prob" in data.batch.keys()):
+                        pack_data = data[pack_rows]
+                        try:
+                            micro_orig = {
+                                "input_ids": pack_data.batch["input_ids"],
+                                "attention_mask": pack_data.batch["attention_mask"],
+                                "position_ids": pack_data.batch["position_ids"],
+                                "responses": pack_data.batch["responses"],
                             }
-                            _, lp_cot_sub = self._forward_micro_batch(micro_cot, temperature=temperature, calculate_entropy=False)
-                            # Scatter back
-                            for j, r in enumerate(cot_rows):
-                                Lr = cot_len_all[r]
-                                cot_lp_mat[r, :Lr] = lp_cot_sub[j, :Lr]
-                                cot_mask[r, :Lr] = 1
-                                cot_adv_mat[r, :Lr] = A_vec[r]
+                            _, lp_orig = self._forward_micro_batch(micro_orig, temperature=temperature, calculate_entropy=False)
+                            ref_lp_orig = data.batch["ref_log_prob"][pack_rows]
+                            resp_mask_orig = compute_response_mask(pack_data)
+                            kld = kl_penalty(logprob=lp_orig, ref_logprob=ref_lp_orig, kl_penalty=kl_loss_type)
+                            kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode="token-mean") * beta_kl
+                        except Exception:
+                            kl_loss_part = torch.tensor(0.0, device=dev_all)
 
-                        # Batch Answer over sub-chunks (dynamic chunking)
-                        for s in range(0, B_step, chunk_sz):
-                            e = min(s + chunk_sz, B_step)
-                            rows = list(range(s, e))
-                            ans_rows = [r for r in rows if ans_len_all[r] > 0]
-                            if not ans_rows:
-                                continue
-                            ids_batch = ids_full_all[ans_rows]
-                            attn_batch = attn_full_all[ans_rows]
-                            pos_batch = pos_full_all[ans_rows]
-                            resp_list = []
-                            R_max = 0
-                            for r in ans_rows:
-                                a = int(a_s_all[r]); Lr = ans_len_all[r]
-                                t = ids_full_all[r][a:a+Lr]
-                                resp_list.append(t)
-                                R_max = max(R_max, int(t.size(0)))
-                            if R_max == 0:
-                                continue
-                            resp_tok = torch.full((len(ans_rows), R_max), pad_id, dtype=ids_batch.dtype, device=dev)
-                            for j, t in enumerate(resp_list):
-                                l = int(t.size(0)); resp_tok[j, :l] = t
-                            micro_ans = {
-                                "input_ids": ids_batch,
-                                "attention_mask": attn_batch,
-                                "position_ids": pos_batch,
-                                "responses": resp_tok,
-                            }
-                            _, lp_ans_sub = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
-                            for j, r in enumerate(ans_rows):
-                                Lr = ans_len_all[r]
-                                ans_lp_mat[r, :Lr] = lp_ans_sub[j, :Lr]
-                                ans_mask[r, :Lr] = 1
-                                ans_adv_mat[r, :Lr] = w_step[r]
+                    loss_chunk = (jepo_loss_part + kl_loss_part) / max(accum_steps, 1)
+                    loss_chunk.backward()
 
-                        if was_training_actor:
-                            self.actor_module.train()
-
-                        # Compute policy losses via GPG (token-wise -logp*A)
-                        gpg_fn = get_policy_loss_fn("gpg")
-                        if max_cot_len > 0 and cot_mask.any():
-                            jepo_loss_part, _, _, _ = gpg_fn(
-                                old_log_prob=None,
-                                log_prob=cot_lp_mat,
-                                advantages=cot_adv_mat,
-                                response_mask=cot_mask,
-                                loss_agg_mode=cot_loss_agg_mode,
-                            )
-                            cot_log_probs = cot_lp_mat.sum(dim=-1).detach()
-                        else:
-                            jepo_loss_part = torch.tensor(0.0, device=dev)
-                            cot_log_probs = torch.zeros((B_step,), device=dev)
-
-                        if max_ans_len > 0 and ans_mask.any():
-                            supp_loss_part, _, _, _ = gpg_fn(
-                                old_log_prob=None,
-                                log_prob=ans_lp_mat,
-                                advantages=ans_adv_mat * float(beta_supp),
-                                response_mask=ans_mask,
-                                loss_agg_mode=ans_loss_agg_mode,
-                            )
-                            answer_log_probs = ans_lp_mat.sum(dim=-1).detach()
-                        else:
-                            supp_loss_part = torch.tensor(0.0, device=dev)
-                            answer_log_probs = torch.zeros((B_step,), device=dev)
-
-                        # KL divergence on raw responses (use precomputed ref_log_prob from batch)
-                        kl_loss_part = torch.tensor(0.0, device=dev)
-                        if beta_kl > 0 and ("ref_log_prob" in data.batch.keys()):
-                            # compute actor log_prob on original responses for this step
-                            try:
-                                micro_orig = {
-                                    "input_ids": step_data.batch["input_ids"],
-                                    "attention_mask": step_data.batch["attention_mask"],
-                                    "position_ids": step_data.batch["position_ids"],
-                                    "responses": step_data.batch["responses"],
-                                }
-                                _, lp_orig = self._forward_micro_batch(micro_orig, temperature=temperature, calculate_entropy=False)
-                                ref_lp_orig = data.batch["ref_log_prob"][step_start:step_end]
-                                resp_mask_orig = compute_response_mask(step_data)
-                                kld = kl_penalty(logprob=lp_orig, ref_logprob=ref_lp_orig, kl_penalty=kl_loss_type)
-                                kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode="token-mean") * beta_kl
-                            except Exception:
-                                kl_loss_part = torch.tensor(0.0, device=dev)
-                        
-                        loss_chunk = (jepo_loss_part + supp_loss_part + kl_loss_part) / accum_steps
-                        print("finish calculate jepo loss")
-                        loss_chunk.backward()
-                        
-                        # Accumulate metrics
-                        meters["total_loss"] += float(loss_chunk.detach())
-                        meters["jepo_loss"] += float(jepo_loss_part.detach()) / accum_steps
-                        meters["supp_loss"] += float(supp_loss_part.detach()) / accum_steps
-                        with torch.no_grad():
-                            meters["jepo_advs_mean"] += float(A_vec.mean().detach())
-                            meters["jepo_advs_std"] += float(A_vec.std().detach())
+                    # metrics accumulation
+                    meters["total_loss"] += float(loss_chunk.detach())
+                    meters["jepo_loss"] += float(jepo_loss_part.detach()) / max(accum_steps, 1)
+                    meters["supp_loss"] += 0.0  # already merged into combined via A_pack
+                    with torch.no_grad():
+                        # A_vec mean/std for this pack
+                        A_vec_pack = A_all[pack_rows]
+                        meters["jepo_advs_mean"] += float(A_vec_pack.mean().detach())
+                        meters["jepo_advs_std"] += float(A_vec_pack.std().detach())
+                    if cot_log_probs.numel() > 0:
                         meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
+                    if answer_log_probs.numel() > 0:
                         meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
-                        meters["kl_loss"] += float(kl_loss_part.detach()) / accum_steps
-                        meter_count += 1
-                        torch.cuda.empty_cache()
+                    meters["kl_loss"] += float(kl_loss_part.detach()) / max(accum_steps, 1)
+                    meter_count += 1
 
-            # one optimizer step per epoch
-            grad_norm = self._optimizer_step()
-            meters["grad_norm"] += float(grad_norm.detach())
+                accum_counter += 1
+                if accum_counter >= accum_steps:
+                    grad_norm = self._optimizer_step()
+                    meters["grad_norm"] += float(grad_norm.detach())
+                    self.actor_optimizer.zero_grad()
+                    accum_counter = 0
+
+            # flush remaining grads if any
+            if accum_counter > 0:
+                grad_norm = self._optimizer_step()
+                meters["grad_norm"] += float(grad_norm.detach())
 
         print("number of responses has delimiter for this rank:", num_delim)
 
