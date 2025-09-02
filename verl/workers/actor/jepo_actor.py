@@ -109,8 +109,8 @@ class JEPOActor(DataParallelPPOActor):
         epochs = int(jepo_cfg.get("epochs", 1))
         mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))        # questions per optimizer step per rank
         micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))      # questions per backward call
-        resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 8))  # responses per backward inside a question
-        accum_steps = int(jepo_cfg.get("accum_steps", 32))               # fixed accumulate steps for consistent backwards
+        resp_micro_bs = int(jepo_cfg.get("responses_micro_batch_size", 2))  # responses per backward inside a question
+        accum_steps = int(jepo_cfg.get("accum_steps", 64))               # fixed accumulate steps for consistent backwards
         format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
@@ -184,7 +184,6 @@ class JEPOActor(DataParallelPPOActor):
         # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
-            
             for k in range(accum_steps):
                 step_start = k * micro_bs
                 step_end = min(step_start + micro_bs, num_responses)

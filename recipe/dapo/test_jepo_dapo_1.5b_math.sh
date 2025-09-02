@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-1k-format-test-g1-delimiter-token'
+exp_name='deepscaler-1.5b-1k-format-test-g1-delimiter-token-math'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -37,7 +37,7 @@ max_num_gen_batches=10
 # JEPO specific parameters
 use_jepo=True
 jepo_delimiter="\\boxed\{"
-jepo_format_penalty=100
+jepo_format_penalty=10
 jepo_beta_supp=0.001
 jepo_beta_kl=0.001
 jepo_buffer_size=128 # number of questions
@@ -45,9 +45,9 @@ jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
 # please make sure jepo_micro_batch_size_per_gpu * jepo_accum_steps >= num_responses_per_gpu to use all responses
-jepo_accum_steps=8
+jepo_accum_steps=16
 jepo_mini_batch_size_per_gpu=8 # question per optimization step
-jepo_micro_batch_size_per_gpu=16 # question per backward
+jepo_micro_batch_size_per_gpu=8 # question per backward
 jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
 
 # Ray - single node setup for 1.5B
@@ -58,7 +58,7 @@ NGPUS_PER_NODE=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=data/train_sub.parquet
-TEST_FILE=data/aime.parquet
+TEST_FILE=data/math.parquet
 
 # Algorithm
 temperature=0.6
