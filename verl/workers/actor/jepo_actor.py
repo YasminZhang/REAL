@@ -209,7 +209,7 @@ class JEPOActor(DataParallelPPOActor):
                         # Build GRPO-style token-level loss using VERL internals (_forward_micro_batch)
                         # Mask A_raw by has_delimiter and add mean-centered format advantage
                         A_vec = (
-                            jepo_adv_raw_all[step_start:step_end] * has_delimiter_mask[step_start:step_end].float()
+                            jepo_adv_raw_all[step_start:step_end] #* has_delimiter_mask[step_start:step_end].float()
                             + format_adv_all[step_start:step_end]
                         )
                         was_training_actor = self.actor_module.training
@@ -252,7 +252,6 @@ class JEPOActor(DataParallelPPOActor):
                         ans_lp_mat = torch.zeros((B_step, max_ans_len), device=dev)
                         ans_mask = torch.zeros((B_step, max_ans_len), device=dev)
                         ans_adv_mat = torch.zeros((B_step, max_ans_len), device=dev)
-
                         # Batch CoT over sub-chunks without relying on config chunk size
                         chunk_sz = max(1, min(B_step, 64))
                         for s in range(0, B_step, chunk_sz):
@@ -488,7 +487,6 @@ class JEPOActor(DataParallelPPOActor):
                     for j, r in enumerate(rows):
                         Lr = int(ans_lens[r])
                         ans_logprob[r] = lp_ans_sub[j, :Lr].sum().detach()
-
             lse_all = torch.logsumexp(ans_logprob, dim=0)
             if B > 1:
                 d = ans_logprob - lse_all
@@ -515,7 +513,6 @@ class JEPOActor(DataParallelPPOActor):
             jepo_weights[current_idx:current_idx + B] = w_full
             has_delim_all[current_idx:current_idx + B] = has_delim
             current_idx += B
-
         data.batch["jepo_adv_raw"] = jepo_adv_raw
         data.batch["format_adv"] = format_adv
         data.batch["jepo_weights"] = jepo_weights

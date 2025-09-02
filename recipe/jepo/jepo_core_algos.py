@@ -308,7 +308,6 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
         dtype=object,
     )
     pad_token = cached_tokenizer.pad_token_id
-    
     # Build teacher-forced batches per question
     data_dicts = build_jepo_batches_by_prompt(
         response_tokens=data.batch["responses"],
@@ -326,7 +325,6 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     )
     # Only attach per-question teacher-forced packs; JEPO actor computes A/w later using VERL internals
     data.non_tensor_batch["jepo_data_dicts"] = data_dicts
-
     # Flatten teacher-forced fields into top-level batch for per-response slicing in the JEPO actor
     flat_batch_input_ids = []
     flat_attention_mask = []

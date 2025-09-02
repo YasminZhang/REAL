@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='JEPO'
-exp_name='deepscaler-1.5b-512-format-test-g1-delimiter-token'
+exp_name='deepscaler-1.5b-1k-format-test-g1-delimiter-token'
 #exp_name="test1"
 
 adv_estimator=grpo
@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=512
+max_response_length=1024
 enable_overlong_buffer=False
-overlong_buffer_len=512
+overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
