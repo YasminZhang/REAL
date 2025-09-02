@@ -184,6 +184,7 @@ class JEPOActor(DataParallelPPOActor):
         # -------- training loop with fixed accumulate steps --------
         for _ in range(epochs):
             self.actor_optimizer.zero_grad()
+            breakpoint()
             for k in range(accum_steps):
                 step_start = k * micro_bs
                 step_end = min(step_start + micro_bs, num_responses)

@@ -108,12 +108,20 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         Returns:
             Dictionary of training metrics
         """
-        # Add JEPO config to the batch meta_info
+        # Add full JEPO config to the batch meta_info so JEPOActor can consume it
+        # Note: keep key names in sync with verl/workers/actor/jepo_actor.py
         jepo_batch.meta_info["jepo_config"] = {
             "delimiter": self.jepo_config.delimiter,
             "format_penalty": self.jepo_config.format_penalty,
             "beta_supp": self.jepo_config.beta_supp,
             "beta_kl": self.jepo_config.beta_kl,
+            # training/loop settings read by JEPOActor
+            "epochs": self.jepo_config.epochs,
+            "mini_batch_size_per_gpu": self.jepo_config.mini_batch_size_per_gpu,
+            "micro_batch_size_per_gpu": self.jepo_config.micro_batch_size_per_gpu,
+            "responses_micro_batch_size": self.jepo_config.responses_micro_batch_size,
+            "accum_steps": self.jepo_config.accum_steps,
+            "num_response_per_question": self.jepo_config.num_response_per_question,
             # Suffix-anchor delimiter matching config (optional)
             "delimiter_suffix_anchor": getattr(self.config.algorithm, 'jepo_delimiter_suffix_anchor', True),
             "delimiter_suffix_min_len": getattr(self.config.algorithm, 'jepo_delimiter_suffix_min_len', 2),
