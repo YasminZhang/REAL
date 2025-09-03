@@ -34,7 +34,12 @@ from verl.utils.device import get_device_name, is_cuda_available, is_npu_availab
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
+from verl.utils.seqlen_balancing import (
+    prepare_dynamic_batch,
+    restore_dynamic_batch,
+    get_seqlen_balanced_partitions,
+    ceildiv,
+)
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
@@ -65,6 +70,59 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+# -------- training loop using token-capped micro-batches and single forward --------
+def _pack_rows_by_token_budget(row_indices, prefix_lens, cot_lens, ans_lens, max_tokens, max_rows=None):
+    packs = []
+    cur = []
+    cur_tokens = 0
+    for r in row_indices:
+        t = int(prefix_lens[r]) + int(cot_lens[r]) + int(ans_lens[r])
+        # if any single row exceeds budget, put it alone
+        if t > max_tokens and not cur:
+            packs.append([r])
+            continue
+        # if adding this row exceeds budget or row cap, flush
+        if (cur and (cur_tokens + t > max_tokens)) or (max_rows is not None and len(cur) >= max_rows):
+            packs.append(cur)
+            cur = []
+            cur_tokens = 0
+        cur.append(r)
+        cur_tokens += t
+    if cur:
+        packs.append(cur)
+    return packs
+
+def _pack_rows_by_dynamic_balance(row_indices, prefix_lens, cot_lens, ans_lens, max_tokens, max_rows=None):
+    """
+    Build packs using the same balancing idea behind prepare_dynamic_batch
+    but with JEPO's effective token cost per row: prefix + cot + answer.
+
+    Note: This does not strictly enforce a hard per-pack token cap; it
+    mirrors prepare_dynamic_batch's strategy of choosing the number of
+    micro-batches via ceildiv(total_tokens, max_tokens), then balances.
+    """
+    if not row_indices:
+        return []
+    # Compute per-row effective lengths
+    eff = [int(prefix_lens[r]) + int(cot_lens[r]) + int(ans_lens[r]) for r in row_indices]
+    total = sum(eff)
+    # Choose number of partitions similar to prepare_dynamic_batch
+    num_micro = max(1, min(len(row_indices), ceildiv(total, max_tokens)))
+    # Use seqlen balancer to partition indices
+    partitions = get_seqlen_balanced_partitions(eff, num_micro, equal_size=False)
+    # Map back to original row indices
+    packs = [[row_indices[i] for i in part] for part in partitions]
+    # Optional row cap per pack
+    if max_rows is not None and max_rows > 0:
+        capped = []
+        for p in packs:
+            if len(p) <= max_rows:
+                capped.append(p)
+            else:
+                for s in range(0, len(p), max_rows):
+                    capped.append(p[s : s + max_rows])
+        packs = capped
+    return packs
 
 
 from contextlib import nullcontext
@@ -181,27 +239,7 @@ class JEPOActor(DataParallelPPOActor):
         except Exception:
             frac_delim_glob = float(num_delim / max(num_responses, 1))
 
-        # -------- training loop using token-capped micro-batches and single forward --------
-        def _pack_rows_by_token_budget(row_indices, prefix_lens, cot_lens, ans_lens, max_tokens, max_rows=None):
-            packs = []
-            cur = []
-            cur_tokens = 0
-            for r in row_indices:
-                t = int(prefix_lens[r]) + int(cot_lens[r]) + int(ans_lens[r])
-                # if any single row exceeds budget, put it alone
-                if t > max_tokens and not cur:
-                    packs.append([r])
-                    continue
-                # if adding this row exceeds budget or row cap, flush
-                if (cur and (cur_tokens + t > max_tokens)) or (max_rows is not None and len(cur) >= max_rows):
-                    packs.append(cur)
-                    cur = []
-                    cur_tokens = 0
-                cur.append(r)
-                cur_tokens += t
-            if cur:
-                packs.append(cur)
-            return packs
+        
 
         use_dynamic_bsz = getattr(self.config, "use_dynamic_bsz", True)
         max_token_len = (getattr(self.config, "ppo_max_token_len_per_gpu", 16384) * getattr(self, "ulysses_sequence_parallel_size", 1))
@@ -241,7 +279,11 @@ class JEPOActor(DataParallelPPOActor):
 
             # build packs
             if use_dynamic_bsz:
-                packs = _pack_rows_by_token_budget(rows_all, prefix_lens, cot_lens, ans_lens, max_token_len, resp_row_cap)
+                use_balancer = bool(jepo_cfg.get("use_dynamic_balancer", False))
+                if use_balancer:
+                    packs = _pack_rows_by_dynamic_balance(rows_all, prefix_lens, cot_lens, ans_lens, max_token_len, resp_row_cap)
+                else:
+                    packs = _pack_rows_by_token_budget(rows_all, prefix_lens, cot_lens, ans_lens, max_token_len, resp_row_cap)
             else:
                 # fall back to simple fixed-size packs based on micro_bs
                 packs = [rows_all[i : i + micro_bs] for i in range(0, len(rows_all), micro_bs)]
@@ -343,7 +385,8 @@ class JEPOActor(DataParallelPPOActor):
                         log_prob=lp_combined,
                         advantages=comb_adv,
                         response_mask=comb_mask,
-                        loss_agg_mode="token-mean",
+                        loss_agg_mode="seq-mean-token-mean"
+                        #loss_agg_mode="token-mean",
                     )
                     # For logging, extract means
                     cot_log_probs = (lp_combined * (mask_cot > 0)).sum(dim=-1).detach()
@@ -367,7 +410,6 @@ class JEPOActor(DataParallelPPOActor):
                             kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode="token-mean") * beta_kl
                         except Exception:
                             kl_loss_part = torch.tensor(0.0, device=dev_all)
-
                     loss_chunk = (jepo_loss_part + kl_loss_part) / max(accum_steps, 1)
                     loss_chunk.backward()
 
