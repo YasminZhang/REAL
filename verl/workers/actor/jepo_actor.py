@@ -412,6 +412,7 @@ class JEPOActor(DataParallelPPOActor):
                             kl_loss_part = torch.tensor(0.0, device=dev_all)
                     loss_chunk = (jepo_loss_part + kl_loss_part) / max(accum_steps, 1)
                     loss_chunk.backward()
+                    print(f"finish one chunk loss gradient")
 
                     # metrics accumulation
                     meters["total_loss"] += float(loss_chunk.detach())
