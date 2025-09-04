@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="test_2k"
+exp_name="test_2k_entropy_kl"
 
 adv_estimator=grpo
 
@@ -21,7 +21,7 @@ enable_overlong_buffer=False
 overlong_buffer_len=2048
 overlong_penalty_factor=1.0
 
-loss_agg_mode="token-mean"
+loss_agg_mode="seq-mean-token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
 train_prompt_bsz=128
@@ -40,16 +40,17 @@ jepo_delimiter="\\boxed\{"
 jepo_format_penalty=10
 jepo_beta_supp=0.001
 jepo_beta_kl=0.001
+jepo_entropy_coeff=0.001
 jepo_buffer_size=128 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
-# please make sure jepo_micro_batch_size_per_gpu * jepo_accum_steps >= num_responses_per_gpu to use all responses
-jepo_accum_steps=16
-jepo_mini_batch_size_per_gpu=8 # question per optimization step
-jepo_micro_batch_size_per_gpu=8 # question per backward
-jepo_responses_micro_batch_size=8 # responses per question when calculate loss.
+jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
+jepo_mini_batch_size_per_gpu=128 # responses per gpu
+jepo_micro_batch_size_per_gpu=64 # responses per gpu
+
+jepo_responses_micro_batch_size=1024 # this param will be ignored
+jepo_accum_steps=1 # this is also ignored
 
 # Ray - single node setup for 1.5B
 NNODES=1
@@ -71,6 +72,7 @@ val_top_p=1.0
 sp_size=1  # Single sequence parallel for smaller model
 use_dynamic_bsz=True
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
 offload=True  # Keep offload for memory efficiency
 gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
@@ -103,6 +105,10 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_delimiter_suffix_anchor=True \
     +algorithm.jepo_delimiter_suffix_min_len=2 \
     +algorithm.jepo_accum_steps=${jepo_accum_steps} \
+    +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
+    +algorithm.jepo_entropy_coeff=${jepo_entropy_coeff} \
+    +algorithm.jepo_use_dynamic_bsz=${use_dynamic_bsz} \
+    +algorithm.jepo_use_dynamic_balancer=False \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -118,6 +124,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
+    +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
@@ -171,4 +178,3 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.log_val_generations=5 \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
     custom_reward_function.name=deepscaler_reward_fn
-
