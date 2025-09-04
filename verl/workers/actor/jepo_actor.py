@@ -430,7 +430,7 @@ class JEPOActor(DataParallelPPOActor):
                                 ref_lp_orig = data.batch["ref_log_prob"][pack_rows]
                                 resp_mask_orig = compute_response_mask(pack_data)
                                 kld = kl_penalty(logprob=lp_orig, ref_logprob=ref_lp_orig, kl_penalty=kl_loss_type)
-                                kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode="token-mean") * beta_kl
+                                kl_loss_part = agg_loss(loss_mat=kld, loss_mask=resp_mask_orig, loss_agg_mode=loss_agg_mode) * beta_kl
                             except Exception:
                                 kl_loss_part = torch.tensor(0.0, device=dev_all)
                         # Scale loss per micro like dp_actor
