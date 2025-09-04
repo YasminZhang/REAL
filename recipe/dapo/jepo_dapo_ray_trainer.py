@@ -370,7 +370,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     # NOTE: For accuracy-style metrics in {0,1}, the “all incorrect” case means mean == 0.
                     # Using ">= 0" incorrectly included almost all prompts and diluted JEPO training.
                     all_incorrect_uids = [
-                        uid for uid, mean in prompt_uid2metric_mean.items() if mean >= 0 #np.isclose(mean, 0.0)
+                        uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
                     ]
                     # Prompts where all responses are correct (acc == 1 across n samples)
                     all_correct_uids = [
@@ -405,14 +405,13 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
                         all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
-                        
-                        if self.use_reference_policy:
-                            with marked_timer("ref", timing_raw, "olive"):
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(all_incorrect_batch)
-                                all_incorrect_batch = all_incorrect_batch.union(ref_log_prob)
 
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
+                            if self.use_reference_policy:
+                                with marked_timer("ref", timing_raw, "olive"):
+                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(all_incorrect_batch)
+                                    all_incorrect_batch = all_incorrect_batch.union(ref_log_prob)
                             jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size*self.config.actor_rollout_ref.rollout.n])
                             metrics.update(jepo_metrics)
                             print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
@@ -500,11 +499,11 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup and standard actor update
-                    # if self.config.trainer.critic_warmup <= self.global_steps:
-                    #     with marked_timer("update_actor", timing_raw, "red"):
-                    #         actor_output = self.actor_rollout_wg.update_actor(batch)
-                    #     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                    #     metrics.update(actor_output_metrics)
+                    if self.config.trainer.critic_warmup <= self.global_steps:
+                        with marked_timer("update_actor", timing_raw, "red"):
+                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                        metrics.update(actor_output_metrics)
 
                     # Perform JEPO training when frequency is hit
                     frequency_met = self.global_steps % self.jepo_update_frequency == 0
