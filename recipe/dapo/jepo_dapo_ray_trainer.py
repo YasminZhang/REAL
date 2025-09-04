@@ -120,8 +120,19 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "mini_batch_size_per_gpu": self.jepo_config.mini_batch_size_per_gpu,
             "micro_batch_size_per_gpu": self.jepo_config.micro_batch_size_per_gpu,
             "responses_micro_batch_size": self.jepo_config.responses_micro_batch_size,
+            # token cap per GPU used by JEPOActor when use_dynamic_bsz
+            "ppo_max_token_len_per_gpu": getattr(
+                self.config.algorithm,
+                'jepo_ppo_max_token_len_per_gpu',
+                getattr(self.config.actor_rollout_ref.actor, 'ppo_max_token_len_per_gpu', 16384),
+            ),
             "accum_steps": self.jepo_config.accum_steps,
             "num_response_per_question": self.jepo_config.num_response_per_question,
+            # JEPO-specific knobs to keep JEPOActor self-contained
+            "entropy_coeff": getattr(self.config.algorithm, 'jepo_entropy_coeff', getattr(self.config.actor_rollout_ref.actor, 'entropy_coeff', 0.0)),
+            "loss_agg_mode": getattr(self.config.algorithm, 'jepo_loss_agg_mode', getattr(self.config.actor_rollout_ref.actor, 'loss_agg_mode', 'token-mean')),
+            "use_dynamic_bsz": getattr(self.config.algorithm, 'jepo_use_dynamic_bsz', getattr(self.config.actor_rollout_ref.actor, 'use_dynamic_bsz', True)),
+            "use_dynamic_balancer": getattr(self.config.algorithm, 'jepo_use_dynamic_balancer', False),
             # Suffix-anchor delimiter matching config (optional)
             "delimiter_suffix_anchor": getattr(self.config.algorithm, 'jepo_delimiter_suffix_anchor', True),
             "delimiter_suffix_min_len": getattr(self.config.algorithm, 'jepo_delimiter_suffix_min_len', 2),

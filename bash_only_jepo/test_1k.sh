@@ -21,7 +21,7 @@ enable_overlong_buffer=False
 overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
-loss_agg_mode="token-mean"
+loss_agg_mode="seq-mean-token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
 train_prompt_bsz=128
@@ -103,6 +103,10 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_delimiter_suffix_anchor=True \
     +algorithm.jepo_delimiter_suffix_min_len=2 \
     +algorithm.jepo_accum_steps=${jepo_accum_steps} \
+    +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
+    +algorithm.jepo_entropy_coeff=0 \
+    +algorithm.jepo_use_dynamic_bsz=${use_dynamic_bsz} \
+    +algorithm.jepo_use_dynamic_balancer=False \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -118,6 +122,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
+    +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
@@ -171,4 +176,3 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.log_val_generations=5 \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
     custom_reward_function.name=deepscaler_reward_fn
-
