@@ -199,7 +199,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         """
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
-
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -407,6 +406,11 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
                         
+                        if self.use_reference_policy:
+                            with marked_timer("ref", timing_raw, "olive"):
+                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(all_incorrect_batch)
+                                all_incorrect_batch = all_incorrect_batch.union(ref_log_prob)
+
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
                             jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size*self.config.actor_rollout_ref.rollout.n])
@@ -466,7 +470,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
-
+                    
                     if self.use_reference_policy:
                         with marked_timer("ref", timing_raw, "olive"):
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
@@ -502,7 +506,6 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     #     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                     #     metrics.update(actor_output_metrics)
 
-                    
                     # Perform JEPO training when frequency is hit
                     frequency_met = self.global_steps % self.jepo_update_frequency == 0
                     if (self.use_jepo and all_incorrect_batch is not None and frequency_met):
