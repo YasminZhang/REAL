@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="dapo_jepo_4k"
+exp_name="dapo_jepo_4k_buffer64"
 
 adv_estimator=grpo
 
@@ -45,8 +45,9 @@ jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
-jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
-jepo_mini_batch_size_per_gpu=8 # responses per gpu
+jepo_use_dynamic_bsz=True
+jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+jepo_mini_batch_size_per_gpu=64 # responses per gpu
 jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
@@ -107,7 +108,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_accum_steps=${jepo_accum_steps} \
     +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
     +algorithm.jepo_entropy_coeff=${jepo_entropy_coeff} \
-    +algorithm.jepo_use_dynamic_bsz=False \
+    +algorithm.jepo_use_dynamic_bsz=${jepo_use_dynamic_bsz} \
     +algorithm.jepo_use_dynamic_balancer=False \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \

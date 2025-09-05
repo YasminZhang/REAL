@@ -1047,6 +1047,33 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         dist.barrier()
 
+        # Additionally save JEPO optimizer state if present
+        try:
+            if getattr(self, "jepo_actor_optimizer", None) is not None:
+                # Ensure optimizer state tensors are on CPU before saving to reduce GPU memory pressure
+                from verl.utils.fsdp_utils import offload_fsdp_optimizer
+
+                offload_fsdp_optimizer(self.jepo_actor_optimizer)
+
+                world_size = dist.get_world_size()
+                rank = dist.get_rank()
+                jepo_optim_path = os.path.join(
+                    local_path, f"jepo_optim_world_size_{world_size}_rank_{rank}.pt"
+                )
+                torch.save(self.jepo_actor_optimizer.state_dict(), jepo_optim_path)
+                log_with_rank(
+                    f"Saved JEPO optimizer to {os.path.abspath(jepo_optim_path)}",
+                    rank=rank,
+                    logger=logger,
+                )
+        except Exception as _e:
+            log_with_rank(
+                f"Warning: failed to save JEPO optimizer state: {_e}",
+                rank=dist.get_rank(),
+                logger=logger,
+                log_only_rank_0=True,
+            )
+
         if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
             lora_save_path = os.path.join(local_path, "lora_adapter")
             peft_model = getattr(self, "actor_module", self.actor_module_fsdp)
@@ -1100,6 +1127,41 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
+
+        # Additionally load JEPO optimizer state if present
+        try:
+            if getattr(self, "jepo_actor_optimizer", None) is not None:
+                world_size = dist.get_world_size()
+                rank = dist.get_rank()
+                jepo_optim_path = os.path.join(
+                    local_path, f"jepo_optim_world_size_{world_size}_rank_{rank}.pt"
+                )
+                if os.path.exists(jepo_optim_path):
+                    state = torch.load(jepo_optim_path, weights_only=False)
+                    self.jepo_actor_optimizer.load_state_dict(state)
+                    if self._is_offload_optimizer:
+                        offload_fsdp_optimizer(self.jepo_actor_optimizer)
+                    from verl.utils.logger import log_with_rank
+
+                    log_with_rank(
+                        f"Loaded JEPO optimizer from {os.path.abspath(jepo_optim_path)}",
+                        rank=rank,
+                        logger=logger,
+                    )
+                    if del_local_after_load:
+                        try:
+                            os.remove(jepo_optim_path)
+                        except Exception:
+                            pass
+        except Exception as _e:
+            from verl.utils.logger import log_with_rank
+
+            log_with_rank(
+                f"Warning: failed to load JEPO optimizer state: {_e}",
+                rank=dist.get_rank(),
+                logger=logger,
+                log_only_rank_0=True,
+            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def start_profile(self, **kwargs) -> None:
