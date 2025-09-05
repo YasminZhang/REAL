@@ -480,8 +480,14 @@ class JEPOActor(DataParallelPPOActor):
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
 
         current_idx = 0
+        # Progress bars (rank 0 only)
+        try:
+            _is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
+            _rank = torch.distributed.get_rank() if _is_dist else 0
+        except Exception:
+            _rank = 0
+        _outer_pbar = tqdm(total=len(data_dicts), desc="JEPO precompute: prompts", disable=(_rank != 0))
         for dd in data_dicts:
-            print("begin to process dd.")
             B = len(dd["has_delimiter"]) if isinstance(dd["has_delimiter"], list) else int(dd["has_delimiter"].numel())
             ans_logprob = torch.zeros(B, device=dev)
             # Build per-row answer lengths
@@ -493,7 +499,7 @@ class JEPOActor(DataParallelPPOActor):
             ans_rows = [i for i, L in enumerate(ans_lens) if L > 0]
             if ans_rows:
                 chunk_sz = max(1, min(len(ans_rows), 64))
-                print("chunk_sz:", chunk_sz, "num answer rows:", len(ans_rows))
+                _inner_pbar = tqdm(total=len(ans_rows), desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
                 for s in range(0, len(ans_rows), chunk_sz):
                     e = min(s + chunk_sz, len(ans_rows))
                     rows = ans_rows[s:e]
@@ -520,13 +526,12 @@ class JEPOActor(DataParallelPPOActor):
                         "position_ids": pos_batch,
                         "responses": resp_tok,
                     }
-                    print("micro_ans input_ids shape:", ids_batch.shape, "responses shape:", resp_tok.shape)
-                    print("forwarding micro batch...")
                     _, lp_ans_sub = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
-                    print("forwarded.")
                     for j, r in enumerate(rows):
                         Lr = int(ans_lens[r])
                         ans_logprob[r] = lp_ans_sub[j, :Lr].sum().detach()
+                    _inner_pbar.update(e - s)
+                _inner_pbar.close()
             lse_all = torch.logsumexp(ans_logprob, dim=0)
             if B > 1:
                 d = ans_logprob - lse_all
@@ -553,6 +558,8 @@ class JEPOActor(DataParallelPPOActor):
             jepo_weights[current_idx:current_idx + B] = w_full
             has_delim_all[current_idx:current_idx + B] = has_delim
             current_idx += B
+            _outer_pbar.update(1)
+        _outer_pbar.close()
         data.batch["jepo_adv_raw"] = jepo_adv_raw
         data.batch["format_adv"] = format_adv
         data.batch["jepo_weights"] = jepo_weights

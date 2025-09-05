@@ -41,12 +41,12 @@ jepo_format_penalty=10
 jepo_beta_supp=0.001
 jepo_beta_kl=0.0
 jepo_entropy_coeff=0.0
-jepo_buffer_size=256 # number of questions
+jepo_buffer_size=64 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
-jepo_mini_batch_size_per_gpu=64 # responses per gpu
+jepo_mini_batch_size_per_gpu=8 # responses per gpu
 jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
