@@ -47,7 +47,7 @@ jepo_update_frequency=100000
 jepo_epochs=1
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
 jepo_mini_batch_size_per_gpu=64 # responses per gpu
-jepo_micro_batch_size_per_gpu=4 # responses per gpu
+jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored
@@ -127,6 +127,8 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -170,7 +172,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
     trainer.test_freq=10 \
-    trainer.save_freq=20 \
+    trainer.save_freq=10 \
     trainer.total_epochs=500 \
     trainer.total_training_steps=1000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
