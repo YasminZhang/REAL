@@ -470,6 +470,7 @@ class JEPOActor(DataParallelPPOActor):
                     mininterval=0.2,
                 )
             except Exception:
+                raise RuntimeError(f"Cannot open JEPO pbar log file for rank {_rank} at {pbar_path}")
                 _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
         else:
             _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
@@ -496,7 +497,7 @@ class JEPOActor(DataParallelPPOActor):
                 for micro_batch, idx_local in zip(micro_batches, idx_lists):
                     bs = len(idx_local)
                     if bs == 0:
-                        continue
+                        raise RuntimeError("Zero-length micro-batch encountered in JEPO precompute")
                     # Build trimmed micro-batch tensors up to answer_end = ans_start + ans_len
                     ids_src = micro_batch.batch.get("batch_input_ids")
                     attn_src = micro_batch.batch.get("attention_mask")
@@ -519,7 +520,8 @@ class JEPOActor(DataParallelPPOActor):
                             try:
                                 L_ans = int(len(gt_i))
                             except Exception:
-                                L_ans = int(np.asarray(gt_i).size)
+                                #L_ans = int(np.asarray(gt_i).size)
+                                raise RuntimeError(f"Cannot interpret ground_truth_answer_tokens row {slot} of type {type(gt_i)}")
                         ans_lens_mb.append(L_ans)
                         end_lens.append(int(ans_start[slot].item() + L_ans) if L_ans > 0 else 0)
                     micro_max_len = int(max([e for e in end_lens if e > 0], default=0))
@@ -527,7 +529,7 @@ class JEPOActor(DataParallelPPOActor):
 
                     if micro_max_len == 0 or R_max == 0:
                         _inner_pbar.update(bs)
-                        continue
+                        raise RuntimeError("Zero-length micro_max_len or R_max encountered in JEPO precompute")
 
                     ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
                     attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
@@ -587,7 +589,7 @@ class JEPOActor(DataParallelPPOActor):
                                 gt_text = gt_text[:64] + "…"
                             gt_preview = gt_text
                         except Exception:
-                            pass
+                            raise RuntimeError("Failed to decode ground_truth_answer_tokens for progress bar")
 
                         # Update postfix (rank 0 only; disabled elsewhere by tqdm constructor)
                         if gt_preview is not None and len(gt_preview) > 0:
@@ -602,7 +604,7 @@ class JEPOActor(DataParallelPPOActor):
                             )
                     except Exception:
                         # Never break training due to instrumentation
-                        pass
+                        raise RuntimeError("Failed to decode ground_truth_answer_tokens for progress bar")
 
                     for slot in range(bs):
                         L_ans = int(ans_lens_mb[slot])
@@ -643,7 +645,7 @@ class JEPOActor(DataParallelPPOActor):
                         dummy_value = 0.0
                         dummy_min_seq = 0
 
-                    if dummy_rank >= 0 and _rank == dummy_rank and micro_max_len >= dummy_min_seq:
+                    if (dummy_rank >= 0 and _rank == dummy_rank and micro_max_len >= dummy_min_seq) or (micro_max_len == 0 or R_max == 0):
                         lp_mb = torch.full((bs, R_max), dummy_value, device=dev, dtype=torch.float32)
                     else:
                         _, lp_mb = self._forward_micro_batch(
@@ -667,7 +669,7 @@ class JEPOActor(DataParallelPPOActor):
                 _pbar_file_handle.flush()
                 _pbar_file_handle.close()
         except Exception:
-            pass
+            raise RuntimeError("Failed to close JEPO precompute pbar file handle")
         if prev_training:
             self.actor_module.train()
 
