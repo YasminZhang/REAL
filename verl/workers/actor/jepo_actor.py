@@ -36,9 +36,6 @@ from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import (
     prepare_dynamic_batch,
-    restore_dynamic_batch,
-    get_seqlen_balanced_partitions,
-    ceildiv,
 )
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
@@ -70,59 +67,8 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-# -------- training loop using token-capped micro-batches and single forward --------
-def _pack_rows_by_token_budget(row_indices, prefix_lens, cot_lens, ans_lens, max_tokens, max_rows=None):
-    packs = []
-    cur = []
-    cur_tokens = 0
-    for r in row_indices:
-        t = int(prefix_lens[r]) + int(cot_lens[r]) + int(ans_lens[r])
-        # if any single row exceeds budget, put it alone
-        if t > max_tokens and not cur:
-            packs.append([r])
-            continue
-        # if adding this row exceeds budget or row cap, flush
-        if (cur and (cur_tokens + t > max_tokens)) or (max_rows is not None and len(cur) >= max_rows):
-            packs.append(cur)
-            cur = []
-            cur_tokens = 0
-        cur.append(r)
-        cur_tokens += t
-    if cur:
-        packs.append(cur)
-    return packs
-
-def _pack_rows_by_dynamic_balance(row_indices, prefix_lens, cot_lens, ans_lens, max_tokens, max_rows=None):
-    """
-    Build packs using the same balancing idea behind prepare_dynamic_batch
-    but with JEPO's effective token cost per row: prefix + cot + answer.
-
-    Note: This does not strictly enforce a hard per-pack token cap; it
-    mirrors prepare_dynamic_batch's strategy of choosing the number of
-    micro-batches via ceildiv(total_tokens, max_tokens), then balances.
-    """
-    if not row_indices:
-        return []
-    # Compute per-row effective lengths
-    eff = [int(prefix_lens[r]) + int(cot_lens[r]) + int(ans_lens[r]) for r in row_indices]
-    total = sum(eff)
-    # Choose number of partitions similar to prepare_dynamic_batch
-    num_micro = max(1, min(len(row_indices), ceildiv(total, max_tokens)))
-    # Use seqlen balancer to partition indices
-    partitions = get_seqlen_balanced_partitions(eff, num_micro, equal_size=False)
-    # Map back to original row indices
-    packs = [[row_indices[i] for i in part] for part in partitions]
-    # Optional row cap per pack
-    if max_rows is not None and max_rows > 0:
-        capped = []
-        for p in packs:
-            if len(p) <= max_rows:
-                capped.append(p)
-            else:
-                for s in range(0, len(p), max_rows):
-                    capped.append(p[s : s + max_rows])
-        packs = capped
-    return packs
+## Note: dynamic micro-batching uses verl.utils.seqlen_balancing.prepare_dynamic_batch
+## No custom token bucketing helpers are used here to avoid divergence from internals.
 
 
 from contextlib import nullcontext
@@ -157,6 +103,8 @@ class JEPOActor(DataParallelPPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
+    # no wrapper for dynamic bsz in precompute; use prepare_dynamic_batch directly there
+
     @GPUMemoryLogger(role="jepo actor", logger=logger)
     def update_policy(self, data: DataProto):
         self.actor_module.train()
@@ -189,12 +137,13 @@ class JEPOActor(DataParallelPPOActor):
         # Precompute A_raw, format_adv, and weights using teacher-forced batches per question
         # Note: jepo_data_dicts carries per-question grouping; it's only needed for precompute.
         if "jepo_data_dicts" in data.non_tensor_batch:
-            data = self._precompute_adv_w_with_verl(data, temperature=temperature, format_penalty=format_penalty)
             # Drop grouping artifact to allow generic per-response slicing downstream
             try:
                 del data.non_tensor_batch["jepo_data_dicts"]
             except Exception:
                 pass
+            data = self._precompute_adv_w_with_verl(data, temperature=temperature, format_penalty=format_penalty)
+            
         
         # -------- do not drop samples; keep mask & counts --------
         has_delimiter_mask = data.batch["has_delimiter"]  # [N]
@@ -472,66 +421,173 @@ class JEPOActor(DataParallelPPOActor):
         print("Precomputing JEPO advantages and weights with verl...")
         dev = data.batch["responses"].device
         pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
-        data_dicts = data.non_tensor_batch.get("jepo_data_dicts", [])
         N = data.batch["responses"].shape[0]
+
+        # Outputs to fill (on device for final writeback)
         jepo_adv_raw = torch.zeros(N, device=dev)
         format_adv = torch.zeros(N, device=dev)
         jepo_weights = torch.zeros(N, device=dev)
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
 
-        current_idx = 0
-        # Progress bars (rank 0 only)
+        # Rank gating for progress bars
         try:
             _is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
             _rank = torch.distributed.get_rank() if _is_dist else 0
         except Exception:
             _rank = 0
-        _outer_pbar = tqdm(total=len(data_dicts), desc="JEPO precompute: prompts", disable=(_rank != 0))
-        for dd in data_dicts:
-            B = len(dd["has_delimiter"]) if isinstance(dd["has_delimiter"], list) else int(dd["has_delimiter"].numel())
-            ans_logprob = torch.zeros(B, device=dev)
-            # Build per-row answer lengths
-            ans_lens = []
-            for i in range(B):
-                gt_row = dd["ground_truth_answer_tokens"][i]
-                ans_lens.append(len(gt_row) if isinstance(gt_row, list) else int(torch.as_tensor(gt_row, device=dev).numel()))
-            # Indices with non-zero answer length
-            ans_rows = [i for i, L in enumerate(ans_lens) if L > 0]
-            if ans_rows:
-                chunk_sz = max(1, min(len(ans_rows), 64))
-                _inner_pbar = tqdm(total=len(ans_rows), desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
-                for s in range(0, len(ans_rows), chunk_sz):
-                    e = min(s + chunk_sz, len(ans_rows))
-                    rows = ans_rows[s:e]
-                    ids_batch = dd["batch_input_ids"][rows]
-                    attn_batch = dd["attention_mask"][rows]
-                    pos_batch = dd["position_ids"][rows]
-                    # Build ragged answer tokens batch
-                    R_max = 0
-                    resp_list = []
-                    for r in rows:
-                        a_s = int(dd["answer_start_positions"][r])
-                        Lr = int(ans_lens[r])
-                        t = dd["batch_input_ids"][r][a_s:a_s+Lr]
-                        resp_list.append(t)
-                        R_max = max(R_max, int(t.size(0)))
-                    if R_max == 0:
-                        continue
-                    resp_tok = torch.full((len(rows), R_max), pad_id, dtype=ids_batch.dtype, device=dev)
-                    for j, t in enumerate(resp_list):
-                        l = int(t.size(0)); resp_tok[j, :l] = t
-                    micro_ans = {
-                        "input_ids": ids_batch,
-                        "attention_mask": attn_batch,
-                        "position_ids": pos_batch,
-                        "responses": resp_tok,
-                    }
-                    _, lp_ans_sub = self._forward_micro_batch(micro_ans, temperature=temperature, calculate_entropy=False)
-                    for j, r in enumerate(rows):
-                        Lr = int(ans_lens[r])
-                        ans_logprob[r] = lp_ans_sub[j, :Lr].sum().detach()
-                    _inner_pbar.update(e - s)
-                _inner_pbar.close()
+
+        # ---------------- Stage 1: no-grad dynamic microbatching via prepare_dynamic_batch ----------------
+        jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
+        mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))
+        micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))
+        use_dynamic_bsz = bool(jepo_cfg.get("use_dynamic_bsz", True))
+        max_token_len = (
+            jepo_cfg.get("ppo_max_token_len_per_gpu", 16384)
+            * getattr(self, "ulysses_sequence_parallel_size", 1)
+        )
+
+
+        # Preallocate accumulators
+        logp_sum_all = []  # accumulate per-mini then extend in order
+
+        # One steady inner pbar across all microbatches (count responses, not just non-empty)
+        _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
+
+        # Cache original training mode and switch to eval
+        prev_training = self.actor_module.training if hasattr(self, "actor_module") else False
+        self.actor_module.eval()
+        try:
+            with torch.inference_mode():
+                # Iterate like update_policy: first mini-batches, then micro-batches
+                for mini_batch in data.split(mini_bs):
+                    Bmini = len(mini_batch)
+                    # prepare dynamic micro-batches following dp_actor
+                    if use_dynamic_bsz:
+                        micro_batches, idx_lists = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                    else:
+                        self.gradient_accumulation = max(1, mini_bs // max(micro_bs, 1))
+                        micro_batches = mini_batch.split(max(micro_bs, 1))
+                        idx_lists = [
+                            list(range(i * micro_bs, min((i + 1) * micro_bs, Bmini))) for i in range(len(micro_batches))
+                        ]
+                    # per-mini accumulator in mini order
+                    logp_sum_mini = [0.0] * Bmini
+                    for micro_batch, idx_local in zip(micro_batches, idx_lists):
+                        bs = len(idx_local)
+                        if bs == 0:
+                            continue
+                        # Build trimmed micro-batch tensors up to answer_end = ans_start + ans_len
+                        ids_src = micro_batch.batch.get("batch_input_ids")
+                        attn_src = micro_batch.batch.get("attention_mask")
+                        pos_src = micro_batch.batch.get("position_ids")
+                        ans_start = micro_batch.batch.get("answer_start_positions")
+                        gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
+
+                        # Compute per-row end lengths and maxima
+                        ans_lens_mb = []
+                        end_lens = []
+                        for slot in range(bs):
+                            gt_i = gt_tokens_mb[slot]
+                            if isinstance(gt_i, (list, tuple)):
+                                L_ans = int(len(gt_i))
+                            elif isinstance(gt_i, np.ndarray):
+                                L_ans = int(gt_i.size)
+                            elif torch.is_tensor(gt_i):
+                                L_ans = int(gt_i.numel())
+                            else:
+                                try:
+                                    L_ans = int(len(gt_i))
+                                except Exception:
+                                    L_ans = int(np.asarray(gt_i).size)
+                            ans_lens_mb.append(L_ans)
+                            end_lens.append(int(ans_start[slot].item() + L_ans) if L_ans > 0 else 0)
+                        micro_max_len = int(max([e for e in end_lens if e > 0], default=0))
+                        R_max = int(max(ans_lens_mb) if ans_lens_mb else 0)
+
+                        if micro_max_len == 0 or R_max == 0:
+                            _inner_pbar.update(bs)
+                            continue
+
+                        ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
+                        attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
+                        pos_mb = torch.zeros((bs, micro_max_len), dtype=pos_src.dtype, device=dev)
+                        resp_mb = torch.full((bs, R_max), pad_id, dtype=ids_src.dtype, device=dev)
+
+                        for slot in range(bs):
+                            L_ans = int(ans_lens_mb[slot])
+                            if L_ans <= 0:
+                                continue
+                            L_end = int(ans_start[slot].item() + L_ans)
+                            ids_i = ids_src[slot, :L_end]
+                            l_i = int(ids_i.size(0))
+                            ids_mb[slot, :l_i] = ids_i
+                            attn_mb[slot, :l_i] = 1
+                            if l_i > 0:
+                                pos_mb[slot, :l_i] = torch.arange(l_i, device=dev, dtype=pos_src.dtype)
+
+                            gt_i = gt_tokens_mb[slot]
+                            if isinstance(gt_i, (list, tuple)):
+                                gt_i_t = torch.tensor(gt_i, dtype=ids_src.dtype, device=dev)
+                            elif isinstance(gt_i, torch.Tensor):
+                                gt_i_t = gt_i.to(device=dev, dtype=ids_src.dtype)
+                            else:
+                                gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
+                            resp_mb[slot, :L_ans] = gt_i_t[:L_ans]
+
+                        micro_inputs = {
+                            "input_ids": ids_mb,
+                            "attention_mask": attn_mb,
+                            "position_ids": pos_mb,
+                            "responses": resp_mb,
+                        }
+
+                        # Forward to get per-token log probs; identical math path
+                        _, lp_mb = self._forward_micro_batch(
+                            micro_inputs, temperature=temperature, calculate_entropy=False
+                        )
+
+                        # Accumulate per-row sums into mini-batch order via idx_local
+                        lp_mb_cpu = lp_mb.detach().to("cpu")
+                        for slot, mini_pos in enumerate(idx_local):
+                            L_ans = int(ans_lens_mb[slot])
+                            if L_ans > 0:
+                                logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
+
+                        _inner_pbar.update(bs)
+
+                    # Append this mini-batch results to the global list in order
+                    logp_sum_all.extend(logp_sum_mini)
+        finally:
+            _inner_pbar.close()
+            if prev_training:
+                self.actor_module.train()
+
+        # ---------------- Stage 2: unchanged advantage/weight computation per UID group ----------------
+        # Build uid groups preserving order of first appearance
+        uids = data.non_tensor_batch.get("uid")
+        if isinstance(uids, torch.Tensor):
+            uids_list = [str(x) for x in uids.cpu().tolist()]
+        else:
+            uids_list = [str(x) for x in (uids.tolist() if hasattr(uids, "tolist") else list(uids))]
+
+        ans_logprob_all = torch.as_tensor(logp_sum_all, device=dev, dtype=torch.float32)
+        has_delim_src = data.batch.get("has_delimiter")
+        has_delim_all = has_delim_src.clone() if isinstance(has_delim_src, torch.Tensor) else torch.as_tensor(has_delim_src, device=dev, dtype=torch.bool)
+
+        groups = {}
+        order = []
+        for idx, u in enumerate(uids_list):
+            if u not in groups:
+                groups[u] = []
+                order.append(u)
+            groups[u].append(idx)
+
+        _outer_pbar = tqdm(total=len(order), desc="JEPO precompute: prompts", disable=(_rank != 0))
+        for u in order:
+            idxs = groups[u]
+            B = len(idxs)
+            ans_logprob = ans_logprob_all[idxs]
+            # Groupwise math (identical)
             lse_all = torch.logsumexp(ans_logprob, dim=0)
             if B > 1:
                 d = ans_logprob - lse_all
@@ -544,7 +600,7 @@ class JEPOActor(DataParallelPPOActor):
             A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
             A_raw = A_raw.clamp(-1.0, 1.0)
 
-            has_delim = torch.as_tensor(dd["has_delimiter"], device=dev, dtype=torch.bool)
+            has_delim = has_delim_all[idxs]
             fmt = torch.where(
                 has_delim,
                 torch.zeros(B, device=dev, dtype=torch.float32),
@@ -553,13 +609,14 @@ class JEPOActor(DataParallelPPOActor):
             fmt = fmt - fmt.mean()
             w_full = torch.softmax(ans_logprob, dim=0)
 
-            jepo_adv_raw[current_idx:current_idx + B] = A_raw
-            format_adv[current_idx:current_idx + B] = fmt
-            jepo_weights[current_idx:current_idx + B] = w_full
-            has_delim_all[current_idx:current_idx + B] = has_delim
-            current_idx += B
+            jepo_adv_raw[idxs] = A_raw
+            format_adv[idxs] = fmt
+            jepo_weights[idxs] = w_full
+
             _outer_pbar.update(1)
         _outer_pbar.close()
+
+        # Write back to batch
         data.batch["jepo_adv_raw"] = jepo_adv_raw
         data.batch["format_adv"] = format_adv
         data.batch["jepo_weights"] = jepo_weights

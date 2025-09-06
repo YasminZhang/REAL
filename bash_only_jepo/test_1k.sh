@@ -45,6 +45,7 @@ jepo_buffer_size=128 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
+jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
 jepo_mini_batch_size_per_gpu=128 # responses per gpu
 jepo_micro_batch_size_per_gpu=64 # responses per gpu
@@ -107,7 +108,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_accum_steps=${jepo_accum_steps} \
     +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
     +algorithm.jepo_entropy_coeff=${jepo_entropy_coeff} \
-    +algorithm.jepo_use_dynamic_bsz=${use_dynamic_bsz} \
+    +algorithm.jepo_use_dynamic_bsz=${jepo_use_dynamic_bsz} \
     +algorithm.jepo_use_dynamic_balancer=False \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \

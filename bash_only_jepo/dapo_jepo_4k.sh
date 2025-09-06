@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=4096
+max_response_length=1024
 enable_overlong_buffer=False
-overlong_buffer_len=4096
+overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
 loss_agg_mode="seq-mean-token-mean"
@@ -46,8 +46,8 @@ jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
 jepo_use_dynamic_bsz=True
-jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
-jepo_mini_batch_size_per_gpu=64 # responses per gpu
+jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
+jepo_mini_batch_size_per_gpu=8 # responses per gpu
 jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
