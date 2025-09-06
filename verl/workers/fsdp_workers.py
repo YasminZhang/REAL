@@ -1047,7 +1047,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         dist.barrier()
 
-        # Additionally save JEPO optimizer state if present
+        # Additionally save JEPO optimizer and its extra state (e.g., LR scheduler) if present
         try:
             if getattr(self, "jepo_actor_optimizer", None) is not None:
                 # Ensure optimizer state tensors are on CPU before saving to reduce GPU memory pressure
@@ -1063,6 +1063,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 torch.save(self.jepo_actor_optimizer.state_dict(), jepo_optim_path)
                 log_with_rank(
                     f"Saved JEPO optimizer to {os.path.abspath(jepo_optim_path)}",
+                    rank=rank,
+                    logger=logger,
+                )
+
+                # Save JEPO LR scheduler and other extra state
+                jepo_extra_path = os.path.join(
+                    local_path, f"jepo_extra_state_world_size_{world_size}_rank_{rank}.pt"
+                )
+                jepo_lr_sched_state = (
+                    self.jepo_actor_lr_scheduler.state_dict() if getattr(self, "jepo_actor_lr_scheduler", None) is not None else None
+                )
+                jepo_extra_state = {
+                    "lr_scheduler": jepo_lr_sched_state,
+                }
+                torch.save(jepo_extra_state, jepo_extra_path)
+                log_with_rank(
+                    f"Saved JEPO extra_state to {os.path.abspath(jepo_extra_path)}",
                     rank=rank,
                     logger=logger,
                 )
@@ -1151,6 +1168,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     if del_local_after_load:
                         try:
                             os.remove(jepo_optim_path)
+                        except Exception:
+                            pass
+                # Load JEPO LR scheduler and other extra state if available
+                jepo_extra_path = os.path.join(
+                    local_path, f"jepo_extra_state_world_size_{world_size}_rank_{rank}.pt"
+                )
+                if os.path.exists(jepo_extra_path):
+                    extra_state = torch.load(jepo_extra_path, weights_only=False)
+                    if getattr(self, "jepo_actor_lr_scheduler", None) is not None:
+                        lr_sched_state = extra_state.get("lr_scheduler", None)
+                        if lr_sched_state is not None:
+                            try:
+                                self.jepo_actor_lr_scheduler.load_state_dict(lr_sched_state)
+                                log_with_rank(
+                                    f"Loaded JEPO lr_scheduler from {os.path.abspath(jepo_extra_path)}",
+                                    rank=rank,
+                                    logger=logger,
+                                )
+                            except Exception as _esh:
+                                log_with_rank(
+                                    f"Warning: failed to load JEPO lr_scheduler state: {_esh}",
+                                    rank=rank,
+                                    logger=logger,
+                                    log_only_rank_0=True,
+                                )
+                    if del_local_after_load:
+                        try:
+                            os.remove(jepo_extra_path)
                         except Exception:
                             pass
         except Exception as _e:
