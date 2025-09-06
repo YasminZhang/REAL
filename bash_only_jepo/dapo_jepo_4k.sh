@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=1024
+max_response_length=4096
 enable_overlong_buffer=False
-overlong_buffer_len=1024
+overlong_buffer_len=4096
 overlong_penalty_factor=1.0
 
 loss_agg_mode="seq-mean-token-mean"
@@ -46,7 +46,7 @@ jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
 jepo_use_dynamic_bsz=True
-jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
+jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 1))
 jepo_mini_batch_size_per_gpu=8 # responses per gpu
 jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
@@ -73,7 +73,7 @@ val_top_p=1.0
 sp_size=1  # Single sequence parallel for smaller model
 use_dynamic_bsz=True
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 offload=True  # Keep offload for memory efficiency
 gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
@@ -125,7 +125,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
+    +algorithm.jepo_ppo_max_token_len_per_gpu=${jepo_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
@@ -180,4 +180,5 @@ python3 -m recipe.dapo.main_jepo_dapo \
     trainer.resume_mode=auto \
     trainer.log_val_generations=5 \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
-    custom_reward_function.name=deepscaler_reward_fn
+    custom_reward_function.name=deepscaler_reward_fn \
+    +algorithm.jepo_show_all_rank_pbar_to_file=True

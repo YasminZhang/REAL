@@ -451,116 +451,225 @@ class JEPOActor(DataParallelPPOActor):
         logp_sum_all = []  # accumulate per-mini then extend in order
 
         # One steady inner pbar across all microbatches (count responses, not just non-empty)
-        _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
+        # Option B: allow per-rank bars written to files to avoid console interleaving
+        show_all_rank_pbar_to_file = bool(jepo_cfg.get("show_all_rank_pbar_to_file", False))
+        pbar_file_dir = jepo_cfg.get("pbar_file_dir", "user_logs")
+        _pbar_file_handle = None
+        if show_all_rank_pbar_to_file:
+            try:
+                os.makedirs(pbar_file_dir, exist_ok=True)
+                pbar_path = os.path.join(pbar_file_dir, f"jepo_tf_rank{_rank}.log")
+                _pbar_file_handle = open(pbar_path, mode="w", buffering=1)
+                _inner_pbar = tqdm(
+                    total=N,
+                    desc=f"R{_rank} TF answers",
+                    leave=False,
+                    disable=False,
+                    file=_pbar_file_handle,
+                    dynamic_ncols=False,
+                    mininterval=0.2,
+                )
+            except Exception:
+                _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
+        else:
+            _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
 
         # Cache original training mode and switch to eval
         prev_training = self.actor_module.training if hasattr(self, "actor_module") else False
         self.actor_module.eval()
-        try:
-            with torch.inference_mode():
-                # Iterate like update_policy: first mini-batches, then micro-batches
-                for mini_batch in data.split(mini_bs):
-                    Bmini = len(mini_batch)
-                    # prepare dynamic micro-batches following dp_actor
-                    if use_dynamic_bsz:
-                        micro_batches, idx_lists = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
-                    else:
-                        self.gradient_accumulation = max(1, mini_bs // max(micro_bs, 1))
-                        micro_batches = mini_batch.split(max(micro_bs, 1))
-                        idx_lists = [
-                            list(range(i * micro_bs, min((i + 1) * micro_bs, Bmini))) for i in range(len(micro_batches))
-                        ]
-                    # per-mini accumulator in mini order
-                    logp_sum_mini = [0.0] * Bmini
-                    for micro_batch, idx_local in zip(micro_batches, idx_lists):
-                        bs = len(idx_local)
-                        if bs == 0:
-                            continue
-                        # Build trimmed micro-batch tensors up to answer_end = ans_start + ans_len
-                        ids_src = micro_batch.batch.get("batch_input_ids")
-                        attn_src = micro_batch.batch.get("attention_mask")
-                        pos_src = micro_batch.batch.get("position_ids")
-                        ans_start = micro_batch.batch.get("answer_start_positions")
-                        gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
 
-                        # Compute per-row end lengths and maxima
-                        ans_lens_mb = []
-                        end_lens = []
-                        for slot in range(bs):
-                            gt_i = gt_tokens_mb[slot]
-                            if isinstance(gt_i, (list, tuple)):
+        with torch.inference_mode():
+            # Iterate like update_policy: first mini-batches, then micro-batches
+            for mini_batch in data.split(mini_bs):
+                Bmini = len(mini_batch)
+                # prepare dynamic micro-batches following dp_actor
+                if use_dynamic_bsz:
+                    micro_batches, idx_lists = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                else:
+                    self.gradient_accumulation = max(1, mini_bs // max(micro_bs, 1))
+                    micro_batches = mini_batch.split(max(micro_bs, 1))
+                    idx_lists = [
+                        list(range(i * micro_bs, min((i + 1) * micro_bs, Bmini))) for i in range(len(micro_batches))
+                    ]
+                # per-mini accumulator in mini order
+                logp_sum_mini = [0.0] * Bmini
+                for micro_batch, idx_local in zip(micro_batches, idx_lists):
+                    bs = len(idx_local)
+                    if bs == 0:
+                        continue
+                    # Build trimmed micro-batch tensors up to answer_end = ans_start + ans_len
+                    ids_src = micro_batch.batch.get("batch_input_ids")
+                    attn_src = micro_batch.batch.get("attention_mask")
+                    pos_src = micro_batch.batch.get("position_ids")
+                    ans_start = micro_batch.batch.get("answer_start_positions")
+                    gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
+
+                    # Compute per-row end lengths and maxima
+                    ans_lens_mb = []
+                    end_lens = []
+                    for slot in range(bs):
+                        gt_i = gt_tokens_mb[slot]
+                        if isinstance(gt_i, (list, tuple)):
+                            L_ans = int(len(gt_i))
+                        elif isinstance(gt_i, np.ndarray):
+                            L_ans = int(gt_i.size)
+                        elif torch.is_tensor(gt_i):
+                            L_ans = int(gt_i.numel())
+                        else:
+                            try:
                                 L_ans = int(len(gt_i))
-                            elif isinstance(gt_i, np.ndarray):
-                                L_ans = int(gt_i.size)
-                            elif torch.is_tensor(gt_i):
-                                L_ans = int(gt_i.numel())
-                            else:
-                                try:
-                                    L_ans = int(len(gt_i))
-                                except Exception:
-                                    L_ans = int(np.asarray(gt_i).size)
-                            ans_lens_mb.append(L_ans)
-                            end_lens.append(int(ans_start[slot].item() + L_ans) if L_ans > 0 else 0)
-                        micro_max_len = int(max([e for e in end_lens if e > 0], default=0))
-                        R_max = int(max(ans_lens_mb) if ans_lens_mb else 0)
+                            except Exception:
+                                L_ans = int(np.asarray(gt_i).size)
+                        ans_lens_mb.append(L_ans)
+                        end_lens.append(int(ans_start[slot].item() + L_ans) if L_ans > 0 else 0)
+                    micro_max_len = int(max([e for e in end_lens if e > 0], default=0))
+                    R_max = int(max(ans_lens_mb) if ans_lens_mb else 0)
 
-                        if micro_max_len == 0 or R_max == 0:
-                            _inner_pbar.update(bs)
-                            continue
+                    if micro_max_len == 0 or R_max == 0:
+                        _inner_pbar.update(bs)
+                        continue
 
-                        ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
-                        attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
-                        pos_mb = torch.zeros((bs, micro_max_len), dtype=pos_src.dtype, device=dev)
-                        resp_mb = torch.full((bs, R_max), pad_id, dtype=ids_src.dtype, device=dev)
+                    ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
+                    attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
+                    pos_mb = torch.zeros((bs, micro_max_len), dtype=pos_src.dtype, device=dev)
+                    resp_mb = torch.full((bs, R_max), pad_id, dtype=ids_src.dtype, device=dev)
 
-                        for slot in range(bs):
-                            L_ans = int(ans_lens_mb[slot])
-                            if L_ans <= 0:
-                                continue
-                            L_end = int(ans_start[slot].item() + L_ans)
-                            ids_i = ids_src[slot, :L_end]
-                            l_i = int(ids_i.size(0))
-                            ids_mb[slot, :l_i] = ids_i
-                            attn_mb[slot, :l_i] = 1
-                            if l_i > 0:
-                                pos_mb[slot, :l_i] = torch.arange(l_i, device=dev, dtype=pos_src.dtype)
+                    # --- Instrumentation: show per-microbatch lengths on tqdm (rank 0 only) ---
+                    try:
+                        # Answer lengths stats
+                        ans_len_mean = float(np.mean(ans_lens_mb)) if ans_lens_mb else 0.0
+                        ans_len_max = int(R_max)
 
-                            gt_i = gt_tokens_mb[slot]
+                        # CoT lengths stats, if available
+                        cot_lens_mb = None
+                        if "cot_start_positions" in micro_batch.batch.keys():
+                            cot_start = micro_batch.batch.get("cot_start_positions")
+                            cot_lens_mb = [
+                                max(0, int(ans_start[i].item()) - int(cot_start[i].item())) for i in range(bs)
+                            ]
+                        cot_len_mean = float(np.mean(cot_lens_mb)) if cot_lens_mb else 0.0
+                        cot_len_max = int(max(cot_lens_mb)) if cot_lens_mb else 0
+
+                        # Simple ASCII bars (scaled to micro_max_len to avoid huge bars)
+                        def _mk_bar(val, vmax, width=20):
+                            vmax = max(1, int(vmax))
+                            n = max(0, min(width, int(round(width * float(val) / float(vmax)))))
+                            return ("#" * n) + ("-" * (width - n))
+
+                        ans_bar = _mk_bar(ans_len_mean, micro_max_len)
+                        cot_bar = _mk_bar(cot_len_mean, micro_max_len)
+
+                        # Decode one representative ground-truth answer (the row with max end length)
+                        gt_preview = None
+                        try:
+                            # choose the heaviest row for preview
+                            slot_show = 0
+                            if end_lens:
+                                slot_show = int(np.argmax(end_lens))
+                            gt_i = gt_tokens_mb[slot_show]
+                            # convert to list[int]
                             if isinstance(gt_i, (list, tuple)):
-                                gt_i_t = torch.tensor(gt_i, dtype=ids_src.dtype, device=dev)
-                            elif isinstance(gt_i, torch.Tensor):
-                                gt_i_t = gt_i.to(device=dev, dtype=ids_src.dtype)
+                                gt_ids = list(gt_i)
+                            elif isinstance(gt_i, np.ndarray):
+                                gt_ids = gt_i.astype(int).tolist()
+                            elif torch.is_tensor(gt_i):
+                                gt_ids = gt_i.to("cpu").tolist()
                             else:
-                                gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
-                            resp_mb[slot, :L_ans] = gt_i_t[:L_ans]
+                                gt_ids = list(gt_i)
 
-                        micro_inputs = {
-                            "input_ids": ids_mb,
-                            "attention_mask": attn_mb,
-                            "position_ids": pos_mb,
-                            "responses": resp_mb,
-                        }
+                            if hasattr(self, "_cached_tokenizer") and self._cached_tokenizer is not None:
+                                gt_text = self._cached_tokenizer.decode(gt_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                            else:
+                                gt_text = str(gt_ids[:20])
+                            # one-line, trimmed preview
+                            gt_text = gt_text.replace("\n", " ").replace("\r", " ")
+                            if len(gt_text) > 64:
+                                gt_text = gt_text[:64] + "…"
+                            gt_preview = gt_text
+                        except Exception:
+                            pass
 
-                        # Forward to get per-token log probs; identical math path
+                        # Update postfix (rank 0 only; disabled elsewhere by tqdm constructor)
+                        if gt_preview is not None and len(gt_preview) > 0:
+                            _inner_pbar.set_postfix_str(
+                                f"bs={bs} seq_max={micro_max_len} ans={ans_len_mean:.0f}/{ans_len_max} [{ans_bar}] "
+                                f"cot={cot_len_mean:.0f}/{cot_len_max} [{cot_bar}] gt=\"{gt_preview}\""
+                            )
+                        else:
+                            _inner_pbar.set_postfix_str(
+                                f"bs={bs} seq_max={micro_max_len} ans={ans_len_mean:.0f}/{ans_len_max} [{ans_bar}] "
+                                f"cot={cot_len_mean:.0f}/{cot_len_max} [{cot_bar}]"
+                            )
+                    except Exception:
+                        # Never break training due to instrumentation
+                        pass
+
+                    for slot in range(bs):
+                        L_ans = int(ans_lens_mb[slot])
+                        if L_ans <= 0:
+                            continue
+                        L_end = int(ans_start[slot].item() + L_ans)
+                        ids_i = ids_src[slot, :L_end]
+                        l_i = int(ids_i.size(0))
+                        ids_mb[slot, :l_i] = ids_i
+                        attn_mb[slot, :l_i] = 1
+                        if l_i > 0:
+                            pos_mb[slot, :l_i] = torch.arange(l_i, device=dev, dtype=pos_src.dtype)
+
+                        gt_i = gt_tokens_mb[slot]
+                        if isinstance(gt_i, (list, tuple)):
+                            gt_i_t = torch.tensor(gt_i, dtype=ids_src.dtype, device=dev)
+                        elif isinstance(gt_i, torch.Tensor):
+                            gt_i_t = gt_i.to(device=dev, dtype=ids_src.dtype)
+                        else:
+                            gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
+                        resp_mb[slot, :L_ans] = gt_i_t[:L_ans]
+
+                    micro_inputs = {
+                        "input_ids": ids_mb,
+                        "attention_mask": attn_mb,
+                        "position_ids": pos_mb,
+                        "responses": resp_mb,
+                    }
+
+                    # Forward to get per-token log probs; identical math path
+                    # Debug hook: optionally use a dummy forward on a specific rank
+                    try:
+                        dummy_rank = int(jepo_cfg.get("dummy_forward_rank", -1))
+                        dummy_value = float(jepo_cfg.get("dummy_forward_value", 0.0))
+                        dummy_min_seq = int(jepo_cfg.get("dummy_forward_min_seq", 0))
+                    except Exception:
+                        dummy_rank = -1
+                        dummy_value = 0.0
+                        dummy_min_seq = 0
+
+                    if dummy_rank >= 0 and _rank == dummy_rank and micro_max_len >= dummy_min_seq:
+                        lp_mb = torch.full((bs, R_max), dummy_value, device=dev, dtype=torch.float32)
+                    else:
                         _, lp_mb = self._forward_micro_batch(
                             micro_inputs, temperature=temperature, calculate_entropy=False
                         )
 
-                        # Accumulate per-row sums into mini-batch order via idx_local
-                        lp_mb_cpu = lp_mb.detach().to("cpu")
-                        for slot, mini_pos in enumerate(idx_local):
-                            L_ans = int(ans_lens_mb[slot])
-                            if L_ans > 0:
-                                logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
+                    # Accumulate per-row sums into mini-batch order via idx_local
+                    lp_mb_cpu = lp_mb.detach().to("cpu")
+                    for slot, mini_pos in enumerate(idx_local):
+                        L_ans = int(ans_lens_mb[slot])
+                        if L_ans > 0:
+                            logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
 
-                        _inner_pbar.update(bs)
+                    _inner_pbar.update(bs)
 
-                    # Append this mini-batch results to the global list in order
-                    logp_sum_all.extend(logp_sum_mini)
-        finally:
-            _inner_pbar.close()
-            if prev_training:
-                self.actor_module.train()
+                # Append this mini-batch results to the global list in order
+                logp_sum_all.extend(logp_sum_mini)
+        _inner_pbar.close()
+        try:
+            if _pbar_file_handle is not None:
+                _pbar_file_handle.flush()
+                _pbar_file_handle.close()
+        except Exception:
+            pass
+        if prev_training:
+            self.actor_module.train()
 
         # ---------------- Stage 2: unchanged advantage/weight computation per UID group ----------------
         # Build uid groups preserving order of first appearance

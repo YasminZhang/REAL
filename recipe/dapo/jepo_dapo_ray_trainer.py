@@ -133,6 +133,13 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "loss_agg_mode": getattr(self.config.algorithm, 'jepo_loss_agg_mode', getattr(self.config.actor_rollout_ref.actor, 'loss_agg_mode', 'token-mean')),
             "use_dynamic_bsz": getattr(self.config.algorithm, 'jepo_use_dynamic_bsz', getattr(self.config.actor_rollout_ref.actor, 'use_dynamic_bsz', True)),
             "use_dynamic_balancer": getattr(self.config.algorithm, 'jepo_use_dynamic_balancer', False),
+            # Debug hooks
+            "dummy_forward_rank": getattr(self.config.algorithm, 'jepo_dummy_forward_rank', -1),
+            "dummy_forward_value": getattr(self.config.algorithm, 'jepo_dummy_forward_value', 0.0),
+            "dummy_forward_min_seq": getattr(self.config.algorithm, 'jepo_dummy_forward_min_seq', 0),
+            # Progress bar output options
+            "show_all_rank_pbar_to_file": getattr(self.config.algorithm, 'jepo_show_all_rank_pbar_to_file', False),
+            "pbar_file_dir": getattr(self.config.algorithm, 'jepo_pbar_file_dir', 'user_logs'),
             # Suffix-anchor delimiter matching config (optional)
             "delimiter_suffix_anchor": getattr(self.config.algorithm, 'jepo_delimiter_suffix_anchor', True),
             "delimiter_suffix_min_len": getattr(self.config.algorithm, 'jepo_delimiter_suffix_min_len', 2),
