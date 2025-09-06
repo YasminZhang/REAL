@@ -504,6 +504,11 @@ class JEPOActor(DataParallelPPOActor):
                     pos_src = micro_batch.batch.get("position_ids")
                     ans_start = micro_batch.batch.get("answer_start_positions")
                     gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
+                    gt_tokens_len_mb = [
+                        (int(len(t)) if (t is not None) else 0) for t in gt_tokens_mb
+                    ]
+                    if np.any(np.array(gt_tokens_len_mb) == 0):
+                        gt_tokens_mb = torch.ones((bs, 1), dtype=torch.int64, device=dev)
 
                     # Compute per-row end lengths and maxima
                     ans_lens_mb = []
@@ -526,10 +531,11 @@ class JEPOActor(DataParallelPPOActor):
                         end_lens.append(int(ans_start[slot].item() + L_ans) if L_ans > 0 else 0)
                     micro_max_len = int(max([e for e in end_lens if e > 0], default=0))
                     R_max = int(max(ans_lens_mb) if ans_lens_mb else 0)
-
+                    R_max_flag = False
                     if micro_max_len == 0 or R_max == 0:
+                        R_max_flag = True
                         _inner_pbar.update(bs)
-                        raise RuntimeError("Zero-length micro_max_len or R_max encountered in JEPO precompute")
+                        #raise RuntimeError("Zero-length micro_max_len or R_max encountered in JEPO precompute")
 
                     ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
                     attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
@@ -627,6 +633,7 @@ class JEPOActor(DataParallelPPOActor):
                             gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
                         resp_mb[slot, :L_ans] = gt_i_t[:L_ans]
 
+
                     micro_inputs = {
                         "input_ids": ids_mb,
                         "attention_mask": attn_mb,
@@ -645,8 +652,11 @@ class JEPOActor(DataParallelPPOActor):
                         dummy_value = 0.0
                         dummy_min_seq = 0
 
-                    if (dummy_rank >= 0 and _rank == dummy_rank and micro_max_len >= dummy_min_seq) or (micro_max_len == 0 or R_max == 0):
-                        lp_mb = torch.full((bs, R_max), dummy_value, device=dev, dtype=torch.float32)
+                    if R_max_flag:
+                        _, lp_mb = self._forward_micro_batch(
+                            micro_inputs, temperature=temperature, calculate_entropy=False
+                        )
+                        lp_mb = lp_mb * 0.0
                     else:
                         _, lp_mb = self._forward_micro_batch(
                             micro_inputs, temperature=temperature, calculate_entropy=False
