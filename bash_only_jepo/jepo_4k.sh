@@ -24,7 +24,7 @@ overlong_penalty_factor=1.0
 loss_agg_mode="seq-mean-token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=256
+train_prompt_bsz=64
 n_resp_per_prompt=8
 train_prompt_mini_bsz=64
 
@@ -47,7 +47,7 @@ jepo_update_frequency=100000
 jepo_epochs=1
 jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-jepo_mini_batch_size_per_gpu=8 # responses per gpu
+jepo_mini_batch_size_per_gpu=64 # responses per gpu
 jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
