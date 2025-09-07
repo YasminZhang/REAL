@@ -79,7 +79,7 @@ gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 # Use JEPO-DAPO recipe
-python3 -m verl.trainer.main_ppo \
+python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -91,6 +91,28 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
+    algorithm.use_jepo=${use_jepo} \
+    algorithm.jepo_delimiter="${jepo_delimiter}" \
+    algorithm.jepo_format_penalty=${jepo_format_penalty} \
+    algorithm.jepo_beta_supp=${jepo_beta_supp} \
+    algorithm.jepo_beta_kl=${jepo_beta_kl} \
+    algorithm.jepo_buffer_size=${jepo_buffer_size} \
+    algorithm.jepo_steps=${jepo_steps} \
+    algorithm.jepo_update_frequency=${jepo_update_frequency} \
+    +algorithm.jepo_epochs=${jepo_epochs} \
+    +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
+    +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
+    +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
+    +algorithm.jepo_delimiter_suffix_anchor=True \
+    +algorithm.jepo_delimiter_suffix_min_len=2 \
+    +algorithm.jepo_accum_steps=${jepo_accum_steps} \
+    +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
+    +algorithm.jepo_entropy_coeff=${jepo_entropy_coeff} \
+    +algorithm.jepo_use_dynamic_bsz=${jepo_use_dynamic_bsz} \
+    +algorithm.jepo_use_dynamic_balancer=False \
+    algorithm.filter_groups.enable=${enable_filter_groups} \
+    algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
+    algorithm.filter_groups.metric=${filter_groups_metric} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -103,6 +125,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
+    +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
@@ -111,6 +134,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
+    +actor_rollout_ref.jepo_actor.optim.lr=1e-6 \
+    +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
@@ -133,6 +158,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
+    reward_model.reward_manager=dapo \
+    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
