@@ -631,7 +631,7 @@ class JEPOActor(DataParallelPPOActor):
                             gt_i_t = gt_i.to(device=dev, dtype=ids_src.dtype)
                         else:
                             gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
-                        resp_mb[slot, :L_ans] = gt_i_t[:L_ans]
+                        resp_mb[slot, :L_ans] = gt_i_t[:L_ans] 
 
 
                     micro_inputs = {
