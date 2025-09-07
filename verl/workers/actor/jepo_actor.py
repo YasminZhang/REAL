@@ -641,17 +641,6 @@ class JEPOActor(DataParallelPPOActor):
                         "responses": resp_mb,
                     }
 
-                    # Forward to get per-token log probs; identical math path
-                    # Debug hook: optionally use a dummy forward on a specific rank
-                    try:
-                        dummy_rank = int(jepo_cfg.get("dummy_forward_rank", -1))
-                        dummy_value = float(jepo_cfg.get("dummy_forward_value", 0.0))
-                        dummy_min_seq = int(jepo_cfg.get("dummy_forward_min_seq", 0))
-                    except Exception:
-                        dummy_rank = -1
-                        dummy_value = 0.0
-                        dummy_min_seq = 0
-
                     if R_max_flag:
                         _, lp_mb = self._forward_micro_batch(
                             micro_inputs, temperature=temperature, calculate_entropy=False
@@ -668,7 +657,7 @@ class JEPOActor(DataParallelPPOActor):
                         L_ans = int(ans_lens_mb[slot])
                         if L_ans > 0:
                             logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
-
+                    breakpoint()
                     _inner_pbar.update(bs)
 
                 # Append this mini-batch results to the global list in order
