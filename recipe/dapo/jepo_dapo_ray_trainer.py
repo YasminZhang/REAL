@@ -376,9 +376,14 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     # Prompts where all responses are incorrect (acc == 0 across n samples)
                     # NOTE: For accuracy-style metrics in {0,1}, the “all incorrect” case means mean == 0.
                     # Using ">= 0" incorrectly included almost all prompts and diluted JEPO training.
-                    all_incorrect_uids = [
-                        uid for uid, mean in prompt_uid2metric_mean.items() if mean >= 0 #np.isclose(mean, 0.0)
-                    ]
+                    if self.config.algorithm.use_grpo: # if use grpo, then use all incorrect question for jepo
+                        all_incorrect_uids = [
+                            uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
+                        ]
+                    else: # if there is no grpo, then only use jepo with all questions
+                        all_incorrect_uids = [
+                            uid for uid, mean in prompt_uid2metric_mean.items() if mean >= 0
+                        ]
                     # Prompts where all responses are correct (acc == 1 across n samples)
                     all_correct_uids = [
                         uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 1.0)
@@ -506,11 +511,12 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup and standard actor update
-                    # if self.config.trainer.critic_warmup <= self.global_steps:
-                    #     with marked_timer("update_actor", timing_raw, "red"):
-                    #         actor_output = self.actor_rollout_wg.update_actor(batch)
-                    #     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                    #     metrics.update(actor_output_metrics)
+                    if self.config.algorithm.use_grpo:
+                        if self.config.trainer.critic_warmup <= self.global_steps:
+                            with marked_timer("update_actor", timing_raw, "red"):
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                            metrics.update(actor_output_metrics)
 
                     # Perform JEPO training when frequency is hit
                     frequency_met = self.global_steps % self.jepo_update_frequency == 0
