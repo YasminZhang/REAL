@@ -46,9 +46,9 @@ jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=1
 jepo_use_dynamic_bsz=True
-jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
-jepo_mini_batch_size_per_gpu=128 # responses per gpu
-jepo_micro_batch_size_per_gpu=64 # responses per gpu
+jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 16))
+jepo_mini_batch_size_per_gpu=32 # responses per gpu
+jepo_micro_batch_size_per_gpu=16 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored

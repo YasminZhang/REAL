@@ -660,7 +660,6 @@ class JEPOActor(DataParallelPPOActor):
                         L_ans = int(ans_lens_mb[slot])
                         if L_ans > 0:
                             logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
-                    breakpoint()
                     _inner_pbar.update(bs)
 
                 # Append this mini-batch results to the global list in order
