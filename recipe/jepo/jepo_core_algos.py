@@ -184,28 +184,46 @@ def build_jepo_teacher_forced_batch(
         cot_start_positions.append(len(prompt_i))
         answer_start_positions.append(len(left_plus_delim))
 
+    # Validate pad token id
+    if pad_token is None:
+        raise ValueError("pad_token_id is required but missing (None)")
+
     max_len = max(int(t.numel()) for t in batch_input_tokens) if batch_input_tokens else 0
     padded_tokens: List[torch.Tensor] = []
     attention_masks: List[List[int]] = []
+
+    eos_id = getattr(tokenizer, "eos_token_id", None)
 
     for t in batch_input_tokens:
         pad_len = max_len - int(t.numel())
         if pad_len > 0:
             padding = torch.full((pad_len,), pad_token, dtype=torch.long, device=device)
             padded = torch.cat([t, padding], dim=0)
-            mask = [1] * int(t.numel()) + [0] * pad_len
         else:
             padded = t
-            mask = [1] * int(t.numel())
+        # Build attention mask by masking pad and eos tokens anywhere
+        mask_t = torch.ones_like(padded, dtype=torch.long, device=device)
+        mask_t = mask_t * (padded != pad_token).long()
+        if eos_id is not None:
+            mask_t = mask_t * (padded != eos_id).long()
         padded_tokens.append(padded)
-        attention_masks.append(mask)
+        attention_masks.append(mask_t.tolist())
 
-    batch_input_ids = torch.stack(padded_tokens).to(dtype=torch.long, device=device) if padded_tokens else torch.empty((0, 0), dtype=torch.long, device=device)
-    attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=device) if attention_masks else torch.empty((0, 0), dtype=torch.long, device=device)
-    position_ids = torch.arange(max_len, dtype=torch.long, device=device).unsqueeze(0).repeat(n, 1) if max_len > 0 else torch.empty((n, 0), dtype=torch.long, device=device)
-    for i in range(n):
-        if max_len > batch_input_tokens[i].numel():
-            position_ids[i, batch_input_tokens[i].numel():] = 0
+    batch_input_ids = (
+        torch.stack(padded_tokens).to(dtype=torch.long, device=device)
+        if padded_tokens
+        else torch.empty((0, 0), dtype=torch.long, device=device)
+    )
+    attention_mask = (
+        torch.tensor(attention_masks, dtype=torch.long, device=device)
+        if attention_masks
+        else torch.empty((0, 0), dtype=torch.long, device=device)
+    )
+    # Derive position_ids from attention_mask so first attended token has pos=0
+    if max_len > 0:
+        position_ids = (attention_mask.cumsum(dim=1) - 1).clamp_min(0) * attention_mask
+    else:
+        position_ids = torch.empty((n, 0), dtype=torch.long, device=device)
 
     return {
         'batch_input_ids': batch_input_ids,

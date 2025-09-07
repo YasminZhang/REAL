@@ -288,10 +288,11 @@ class JEPOActor(DataParallelPPOActor):
                             pos_pack[j, :Lp] = pos_full[j, :c]
                         if Lc > 0:
                             ids_pack[j, Lp : Lp + Lc] = ids_full[j, c:a]
-                            attn_pack[j, Lp : Lp + Lc] = 1
-                            pos_pack[j, Lp : Lp + Lc] = pos_full[j, c:a]
+                            # Preserve attention semantics (mask out eos/pad carried in source)
+                            attn_pack[j, Lp : Lp + Lc] = attn_full[j, c:a]
                             resp_pack[j, :Lc] = ids_full[j, c:a]
-                            mask_cot[j, :Lc] = 1
+                            # Loss mask should also respect attention
+                            mask_cot[j, :Lc] = attn_full[j, c:a].to(mask_cot.dtype)
                             A_pack[j, :Lc] = A_all[j]
                         if La > 0:
                             gt_row = gt_tokens[j]
@@ -301,17 +302,15 @@ class JEPOActor(DataParallelPPOActor):
                                 ans_ids = torch.as_tensor(gt_row, device=dev, dtype=ids_full.dtype)
                             ids_pack[j, Lp + Lc : Lp + Lc + La] = ans_ids
                             attn_pack[j, Lp + Lc : Lp + Lc + La] = 1
-                            try:
-                                pos_pack[j, Lp + Lc : Lp + Lc + La] = pos_full[j, a : a + La]
-                            except Exception:
-                                if Lp + Lc > 0:
-                                    start_pos = int(pos_pack[j, Lp + Lc - 1].item()) + 1
-                                else:
-                                    start_pos = 0
-                                pos_pack[j, Lp + Lc : Lp + Lc + La] = torch.arange(start_pos, start_pos + La, device=dev, dtype=pos_pack.dtype)
+                            # attention for GT answer tokens is 1 (no eos in GT by assumption)
                             resp_pack[j, Lc : Lc + La] = ans_ids
                             mask_ans[j, Lc : Lc + La] = 1
                             A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j]
+
+                    # Derive positions from attention to ensure consistent left/right padding
+                    if attn_pack.numel() > 0:
+                        pos_from_mask = (attn_pack.cumsum(dim=1) - 1).clamp_min(0) * attn_pack
+                        pos_pack[:, :] = pos_from_mask.to(dtype=pos_pack.dtype)
 
                     micro = {
                         "input_ids": ids_pack,
@@ -620,9 +619,8 @@ class JEPOActor(DataParallelPPOActor):
                         ids_i = ids_src[slot, :L_end]
                         l_i = int(ids_i.size(0))
                         ids_mb[slot, :l_i] = ids_i
-                        attn_mb[slot, :l_i] = 1
-                        if l_i > 0:
-                            pos_mb[slot, :l_i] = torch.arange(l_i, device=dev, dtype=pos_src.dtype)
+                        # copy attention from the source slice to respect eos/pad masking
+                        attn_mb[slot, :l_i] = attn_src[slot, :l_i]
 
                         gt_i = gt_tokens_mb[slot]
                         if isinstance(gt_i, (list, tuple)):
@@ -633,6 +631,11 @@ class JEPOActor(DataParallelPPOActor):
                             gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
                         resp_mb[slot, :L_ans] = gt_i_t[:L_ans] 
 
+
+                    # Derive positions from attention so first attended token starts at 0
+                    if attn_mb.numel() > 0:
+                        pos_from_mask = (attn_mb.cumsum(dim=1) - 1).clamp_min(0) * attn_mb
+                        pos_mb[:, :] = pos_from_mask.to(dtype=pos_mb.dtype)
 
                     micro_inputs = {
                         "input_ids": ids_mb,
