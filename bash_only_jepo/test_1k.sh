@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="test_1k_entropy_kl"
+exp_name="test_1k_dbsz"
 
 adv_estimator=grpo
 
@@ -39,8 +39,8 @@ use_jepo=True
 jepo_delimiter="\\boxed\{"
 jepo_format_penalty=10
 jepo_beta_supp=0.001
-jepo_beta_kl=0.001
-jepo_entropy_coeff=0.001
+jepo_beta_kl=0.0
+jepo_entropy_coeff=0.0
 jepo_buffer_size=128 # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
