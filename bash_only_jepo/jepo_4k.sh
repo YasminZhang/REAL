@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="jepo_4k"
+exp_name="jepo_4k_format1"
 
 adv_estimator=grpo
 
