@@ -16,9 +16,9 @@ clip_ratio_low=0.2
 clip_ratio_high=0.2
 
 max_prompt_length=1024
-max_response_length=1024
+max_response_length=4096
 enable_overlong_buffer=False
-overlong_buffer_len=1024
+overlong_buffer_len=4096
 overlong_penalty_factor=1.0
 
 loss_agg_mode="seq-mean-token-mean"
@@ -99,6 +99,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     algorithm.jepo_buffer_size=${jepo_buffer_size} \
     algorithm.jepo_steps=${jepo_steps} \
     algorithm.jepo_update_frequency=${jepo_update_frequency} \
+    +algorithm.use_grpo=False \
     +algorithm.jepo_epochs=${jepo_epochs} \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
