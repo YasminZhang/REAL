@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="jepo_4k_format1"
+exp_name="jepo_4k_format1_constent_lr"
 
 adv_estimator=grpo
 
@@ -139,6 +139,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     +actor_rollout_ref.jepo_actor.optim.lr=1e-6 \
     +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
+    +actor_rollout_ref.jepo_actor.optim.warmup_style=constant \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
