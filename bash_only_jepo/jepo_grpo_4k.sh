@@ -3,10 +3,11 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="GRPO-SFT-TRACT"
+exp_name="GRPO-SFT-TRACT${1}"
 
 adv_estimator=grpo
 
+lr=1e-7
 use_kl_in_reward=False
 kl_coef=0.001
 use_kl_loss=True
@@ -133,7 +134,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     +actor_rollout_ref.jepo_actor.optim.lr=1e-6 \
@@ -176,7 +177,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.test_freq=10 \
     trainer.save_freq=20 \
     trainer.total_epochs=500 \
-    trainer.total_training_steps=1000 \
+    trainer.total_training_steps=5000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.log_val_generations=5 \
