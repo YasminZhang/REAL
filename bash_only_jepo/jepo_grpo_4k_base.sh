@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="GRPO-SFT-TRACT"
+exp_name="GRPO-BASE-TRACT"
 
 adv_estimator=grpo
 
@@ -59,10 +59,10 @@ NNODES=1
 NGPUS_PER_NODE=4
 
 # Use 1.5B model
-MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
+MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=data/feedback_collection_for_sft/train.parquet
-TEST_FILE=data/feedback_bench_for_sft/train.parquet
+TRAIN_FILE=data/feedback_collection_for_base/train.parquet
+TEST_FILE=data/feedback_bench_for_base/train.parquet
 
 # Algorithm
 temperature=0.6
@@ -80,7 +80,7 @@ gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 # Use JEPO-DAPO recipe
-CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m recipe.dapo.main_jepo_dapo \
+CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \

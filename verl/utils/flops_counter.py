@@ -135,6 +135,7 @@ class FlopsCounter:
         intermediate_size = self.config.intermediate_size
 
         head_dim = getattr(self.config, "head_dim", self.config.hidden_size // self.config.num_attention_heads)
+        
         q_size = num_attention_heads * head_dim
         k_size = num_key_value_heads * head_dim
         v_size = num_key_value_heads * head_dim
@@ -332,6 +333,10 @@ class FlopsCounter:
         """
         tokens_sum = sum(batch_seqlens)
         func = self.estimate_func.get(self.config.model_type, self._estimate_unknown_flops)
-        estimated_flops = func(tokens_sum, batch_seqlens, delta_time)
-        promised_flops = get_device_flops()
-        return estimated_flops, promised_flops
+        try:
+            estimated_flops = func(tokens_sum, batch_seqlens, delta_time)
+            promised_flops = get_device_flops()
+            return estimated_flops, promised_flops
+        except Exception as e:
+            print(f"Error in estimating flops: {e}. MFU will always be zero.")
+            return 0, float("inf")

@@ -537,6 +537,13 @@ class RewardOutput:
     is_correct: bool
 
 
+
+def extract_answer_tract(passage: str) -> str:
+    if "So the overall score is " in passage:
+        return passage.split("So the overall score is ")[1][0]
+    return None
+
+
 class RewardMathFn:
     """Reward function for evaluating mathematical answers."""
     
@@ -550,11 +557,6 @@ class RewardMathFn:
         model_response = input.model_response
         model_solution = model_response
         
-        # # Extract solution from thought delimiters
-        # if THOUGHT_DELIMITER_START in model_response and THOUGHT_DELIMITER_END in model_response:
-        #     model_solution = model_response.split(THOUGHT_DELIMITER_END)[1]
-        # else:
-        #     return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
         
         # Extract the mathematical answer
         model_answer = extract_answer(model_solution)
@@ -592,6 +594,59 @@ class RewardMathFn:
                 
         return RewardOutput(reward=self.config.incorrect_reward, is_correct=False)
 
+class RewardMathFn_Tract():
+    """
+    Reward function for evaluating mathematical answers.
+
+    This class implements the __call__ method to process the input and determine
+    the reward based on the correctness of the provided answer compared to the ground truth.
+    """
+    def __init__(self, config: RewardConfig):
+        self.config = config
+
+    def __call__(self, input: RewardInput, reward_design=False) -> RewardOutput:
+        assert input.problem_type == RewardType.MATH, \
+            "Invalid problem type: expected 'MATH', but got '{}'".format(input.problem_type)
+        
+        problem = input.problem
+        model_response = input.model_response
+
+        model_solution = model_response
+        
+        model_answer = extract_answer_tract(model_solution)
+        if model_answer is None:
+            return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
+
+        # Process the ground truth(s)
+        ground_truths = input.ground_truth.get("answer", None)
+        if ground_truths is None:
+            return RewardOutput(reward=self.config.unk_error_reward, is_correct=False)
+        
+        # Convert single answer to list for uniform processing
+        if isinstance(ground_truths, (str, float, int)):
+            ground_truths = [ground_truths]
+            
+
+        # Check against all possible correct answers
+        for ground_truth in ground_truths:
+           
+            # convert str to int
+            if ground_truth not in ['1', '2', '3', '4', '5', 1, 2, 3, 4, 5]:
+                return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
+            ground_truth = int(ground_truth)
+            if model_answer not in ['1', '2', '3', '4', '5']:
+                return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
+            model_answer = int(model_answer)
+            if ground_truth == model_answer:
+                return RewardOutput(reward=self.config.correct_reward, is_correct=True)
+            else:
+                return RewardOutput(reward=self.config.incorrect_reward, is_correct=False)
+            
+            
+        
+                
+        return RewardOutput(reward=self.config.incorrect_reward, is_correct=False)
+
 
 def deepscaler_reward_fn(data_source, solution_str, ground_truth, extra_info=None) -> float:
     """
@@ -605,7 +660,7 @@ def deepscaler_reward_fn(data_source, solution_str, ground_truth, extra_info=Non
         float: The reward value (1 for correct, 0 for incorrect)
     """
     reward_config = RewardConfig()
-    reward_fn = RewardMathFn(reward_config)
+    reward_fn = RewardMathFn_Tract(reward_config)
     reward_response = reward_fn(RewardInput(
         problem=solution_str, 
         problem_type=RewardType.MATH, 
@@ -620,8 +675,8 @@ def deepscaler_reward_fn(data_source, solution_str, ground_truth, extra_info=Non
 
 if __name__ == "__main__":
     # Example usage
-    test_solution = "<think> I am omniscient. </think> The answer is \\boxed{24 + 14*x + (-13)*x^2 - 2*x^3 + x^4}."
-    test_ground_truth = ["10", "$x^{4}-2 x^{3}-13 x^{2}+14 x+24$"]
+    test_solution = "<think> I am omniscient. </think> The answer is \\boxed{24 + 14*x + (-13)*x^2 - 2*x^3 + x^4}. So the overall score is 5"
+    test_ground_truth = ["2", "4"]
     
     result = deepscaler_reward_fn("deepscaler", test_solution, test_ground_truth)
     print(f"Is correct: {result}")
