@@ -120,6 +120,7 @@ class JEPOActor(DataParallelPPOActor):
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
+        store_last_token_probs = bool(jepo_cfg.get("store_last_token_probs", False))
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
 
@@ -252,7 +253,13 @@ class JEPOActor(DataParallelPPOActor):
                     else:
                         jepo_adv_raw_mb = micro_batch.batch["jepo_adv"]
                     format_adv_mb = micro_batch.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_mb))
-                    A_all = jepo_adv_raw_mb + format_adv_mb
+                    
+                     
+
+                    # add a parameter to not use format_adv_mb
+                    use_format_adv = micro_batch.batch.get("use_format_adv", False)
+                    A_all = jepo_adv_raw_mb + format_adv_mb if use_format_adv else jepo_adv_raw_mb # TODO: ablate
+
                     w_all = micro_batch.batch.get("jepo_weights", torch.ones((ids_full.size(0),), device=dev))
 
                     prefix_lens = [int(c) for c in c_s]
@@ -322,10 +329,20 @@ class JEPOActor(DataParallelPPOActor):
                     entropy_tok, lp_combined = self._forward_micro_batch(
                         micro, temperature=temperature, calculate_entropy=calculate_entropy
                     )
+                    
+                 
 
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
+
+                    # use the cot before the gt answer for regression reward
+                    # use_regression_reward = bool(jepo_cfg.get("use_regression_reward", True))
+                    # if use_regression_reward:
+                    #     entropy_tok = entropy_tok[:,:-1]
+                    #     lp_combined = lp_combined[:,:-1]
+                    #     comb_mask = comb_mask[:,:-1]
+
                     jepo_loss_part, _, _, _ = gpg_fn(
                         old_log_prob=None,
                         log_prob=lp_combined,
@@ -415,6 +432,8 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/format_penalty": format_penalty,
         }
 
+    
+
     @torch.no_grad()
     def _precompute_adv_w_with_verl(self, data: DataProto, temperature: float, format_penalty: float) -> DataProto:
         print("Precomputing JEPO advantages and weights with verl...")
@@ -422,11 +441,22 @@ class JEPOActor(DataParallelPPOActor):
         pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
         N = data.batch["responses"].shape[0]
 
+        # NEW: Get vocab size for storing probability distributions
+        vocab_size = self.actor_module.config.vocab_size if hasattr(self.actor_module, 'config') else 32000
+        jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
+        store_last_token_probs = bool(jepo_cfg.get("store_last_token_probs", True))
+
         # Outputs to fill (on device for final writeback)
         jepo_adv_raw = torch.zeros(N, device=dev)
         format_adv = torch.zeros(N, device=dev)
         jepo_weights = torch.zeros(N, device=dev)
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
+        
+        # NEW: Store full probability distribution for last token if requested
+        if store_last_token_probs:
+            last_token_probs_all = torch.zeros((N, vocab_size), device=dev)
+        else:
+            last_token_probs_all = None
 
         # Rank gating for progress bars
         try:
@@ -448,6 +478,7 @@ class JEPOActor(DataParallelPPOActor):
 
         # Preallocate accumulators
         logp_sum_all = []  # accumulate per-mini then extend in order
+        expected_values_all = []
 
         # One steady inner pbar across all microbatches (count responses, not just non-empty)
         # Option B: allow per-rank bars written to files to avoid console interleaving
@@ -493,6 +524,7 @@ class JEPOActor(DataParallelPPOActor):
                     ]
                 # per-mini accumulator in mini order
                 logp_sum_mini = [0.0] * Bmini
+                expected_values_mini = [0.0] * Bmini
                 for micro_batch, idx_local in zip(micro_batches, idx_lists):
                     bs = len(idx_local)
                     if bs == 0:
@@ -649,10 +681,23 @@ class JEPOActor(DataParallelPPOActor):
                             micro_inputs, temperature=temperature, calculate_entropy=False
                         )
                         lp_mb = lp_mb * 0.0
+                        # Set expected_values to zeros if R_max_flag and store_last_token_probs
+                        if store_last_token_probs:
+                            expected_values = torch.zeros(bs, device=dev, dtype=torch.float32)
                     else:
-                        _, lp_mb = self._forward_micro_batch(
-                            micro_inputs, temperature=temperature, calculate_entropy=False
-                        )
+                       
+                        # NEW: If we need full probability distributions, get logits too
+                        if store_last_token_probs:
+                           
+                            _, lp_mb, expected_values = self._forward_micro_batch(
+                                micro_inputs, temperature=temperature, calculate_entropy=False, regression=True)
+                        else:
+
+
+                            # Original: just get log probs
+                            _, lp_mb = self._forward_micro_batch(
+                                micro_inputs, temperature=temperature, calculate_entropy=False
+                            )
 
                     # Accumulate per-row sums into mini-batch order via idx_local
                     lp_mb_cpu = lp_mb.detach().to("cpu")
@@ -662,7 +707,17 @@ class JEPOActor(DataParallelPPOActor):
                             logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
                     _inner_pbar.update(bs)
 
+                    # Accumulate per-row sums into mini-batch order via idx_local for expected values
+                    if store_last_token_probs:
+                        expected_values_cpu = expected_values.detach().to("cpu")
+                        for slot, mini_pos in enumerate(idx_local):
+                            L_ans = int(ans_lens_mb[slot])
+                            if L_ans > 0:
+                                expected_values_mini[mini_pos] = float(expected_values_cpu[slot].item())
+                    
+
                 # Append this mini-batch results to the global list in order
+                expected_values_all.extend(expected_values_mini)
                 logp_sum_all.extend(logp_sum_mini)
         _inner_pbar.close()
         try:
@@ -674,7 +729,11 @@ class JEPOActor(DataParallelPPOActor):
         if prev_training:
             self.actor_module.train()
 
-        # ---------------- Stage 2: unchanged advantage/weight computation per UID group ----------------
+        # ---------------- Stage 2: advantage/weight computation per UID group ----------------
+        # NEW: Check if we should use regression-based advantages
+        use_regression_reward = bool(jepo_cfg.get("use_regression_reward", True))
+        digit_token_ids = jepo_cfg.get("digit_token_ids", [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])  # List of token IDs for digits 0-9
+        
         # Build uid groups preserving order of first appearance
         uids = data.non_tensor_batch.get("uid")
         if isinstance(uids, torch.Tensor):
@@ -683,8 +742,26 @@ class JEPOActor(DataParallelPPOActor):
             uids_list = [str(x) for x in (uids.tolist() if hasattr(uids, "tolist") else list(uids))]
 
         ans_logprob_all = torch.as_tensor(logp_sum_all, device=dev, dtype=torch.float32)
+        expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32) if store_last_token_probs else None
         has_delim_src = data.batch.get("has_delimiter")
         has_delim_all = has_delim_src.clone() if isinstance(has_delim_src, torch.Tensor) else torch.as_tensor(has_delim_src, device=dev, dtype=torch.bool)
+
+        # Get ground truth answers for regression reward
+        if use_regression_reward:
+            gt_answers = data.non_tensor_batch.get("reward_model", {})
+            gt_values = []
+            for gt_dict in gt_answers:
+                gt_str = gt_dict.get("ground_truth", "0")
+                try:
+                    # Extract numeric value from ground truth string
+                    # Handle formats like "42", "\\boxed{42}", etc.
+                    import re
+                    numbers = re.findall(r'\d+', str(gt_str))
+                    gt_val = float(numbers[0]) if numbers else 0.0
+                except:
+                    gt_val = 0.0
+                gt_values.append(gt_val)
+            gt_values_tensor = torch.tensor(gt_values, device=dev, dtype=torch.float32)
 
         groups = {}
         order = []
@@ -698,28 +775,113 @@ class JEPOActor(DataParallelPPOActor):
         for u in order:
             idxs = groups[u]
             B = len(idxs)
-            ans_logprob = ans_logprob_all[idxs]
-            # Groupwise math (identical)
-            lse_all = torch.logsumexp(ans_logprob, dim=0)
-            if B > 1:
-                d = ans_logprob - lse_all
-                lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-                v_i = lse_others - math.log(B - 1)
+            
+            if use_regression_reward and store_last_token_probs:
+                expected_values = expected_values_all[idxs]  # [B]
+                # ============ NEW: Regression-based advantage computation ============
+                
+                # Get probability distributions for this group
+                # probs_group = last_token_probs_all[idxs]  # [B, vocab_size]
+                
+                # Default digit token IDs (for typical tokenizers, digits 0-9)
+                # User should configure this based on their tokenizer
+                # if digit_token_ids is None:
+                #     # Attempt to auto-detect (this may not work for all tokenizers)
+                #     digit_token_ids = []
+                #     if self._cached_tokenizer is not None:
+                #         for digit in range(10):
+                #             tok_ids = self._cached_tokenizer.encode(str(digit), add_special_tokens=False)
+                #             if len(tok_ids) == 1:
+                #                 digit_token_ids.append(tok_ids[0])
+                    
+                #     if len(digit_token_ids) != 10:
+                #         # Fallback: use common tokenizer digit token IDs (ordered 0-9)
+                #         # These are typical token IDs from Llama/Mistral-style tokenizers
+                #         print(f"WARNING: Could not auto-detect digit tokens. Using default token IDs for digits 0-9.")
+                #         digit_token_ids = [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783]
+                #         # Corresponds to: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+                
+                # # Compute expected values: E[digit] = sum(p(k) * k) for k=0..9
+                # digit_token_ids_tensor = torch.tensor(digit_token_ids, device=dev, dtype=torch.long)
+                # digit_probs = probs_group[:, digit_token_ids_tensor]  # [B, 10]
+                # digit_values = torch.arange(10, device=dev, dtype=torch.float32)  # [10]
+                
+                # expected_values = (digit_probs * digit_values).sum(dim=1)  # [B]
+                
+                # Get ground truth value for this group
+                gt_value = gt_values_tensor[idxs[0]]  # All samples in group have same GT
+                
+                # Compute rewards: R_i = -(E[digit]_i - y)^2
+                squared_errors = (expected_values - gt_value) ** 2
+                rewards = -squared_errors  # Negative because we want to minimize error
+                
+                # DEBUG: Print regression reward details (only rank 0, first few groups)
+                if _rank == 0:  # Only first 3 groups to avoid spam
+                    print(f"\n[DEBUG Regression] UID: {u}")
+                    print(f"  Group size (B): {B}")
+                    print(f"  Ground truth: {gt_value.item():.2f}")
+                    print(f"  Expected values: {expected_values.cpu().numpy()}")
+                    print(f"  Squared errors: {squared_errors.cpu().numpy()}")
+                    print(f"  Rewards (neg squared errors): {rewards.cpu().numpy()}")
+                    print(f"  Digit probs for first response:")
+                    # for k in range(10):
+                    #     print(f"    P({k}) = {digit_probs[0, k].item():.4f}")
+                    print(f"  E[digit] = {expected_values[0].item():.4f}")
+                
+                # Compute advantages using leave-one-out baseline
+                if B > 1:
+                    # Leave-one-out mean reward
+                    total_reward = rewards.sum()
+                    loo_mean_rewards = (total_reward - rewards) / (B - 1)
+                    A_raw = rewards - loo_mean_rewards
+                else:
+                    # Single sample: no baseline
+                    A_raw = rewards - rewards.mean()  # Zero-centered
+                
+                # Normalize advantages
+                A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
+                A_raw = A_raw.clamp(-1.0, 1.0)
+                
+                # Compute weights based on rewards (higher reward = higher weight)
+                # Use softmax on rewards (not log-probs)
+                # w_full = torch.softmax(rewards, dim=0)
+                w_full = - 2 * (expected_values - gt_value) 
+                
+                # Format advantage based on valid last token (1-5 check)
+                has_delim = has_delim_all[idxs]
+                fmt = torch.where(
+                    has_delim,
+                    torch.zeros(B, device=dev, dtype=torch.float32),
+                    torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
+                )
+                fmt = fmt - fmt.mean()
+                
             else:
-                v_i = ans_logprob.new_full((B,), float("-inf"))
-            log_mean = lse_all - math.log(max(B, 1))
-            A_raw = (log_mean - v_i)
-            A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
-            A_raw = A_raw.clamp(-1.0, 1.0)
+                # ============ ORIGINAL: Log-probability-based advantage computation ============
+                ans_logprob = ans_logprob_all[idxs]
+                
+                # Groupwise math (identical)
+                lse_all = torch.logsumexp(ans_logprob, dim=0)
+                if B > 1:
+                    d = ans_logprob - lse_all
+                    lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+                    v_i = lse_others - math.log(B - 1)
+                else:
+                    v_i = ans_logprob.new_full((B,), float("-inf"))
+                log_mean = lse_all - math.log(max(B, 1))
+                
+                A_raw = (log_mean - v_i)
+                A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
+                A_raw = A_raw.clamp(-1.0, 1.0)
 
-            has_delim = has_delim_all[idxs]
-            fmt = torch.where(
-                has_delim,
-                torch.zeros(B, device=dev, dtype=torch.float32),
-                torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
-            )
-            fmt = fmt - fmt.mean()
-            w_full = torch.softmax(ans_logprob, dim=0)
+                has_delim = has_delim_all[idxs]
+                fmt = torch.where(
+                    has_delim,
+                    torch.zeros(B, device=dev, dtype=torch.float32),
+                    torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
+                )
+                fmt = fmt - fmt.mean()
+                w_full = torch.softmax(ans_logprob, dim=0)
 
             jepo_adv_raw[idxs] = A_raw
             format_adv[idxs] = fmt
@@ -733,4 +895,27 @@ class JEPOActor(DataParallelPPOActor):
         data.batch["format_adv"] = format_adv
         data.batch["jepo_weights"] = jepo_weights
         data.batch["has_delimiter"] = has_delim_all
+        
+        # NEW: Write back last token probabilities if collected
+        if store_last_token_probs and last_token_probs_all is not None:
+            data.batch["last_token_probs"] = last_token_probs_all
+            if _rank == 0:
+                print(f"\n[DEBUG Summary] Stored last_token_probs with shape: {last_token_probs_all.shape}")
+        
+        # DEBUG: Print precompute summary statistics
+        if _rank == 0:
+            print(f"\n[DEBUG Precompute Summary]")
+            print(f"  Total responses (N): {N}")
+            print(f"  Total unique prompts: {len(order)}")
+            print(f"  Use regression reward: {use_regression_reward}")
+            print(f"  Store last token probs: {store_last_token_probs}")
+            print(f"  JEPO advantages - mean: {jepo_adv_raw.mean().item():.4f}, std: {jepo_adv_raw.std().item():.4f}")
+            print(f"  Format advantages - mean: {format_adv.mean().item():.4f}, std: {format_adv.std().item():.4f}")
+            print(f"  Has delimiter (valid format) - count: {has_delim_all.sum().item()}/{N} ({100*has_delim_all.float().mean().item():.1f}%)")
+            if use_regression_reward:
+                print(f"  Weights - min: {jepo_weights.min().item():.4f}, max: {jepo_weights.max().item():.4f}, mean: {jepo_weights.mean().item():.4f}")
+        
         return data
+
+    
+

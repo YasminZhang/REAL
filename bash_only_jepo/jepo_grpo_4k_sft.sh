@@ -3,26 +3,26 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="GRPO-BASE-TRACT${1}"
+exp_name="GRPO-SFT-TRACT${1}"
 
 adv_estimator=grpo
 
 lr=1e-7
 use_kl_in_reward=False
-kl_coef=0.001
+kl_coef=0.01
 use_kl_loss=True
-kl_loss_coef=0.001
+kl_loss_coef=0.01
 
 clip_ratio_low=0.2
 clip_ratio_high=0.2
 
-max_prompt_length=1024
-max_response_length=4096
-enable_overlong_buffer=False
-overlong_buffer_len=4096
+max_prompt_length=2048
+max_response_length=2048
+enable_overlong_buffer=True
+overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
-loss_agg_mode="seq-mean-token-mean"
+loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
 train_prompt_bsz=64
@@ -60,15 +60,14 @@ NNODES=1
 NGPUS_PER_NODE=4
 
 # Use 1.5B model
-# MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/GRPO-BASE-TRACT1/global_step_840/actor_hf"
+MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=data/feedback_collection_for_base/train.parquet
-TEST_FILE=data/feedback_bench_for_base/train.parquet
+TRAIN_FILE=data/feedback_collection_for_sft/train.parquet
+TEST_FILE=data/feedback_bench_for_sft/train.parquet
 
 # Algorithm
 temperature=0.6
-top_p=1.0
+top_p=0.95
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=1.0
 
@@ -82,7 +81,7 @@ gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 # Use JEPO-DAPO recipe
-CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \

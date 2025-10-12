@@ -97,3 +97,9 @@ The necessary features under development for scaling up are
     - more efficient and general weight resharding and loading
 3. Offline weights conversion
     - support weights larger than single GPU memory
+
+
+python -m verl.model_merger merge \
+    --backend fsdp \
+    --local_dir /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/GRPO-BASE-TRACT1/global_step_840/actor \
+    --target_dir /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/GRPO-BASE-TRACT1/global_step_840/actor_hf

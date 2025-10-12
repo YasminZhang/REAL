@@ -518,16 +518,17 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                             metrics.update(actor_output_metrics)
 
-                    # Perform JEPO training when frequency is hit
-                    frequency_met = self.global_steps % self.jepo_update_frequency == 0
-                    if (self.use_jepo and all_incorrect_batch is not None and frequency_met):
-                        jepo_metrics = self._run_jepo_training(all_incorrect_batch)
-                        metrics.update(jepo_metrics)
-                        print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
-                        all_incorrect_batch = None # clear the jepo batch
-                        num_prompt_in_jepo_buffer = 0
-                        if jepo_metrics:
-                            print(f"JEPO training completed with metrics: {jepo_metrics}")
+                    # TODO: Skip this part for now
+                    # # Perform JEPO training when frequency is hit
+                    # frequency_met = self.global_steps % self.jepo_update_frequency == 0
+                    # if (self.use_jepo and all_incorrect_batch is not None and frequency_met):
+                    #     jepo_metrics = self._run_jepo_training(all_incorrect_batch)
+                    #     metrics.update(jepo_metrics)
+                    #     print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
+                    #     all_incorrect_batch = None # clear the jepo batch
+                    #     num_prompt_in_jepo_buffer = 0
+                    #     if jepo_metrics:
+                    #         print(f"JEPO training completed with metrics: {jepo_metrics}")
 
                     # validation
                     if (

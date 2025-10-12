@@ -88,13 +88,14 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False
+        self, micro_batch, temperature, calculate_entropy=False, regression=False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
         """
+        expected_values = None
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():
@@ -200,6 +201,32 @@ class DataParallelPPOActor(BasePPOActor):
                         inplace_backward=inplace_backward,
                     )
 
+                    if regression:
+                        # Get digit token IDs (default for Llama/Mistral tokenizers)
+                        digit_token_ids = getattr(self.config, 'digit_token_ids', 
+                                                   [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])
+                        digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits.device, dtype=torch.long)
+                        
+                        # Get probabilities for last token position
+                        last_token_logits = logits[:, -1, :]  # (bsz, vocab_size)
+                        last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
+                        
+                        # Extract probabilities for digit tokens 0-9
+                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 10)
+                        digit_values = torch.arange(10, device=logits.device, dtype=torch.float32)  # [0,1,2,...,9]
+                        
+                        # Compute expected value: E[digit] = Σ p(k) * k
+                        expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
+                        
+                        # Replace last token's log-prob with expected value
+                        # Note: This mixes log-probs (for CoT) with expected values (for last token)
+                        log_probs[:, -1] = expected_values
+
+                        # print when running rank 0
+                        if torch.distributed.get_rank() == 0:
+                            print("Replaced last token log-probs with expected digit values.")
+                            print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
+
                     # compute entropy
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
@@ -269,14 +296,49 @@ class DataParallelPPOActor(BasePPOActor):
 
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                    
+                    # NEW: Replace last token's log-prob with expected value over digits 0-9
+                    # Check if we should use regression-based expected value for last token
+                    # Initialize expected_values to None by default
+                    
+                     
+                    if regression and response_length > 0:
+                        # Get digit token IDs (default for Llama/Mistral tokenizers)
+                        digit_token_ids = getattr(self.config, 'digit_token_ids', 
+                                                   [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])
+                        digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits.device, dtype=torch.long)
+                        
+                        # Get probabilities for last token position
+                        last_token_logits = logits[:, -1, :]  # (bsz, vocab_size)
+                        last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
+                        
+                        # Extract probabilities for digit tokens 0-9
+                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 10)
+                        digit_values = torch.arange(10, device=logits.device, dtype=torch.float32)  # [0,1,2,...,9]
+                        
+                        # Compute expected value: E[digit] = Σ p(k) * k
+                        expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
+                        
+                        # Replace last token's log-prob with expected value
+                        # Note: This mixes log-probs (for CoT) with expected values (for last token)
+                        log_probs[:, -1] = expected_values
+
+                        # print when running rank 0
+                        if torch.distributed.get_rank() == 0:
+                            print("Replaced last token log-probs with expected digit values.")
+                            print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
+
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
                         else:
                             entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
-
-            return entropy, log_probs
+            if not regression:
+                return entropy, log_probs
+            else:
+                return entropy, log_probs, expected_values
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None

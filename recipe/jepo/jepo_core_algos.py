@@ -293,6 +293,194 @@ def build_jepo_batches_by_prompt(
     return data_dicts
 
 
+def build_jepo_teacher_forced_batch_last_token(
+    response_tokens: torch.Tensor,
+    prompt_tokens: torch.Tensor,
+    ground_truth_answer_tokens: np.ndarray,
+    answer_token_length: int,
+    device: torch.device,
+    pad_token: int,
+    tokenizer,
+):
+    """
+    Build teacher-forced batch using LAST token position instead of delimiter.
+    
+    Args:
+        response_tokens: [n, max_response_length] generated response tokens
+        prompt_tokens: [n, max_prompt_length] prompt tokens
+        ground_truth_answer_tokens: [n] array of ground truth token lists
+        answer_token_length: Number of tokens from end to treat as answer
+        device: Target device
+        pad_token: Padding token ID
+        tokenizer: Tokenizer instance
+        
+    Returns:
+        Dictionary with batch data for teacher forcing
+    """
+    n = response_tokens.size(0)
+    max_response_length = response_tokens.size(1)
+    
+    gt_list: List[List[int]] = [
+        list(x) if isinstance(x, (list, tuple)) else list(x.tolist()) 
+        for x in ground_truth_answer_tokens
+    ]
+    
+    # Validate pad token id
+    if pad_token is None:
+        raise ValueError("pad_token_id is required but missing (None)")
+    
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    
+    has_delimiter: List[bool] = []
+    cot_tokens_list: List[List[int]] = []
+    answer_start_positions: List[int] = []
+    cot_start_positions: List[int] = []
+    batch_input_tokens: List[torch.Tensor] = []
+    
+    for i in range(n):
+        resp_i = response_tokens[i].detach().clone()
+        prompt_i = prompt_tokens[i] if isinstance(prompt_tokens, torch.Tensor) else torch.tensor(prompt_tokens[i], device=device)
+        prompt_i = prompt_i.to(device=device, dtype=torch.long)
+        
+        # Find last valid (non-pad, non-eos) token position in response
+        valid_mask = (resp_i != pad_token)
+        if eos_id is not None:
+            valid_mask = valid_mask & (resp_i != eos_id)
+        
+        valid_positions = torch.where(valid_mask)[0]
+        
+        if len(valid_positions) == 0:
+            # No valid tokens - mark as no delimiter and use empty CoT
+            has_delimiter.append(False)
+            cot_tokens_list.append([])
+            cot_start_positions.append(len(prompt_i))
+            answer_start_positions.append(len(prompt_i))
+            # Create minimal sequence
+            batch_input_tokens.append(prompt_i)
+            continue
+        
+        last_valid_pos = int(valid_positions[-1].item())
+        
+        # Answer region: last answer_token_length tokens (or all if shorter)
+        answer_start_in_resp = max(0, last_valid_pos - answer_token_length + 1)
+        
+        # CoT is everything before the answer region
+        cot_ids = resp_i[:answer_start_in_resp].tolist()
+        # Remove padding from CoT
+        cot_ids = [t for t in cot_ids if t != pad_token and (eos_id is None or t != eos_id)]
+        
+        # Check if last valid token is a valid digit (1-5)
+        # Default digit token IDs for Llama/Mistral: [28705, 28740, 28750, 28770, 28781]
+        # This corresponds to digits [1, 2, 3, 4, 5]
+        valid_digit_tokens = [28705, 28740, 28750, 28770, 28781]  # Tokens for 1,2,3,4,5
+        last_token_id = int(resp_i[last_valid_pos].item())
+        has_valid_format = last_token_id in valid_digit_tokens
+        
+        has_delimiter.append(has_valid_format)
+        cot_tokens_list.append(cot_ids)
+        
+        # Build full sequence: [prompt][CoT][GT_answer]
+        cot_tensor = torch.tensor(cot_ids, device=device, dtype=torch.long) if cot_ids else torch.tensor([], device=device, dtype=torch.long)
+        gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
+        
+        full = torch.cat([prompt_i, cot_tensor, gt_i], dim=0)
+        
+        batch_input_tokens.append(full)
+        cot_start_positions.append(len(prompt_i))
+        answer_start_positions.append(len(prompt_i) + len(cot_ids))
+    
+    # Pad all sequences to same length
+    max_len = max(int(t.numel()) for t in batch_input_tokens) if batch_input_tokens else 0
+    padded_tokens: List[torch.Tensor] = []
+    attention_masks: List[List[int]] = []
+    
+    for t in batch_input_tokens:
+        pad_len = max_len - int(t.numel())
+        if pad_len > 0:
+            padding = torch.full((pad_len,), pad_token, dtype=torch.long, device=device)
+            padded = torch.cat([t, padding], dim=0)
+        else:
+            padded = t
+        
+        # Build attention mask (mask out pad and eos)
+        mask_t = torch.ones_like(padded, dtype=torch.long, device=device)
+        mask_t = mask_t * (padded != pad_token).long()
+        if eos_id is not None:
+            mask_t = mask_t * (padded != eos_id).long()
+        
+        padded_tokens.append(padded)
+        attention_masks.append(mask_t.tolist())
+    
+    batch_input_ids = (
+        torch.stack(padded_tokens).to(dtype=torch.long, device=device)
+        if padded_tokens
+        else torch.empty((0, 0), dtype=torch.long, device=device)
+    )
+    attention_mask = (
+        torch.tensor(attention_masks, dtype=torch.long, device=device)
+        if attention_masks
+        else torch.empty((0, 0), dtype=torch.long, device=device)
+    )
+    
+    # Derive position_ids from attention_mask
+    if max_len > 0:
+        position_ids = (attention_mask.cumsum(dim=1) - 1).clamp_min(0) * attention_mask
+    else:
+        position_ids = torch.empty((n, 0), dtype=torch.long, device=device)
+    
+    return {
+        'batch_input_ids': batch_input_ids,
+        'attention_mask': attention_mask,
+        'position_ids': position_ids,
+        'cot_start_positions': cot_start_positions,
+        'answer_start_positions': answer_start_positions,
+        'cot_tokens_list': cot_tokens_list,
+        'ground_truth_answer_tokens': gt_list,
+        'has_delimiter': has_delimiter,
+        'delimiter_match_kind': ['last_token'] * n,
+        'max_len': max_len
+    }
+
+
+def build_jepo_batches_by_prompt_last_token(
+    response_tokens,
+    prompt_tokens,
+    ground_truth_answer_tokens,
+    answer_token_length,
+    device,
+    pad_token,
+    index,
+    tokenizer,
+):
+    """Build JEPO batches grouped by prompt UID using last token position."""
+    uuid = np.unique(index)
+    data_dicts = []
+    
+    for uid in uuid:
+        uid_mask = (index == uid)
+        response_tokens_uid = response_tokens[uid_mask]
+        prompt_tokens_uid = prompt_tokens[uid_mask]
+        ground_truth_answer_tokens_uid = ground_truth_answer_tokens[uid_mask]
+        
+        if len(response_tokens_uid) == 0:
+            continue
+        
+        data_dict = build_jepo_teacher_forced_batch_last_token(
+            response_tokens=response_tokens_uid,
+            prompt_tokens=prompt_tokens_uid,
+            ground_truth_answer_tokens=ground_truth_answer_tokens_uid,
+            answer_token_length=answer_token_length,
+            device=device,
+            pad_token=pad_token,
+            tokenizer=tokenizer,
+        )
+        
+        data_dicts.append(data_dict)
+    
+    return data_dicts
+
+
+
 
 @torch.no_grad()
 def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
@@ -313,11 +501,17 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
     temperature = float(data.meta_info["temperature"])
     # dynamic chunking is used downstream; no fixed responses_micro_batch_size
+    
+    # NEW: Option to use last token position instead of delimiter
+    use_last_token_as_answer = bool(jepo_cfg.get("use_last_token_as_answer", False))
+    answer_token_length = int(jepo_cfg.get("answer_token_length", 1))  # How many tokens to treat as answer
+    
     delimiter = jepo_cfg.get("delimiter", "\n\n")
     # Configurable suffix-anchor matching for delimiters
     use_suffix_anchor = bool(jepo_cfg.get("delimiter_suffix_anchor", True))
     suffix_min_len = int(jepo_cfg.get("delimiter_suffix_min_len", 2))
     
+        
     # Prepare model inputs
     model_inputs = {**data.batch, **data.non_tensor_batch}
     ground_truths = model_inputs.get("reward_model", {})
@@ -326,21 +520,36 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
         dtype=object,
     )
     pad_token = cached_tokenizer.pad_token_id
+    
     # Build teacher-forced batches per question
-    data_dicts = build_jepo_batches_by_prompt(
-        response_tokens=data.batch["responses"],
-        prompt_tokens=data.batch["prompts"],
-        ground_truth_answer_tokens=ground_truths_tokens,
-        delimiter_str=delimiter,
-        format_penalty=format_penalty,
-        model=model,
-        device=(next(model.parameters()).device),
-        pad_token=pad_token,
-        index=data.non_tensor_batch["uid"],
-        tokenizer=cached_tokenizer,
-        delimiter_suffix_anchor=use_suffix_anchor,
-        delimiter_suffix_min_len=suffix_min_len,
-    )
+    if use_last_token_as_answer:
+        # NEW: Use last token position instead of delimiter
+        data_dicts = build_jepo_batches_by_prompt_last_token(
+            response_tokens=data.batch["responses"],
+            prompt_tokens=data.batch["prompts"],
+            ground_truth_answer_tokens=ground_truths_tokens,
+            answer_token_length=answer_token_length,
+            device=(next(model.parameters()).device),
+            pad_token=pad_token,
+            index=data.non_tensor_batch["uid"],
+            tokenizer=cached_tokenizer,
+        )
+    else:
+        # Original: Use delimiter-based approach
+        data_dicts = build_jepo_batches_by_prompt(
+            response_tokens=data.batch["responses"],
+            prompt_tokens=data.batch["prompts"],
+            ground_truth_answer_tokens=ground_truths_tokens,
+            delimiter_str=delimiter,
+            format_penalty=format_penalty,
+            model=model,
+            device=(next(model.parameters()).device),
+            pad_token=pad_token,
+            index=data.non_tensor_batch["uid"],
+            tokenizer=cached_tokenizer,
+            delimiter_suffix_anchor=use_suffix_anchor,
+            delimiter_suffix_min_len=suffix_min_len,
+        )
     # Only attach per-question teacher-forced packs; JEPO actor computes A/w later using VERL internals
     data.non_tensor_batch["jepo_data_dicts"] = data_dicts
     # Flatten teacher-forced fields into top-level batch for per-response slicing in the JEPO actor
