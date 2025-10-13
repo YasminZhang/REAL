@@ -22,6 +22,7 @@ sys.path.append('/home/aiscuser/jepo/recipe/jepo')
 
 import logging
 import os
+import ray
 
 import torch
 from torch import nn
@@ -120,7 +121,7 @@ class JEPOActor(DataParallelPPOActor):
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
-        store_last_token_probs = bool(jepo_cfg.get("store_last_token_probs", False))
+        
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
 

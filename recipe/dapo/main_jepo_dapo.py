@@ -27,6 +27,11 @@ from verl.utils.device import is_cuda_available
 
 from recipe.dapo.jepo_dapo_ray_trainer import RayJEPODAPOTrainer
 
+ray.init(
+    runtime_env={
+        "env_vars": {"RAY_DEBUG_POST_MORTEM": "1"},
+    }
+)
 
 @hydra.main(config_path="/home/aiscuser/jepo/recipe/dapo/config", config_name="jepo_dapo_trainer", version_base=None)
 def main(config):

@@ -202,30 +202,81 @@ class DataParallelPPOActor(BasePPOActor):
                     )
 
                     if regression:
+                        # For regression with remove_padding, find last token WITHOUT padding back
+                        # This avoids the memory overhead of pad_input
+                        
                         # Get digit token IDs (default for Llama/Mistral tokenizers)
                         digit_token_ids = getattr(self.config, 'digit_token_ids', 
-                                                   [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])
-                        digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits.device, dtype=torch.long)
+                                                   [28734, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783, 28774])
+                        digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits_rmpad.device, dtype=torch.long)
                         
-                        # Get probabilities for last token position
-                        last_token_logits = logits[:, -1, :]  # (bsz, vocab_size)
+                        # Find the actual last token position for each sample using attention mask
+                        # attention_mask: (bsz, seqlen), 1 for valid tokens, 0 for padding
+                        valid_lengths = seqlen - attention_mask.sum(dim=1)  # (bsz,)
+                        last_token_positions = valid_lengths - 1  # Last valid position (0-indexed) in original sequence
+                        
+                        # Now map from original positions to rmpad indices
+                        # indices: (total_nnz,) - maps from rmpad position to original (flattened) position
+                        # We need the reverse: find which rmpad position corresponds to our last token
+                        
+                        # Flatten the original (batch, seq) positions
+                        batch_indices = torch.arange(batch_size, device=logits_rmpad.device)
+                        original_positions = batch_indices * seqlen + last_token_positions  # (bsz,) - flattened positions
+                        
+                        # Vectorized search: for each original position, find its index in the rmpad tensor
+                        # Create a mapping from original position to rmpad index
+                        # Since indices can be very large, we use a more efficient approach
+                        rmpad_positions = torch.zeros(batch_size, device=logits_rmpad.device, dtype=torch.long)
+                        
+                        for i, orig_pos in enumerate(original_positions):
+                            # Find where this original position is in the rmpad tensor
+                            mask = (indices == orig_pos)
+                            rmpad_idx = mask.nonzero(as_tuple=True)[0]
+                            
+                            if len(rmpad_idx) > 0:
+                                rmpad_positions[i] = rmpad_idx[0]
+                            else:
+                                # Fallback: this position was padding, shouldn't happen
+                                # Use a safe default (first position of this batch member's tokens)
+                                # Find first token of this batch member
+                                batch_start = i * seqlen
+                                batch_end = (i + 1) * seqlen
+                                batch_mask = (indices >= batch_start) & (indices < batch_end)
+                                batch_rmpad_indices = batch_mask.nonzero(as_tuple=True)[0]
+                                if len(batch_rmpad_indices) > 0:
+                                    # Use last token of this batch member in rmpad
+                                    rmpad_positions[i] = batch_rmpad_indices[-1]
+                                else:
+                                    # Ultimate fallback: just use index 0 (shouldn't happen)
+                                    rmpad_positions[i] = 0
+                                
+                                if torch.distributed.get_rank() == 0:
+                                    print(f"WARNING: Could not find original position {orig_pos.item()} in rmpad indices for sample {i}")
+                        
+                        # Clamp positions to valid range to avoid out-of-bounds
+                        rmpad_positions = rmpad_positions.clamp(0, logits_rmpad.shape[0] - 1)
+                        
+                        # Extract logits for the last valid token of each sample from rmpad format
+                        # logits_rmpad: (total_nnz, vocab_size)
+                        last_token_logits = logits_rmpad[rmpad_positions, :]  # (bsz, vocab_size)
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
                         
                         # Extract probabilities for digit tokens 0-9
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 10)
-                        digit_values = torch.arange(10, device=logits.device, dtype=torch.float32)  # [0,1,2,...,9]
+                        digit_values = torch.arange(10, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,9]
                         
                         # Compute expected value: E[digit] = Σ p(k) * k
                         expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
                         
-                        # Replace last token's log-prob with expected value
-                        # Note: This mixes log-probs (for CoT) with expected values (for last token)
-                        log_probs[:, -1] = expected_values
-
                         # print when running rank 0
                         if torch.distributed.get_rank() == 0:
-                            print("Replaced last token log-probs with expected digit values.")
+                            print("[rmpad branch] Computed expected digit values for last token (no padding).")
+                            print(f"Valid lengths (first 5): {valid_lengths[:5].cpu().numpy()}")
+                            print(f"Last token positions in original seq (first 5): {last_token_positions[:5].cpu().numpy()}")
+                            print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
+
+                        breakpoint()
 
                     # compute entropy
                     if calculate_entropy:
@@ -272,6 +323,13 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
+                # Replace the real last token's log-prob using valid_length with expected value if regression
+                if regression and response_length > 0:
+                    pass
+                    # log_probs[:, last_token_positions] = expected_values
+                
+                
+
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
                 if self.use_fused_kernels:
@@ -301,17 +359,27 @@ class DataParallelPPOActor(BasePPOActor):
                     
                     # NEW: Replace last token's log-prob with expected value over digits 0-9
                     # Check if we should use regression-based expected value for last token
-                    # Initialize expected_values to None by default
                     
-                     
                     if regression and response_length > 0:
                         # Get digit token IDs (default for Llama/Mistral tokenizers)
                         digit_token_ids = getattr(self.config, 'digit_token_ids', 
                                                    [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits.device, dtype=torch.long)
                         
-                        # Get probabilities for last token position
-                        last_token_logits = logits[:, -1, :]  # (bsz, vocab_size)
+                        # Find the actual last token position for each sample using attention mask
+                        # Note: logits is already sliced to response part: [:, -response_length - 1 : -1, :]
+                        # We need to work with the full sequence attention mask
+                        # attention_mask: (bsz, seqlen), 1 for valid tokens, 0 for padding
+                        valid_lengths = attention_mask.sum(dim=1)  # (bsz,) - total valid length
+                        
+                        # Get the full sequence logits (before slicing)
+                        full_logits = output.logits  # (bsz, seqlen, vocab_size)
+                        full_logits.div_(temperature)
+                        
+                        # Get logits for the last valid token of each sample
+                        batch_indices = torch.arange(batch_size, device=full_logits.device)
+                        last_token_positions = valid_lengths - 1  # Last valid position (0-indexed)
+                        last_token_logits = full_logits[batch_indices, last_token_positions, :]  # (bsz, vocab_size)
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
                         
                         # Extract probabilities for digit tokens 0-9
@@ -323,11 +391,14 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Replace last token's log-prob with expected value
                         # Note: This mixes log-probs (for CoT) with expected values (for last token)
-                        log_probs[:, -1] = expected_values
+                        
+                        log_probs[:, last_token_positions] = expected_values
 
                         # print when running rank 0
                         if torch.distributed.get_rank() == 0:
-                            print("Replaced last token log-probs with expected digit values.")
+                            print("[non-rmpad branch] Replaced last token log-probs with expected digit values.")
+                            print(f"Valid lengths (first 5): {valid_lengths[:5].cpu().numpy()}")
+                            print(f"Last token positions (first 5): {last_token_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
 
                     if calculate_entropy:
