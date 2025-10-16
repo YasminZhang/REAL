@@ -327,8 +327,10 @@ class JEPOActor(DataParallelPPOActor):
                         "responses": resp_pack,
                     }
                     calculate_entropy = entropy_coeff != 0
-                    entropy_tok, lp_combined = self._forward_micro_batch(
-                        micro, temperature=temperature, calculate_entropy=calculate_entropy
+
+                    
+                    entropy_tok, lp_combined, _ = self._forward_micro_batch(
+                        micro, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, expected_prob_replace=True,
                     )
                     
                  

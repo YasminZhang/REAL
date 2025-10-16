@@ -88,7 +88,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False, regression=False,
+        self, micro_batch, temperature, calculate_entropy=False, regression=False, expected_prob_replace=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -212,7 +212,7 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Find the actual last token position for each sample using attention mask
                         # attention_mask: (bsz, seqlen), 1 for valid tokens, 0 for padding
-                        valid_lengths = seqlen - attention_mask.sum(dim=1)  # (bsz,)
+                        valid_lengths = attention_mask.sum(dim=1)  # (bsz,)
                         last_token_positions = valid_lengths - 1  # Last valid position (0-indexed) in original sequence
                         
                         # Now map from original positions to rmpad indices
@@ -263,7 +263,7 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Extract probabilities for digit tokens 0-9
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 10)
-                        digit_values = torch.arange(10, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,9]
+                        digit_values = torch.arange(10, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,9] or [1,2,3,4,5]
                         
                         # Compute expected value: E[digit] = Σ p(k) * k
                         expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
@@ -276,7 +276,7 @@ class DataParallelPPOActor(BasePPOActor):
                             print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
 
-                        breakpoint()
+                        
 
                     # compute entropy
                     if calculate_entropy:
@@ -318,18 +318,22 @@ class DataParallelPPOActor(BasePPOActor):
                     seqlen=seqlen,
                 )
 
+                breakpoint()
+                # Replace the real last token's log-prob using expected value over digits 0-9
+                if expected_prob_replace:
+                    full_log_probs[:, last_token_positions] = expected_values
+
+                breakpoint()
+
                 # only return response part:
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
-                # Replace the real last token's log-prob using valid_length with expected value if regression
-                if regression and response_length > 0:
-                    pass
-                    # log_probs[:, last_token_positions] = expected_values
                 
                 
-
+                
+            ################## The Else branch not used in current implementation ##################
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
                 if self.use_fused_kernels:
@@ -406,6 +410,7 @@ class DataParallelPPOActor(BasePPOActor):
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
                         else:
                             entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+
             if not regression:
                 return entropy, log_probs
             else:

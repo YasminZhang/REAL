@@ -182,6 +182,7 @@ def build_jepo_teacher_forced_batch(
 
         batch_input_tokens.append(full)
         cot_start_positions.append(len(prompt_i))
+        # TODO: the gt_list = An empty space + score, and delimiter_str = 'So the overall score is', no empty space, so answer starts after the empty space
         answer_start_positions.append(len(left_plus_delim))
 
     # Validate pad token id
@@ -224,6 +225,8 @@ def build_jepo_teacher_forced_batch(
         position_ids = (attention_mask.cumsum(dim=1) - 1).clamp_min(0) * attention_mask
     else:
         position_ids = torch.empty((n, 0), dtype=torch.long, device=device)
+
+ 
 
     return {
         'batch_input_ids': batch_input_ids,
@@ -506,7 +509,7 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     use_last_token_as_answer = bool(jepo_cfg.get("use_last_token_as_answer", False))
     answer_token_length = int(jepo_cfg.get("answer_token_length", 1))  # How many tokens to treat as answer
     
-    delimiter = jepo_cfg.get("delimiter", "\n\n")
+    delimiter = jepo_cfg.get("delimiter", " So the overall score is ")
     # Configurable suffix-anchor matching for delimiters
     use_suffix_anchor = bool(jepo_cfg.get("delimiter_suffix_anchor", True))
     suffix_min_len = int(jepo_cfg.get("delimiter_suffix_min_len", 2))
@@ -522,34 +525,34 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     pad_token = cached_tokenizer.pad_token_id
     
     # Build teacher-forced batches per question
-    if use_last_token_as_answer:
-        # NEW: Use last token position instead of delimiter
-        data_dicts = build_jepo_batches_by_prompt_last_token(
-            response_tokens=data.batch["responses"],
-            prompt_tokens=data.batch["prompts"],
-            ground_truth_answer_tokens=ground_truths_tokens,
-            answer_token_length=answer_token_length,
-            device=(next(model.parameters()).device),
-            pad_token=pad_token,
-            index=data.non_tensor_batch["uid"],
-            tokenizer=cached_tokenizer,
-        )
-    else:
+    # if use_last_token_as_answer:
+    #     # NEW: Use last token position instead of delimiter
+    #     data_dicts = build_jepo_batches_by_prompt_last_token(
+    #         response_tokens=data.batch["responses"],
+    #         prompt_tokens=data.batch["prompts"],
+    #         ground_truth_answer_tokens=ground_truths_tokens,
+    #         answer_token_length=answer_token_length,
+    #         device=(next(model.parameters()).device),
+    #         pad_token=pad_token,
+    #         index=data.non_tensor_batch["uid"],
+    #         tokenizer=cached_tokenizer,
+    #     )
+    # else:
         # Original: Use delimiter-based approach
-        data_dicts = build_jepo_batches_by_prompt(
-            response_tokens=data.batch["responses"],
-            prompt_tokens=data.batch["prompts"],
-            ground_truth_answer_tokens=ground_truths_tokens,
-            delimiter_str=delimiter,
-            format_penalty=format_penalty,
-            model=model,
-            device=(next(model.parameters()).device),
-            pad_token=pad_token,
-            index=data.non_tensor_batch["uid"],
-            tokenizer=cached_tokenizer,
-            delimiter_suffix_anchor=use_suffix_anchor,
-            delimiter_suffix_min_len=suffix_min_len,
-        )
+    data_dicts = build_jepo_batches_by_prompt(
+        response_tokens=data.batch["responses"],
+        prompt_tokens=data.batch["prompts"],
+        ground_truth_answer_tokens=ground_truths_tokens,
+        delimiter_str=delimiter,
+        format_penalty=format_penalty,
+        model=model,
+        device=(next(model.parameters()).device),
+        pad_token=pad_token,
+        index=data.non_tensor_batch["uid"],
+        tokenizer=cached_tokenizer,
+        delimiter_suffix_anchor=use_suffix_anchor,
+        delimiter_suffix_min_len=suffix_min_len,
+    )
     # Only attach per-question teacher-forced packs; JEPO actor computes A/w later using VERL internals
     data.non_tensor_batch["jepo_data_dicts"] = data_dicts
     # Flatten teacher-forced fields into top-level batch for per-response slicing in the JEPO actor

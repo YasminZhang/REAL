@@ -25,9 +25,9 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=64
-n_resp_per_prompt=8
-train_prompt_mini_bsz=8
+train_prompt_bsz=8
+n_resp_per_prompt=4
+train_prompt_mini_bsz=2
 
 # DAPO
 # don't do filter.
@@ -38,19 +38,19 @@ max_num_gen_batches=10
 # JEPO specific parameters
 use_jepo=True
 use_grpo=False
-jepo_delimiter="\\boxed\{"
+jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 jepo_beta_supp=0.001
 jepo_beta_kl=0.0
 jepo_entropy_coeff=0.0
-jepo_buffer_size=64 # number of questions
+jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=3
 jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-jepo_mini_batch_size_per_gpu=32 # responses per gpu
-jepo_micro_batch_size_per_gpu=16 # responses per gpu
+jepo_mini_batch_size_per_gpu=4 # responses per gpu
+jepo_micro_batch_size_per_gpu=2 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored
@@ -109,7 +109,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
     +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
-    +algorithm.jepo_delimiter_suffix_anchor=True \
+    +algorithm.jepo_delimiter_suffix_anchor=False \
     +algorithm.jepo_delimiter_suffix_min_len=2 \
     +algorithm.jepo_accum_steps=${jepo_accum_steps} \
     +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
