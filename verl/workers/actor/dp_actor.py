@@ -213,7 +213,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # Find the actual last token position for each sample using attention mask
                         # attention_mask: (bsz, seqlen), 1 for valid tokens, 0 for padding
                         valid_lengths = attention_mask.sum(dim=1)  # (bsz,)
-                        last_token_positions = valid_lengths - 1  # Last valid position (0-indexed) in original sequence
+                        
                         
                         # Now map from original positions to rmpad indices
                         # indices: (total_nnz,) - maps from rmpad position to original (flattened) position
@@ -221,41 +221,19 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Flatten the original (batch, seq) positions
                         batch_indices = torch.arange(batch_size, device=logits_rmpad.device)
-                        original_positions = batch_indices * seqlen + last_token_positions  # (bsz,) - flattened positions
-                        
                         # Vectorized search: for each original position, find its index in the rmpad tensor
                         # Create a mapping from original position to rmpad index
                         # Since indices can be very large, we use a more efficient approach
-                        rmpad_positions = torch.zeros(batch_size, device=logits_rmpad.device, dtype=torch.long)
                         
-                        for i, orig_pos in enumerate(original_positions):
-                            # Find where this original position is in the rmpad tensor
-                            mask = (indices == orig_pos)
-                            rmpad_idx = mask.nonzero(as_tuple=True)[0]
-                            
-                            if len(rmpad_idx) > 0:
-                                rmpad_positions[i] = rmpad_idx[0]
-                            else:
-                                # Fallback: this position was padding, shouldn't happen
-                                # Use a safe default (first position of this batch member's tokens)
-                                # Find first token of this batch member
-                                batch_start = i * seqlen
-                                batch_end = (i + 1) * seqlen
-                                batch_mask = (indices >= batch_start) & (indices < batch_end)
-                                batch_rmpad_indices = batch_mask.nonzero(as_tuple=True)[0]
-                                if len(batch_rmpad_indices) > 0:
-                                    # Use last token of this batch member in rmpad
-                                    rmpad_positions[i] = batch_rmpad_indices[-1]
-                                else:
-                                    # Ultimate fallback: just use index 0 (shouldn't happen)
-                                    rmpad_positions[i] = 0
-                                
-                                if torch.distributed.get_rank() == 0:
-                                    print(f"WARNING: Could not find original position {orig_pos.item()} in rmpad indices for sample {i}")
+                        # rmpad_positions will be the cumsum of valid lengths minus 2, one position shifted for 0-indexing, one for next token prediction
+                        rmpad_positions = torch.cumsum(valid_lengths, dim=0) - 2
                         
-                        # Clamp positions to valid range to avoid out-of-bounds
-                        rmpad_positions = rmpad_positions.clamp(0, logits_rmpad.shape[0] - 1)
-                        
+                        # Get indices of last 1 in each batch
+                        # Flip along the sequence dimension, find first 1 from the end
+                        last_token_positions = attention_mask.size(1) - 1 - torch.argmax(attention_mask.flip(dims=[1]), dim=1) - 1 
+
+
+
                         # Extract logits for the last valid token of each sample from rmpad format
                         # logits_rmpad: (total_nnz, vocab_size)
                         last_token_logits = logits_rmpad[rmpad_positions, :]  # (bsz, vocab_size)
@@ -275,6 +253,8 @@ class DataParallelPPOActor(BasePPOActor):
                             print(f"Last token positions in original seq (first 5): {last_token_positions[:5].cpu().numpy()}")
                             print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
+
+                      
 
                         
 
@@ -318,12 +298,24 @@ class DataParallelPPOActor(BasePPOActor):
                     seqlen=seqlen,
                 )
 
-                breakpoint()
+                
                 # Replace the real last token's log-prob using expected value over digits 0-9
+          
                 if expected_prob_replace:
-                    full_log_probs[:, last_token_positions] = expected_values
+                    # full_log_probs: (bsz, seqlen, 1)
+                    # last_token_positions: (bsz,) - different position per sample
+                    # expected_values: (bsz,)
+                    
+                    batch_indices = torch.arange(batch_size, device=full_log_probs.device)
+                    full_log_probs[batch_indices, last_token_positions, 0] = expected_values
+                    
+                    if torch.distributed.get_rank() == 0:
+                        print(f"[expected_prob_replace] Replaced last token log-probs with expected values.")
+                        print(f"Batch indices: {batch_indices}")
+                        print(f"Last token positions: {last_token_positions}")
+                        print(f"Expected values: {expected_values}")
 
-                breakpoint()
+                
 
                 # only return response part:
                 if calculate_entropy:

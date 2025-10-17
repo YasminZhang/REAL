@@ -781,36 +781,7 @@ class JEPOActor(DataParallelPPOActor):
             
             if use_regression_reward and store_last_token_probs:
                 expected_values = expected_values_all[idxs]  # [B]
-                # ============ NEW: Regression-based advantage computation ============
-                
-                # Get probability distributions for this group
-                # probs_group = last_token_probs_all[idxs]  # [B, vocab_size]
-                
-                # Default digit token IDs (for typical tokenizers, digits 0-9)
-                # User should configure this based on their tokenizer
-                # if digit_token_ids is None:
-                #     # Attempt to auto-detect (this may not work for all tokenizers)
-                #     digit_token_ids = []
-                #     if self._cached_tokenizer is not None:
-                #         for digit in range(10):
-                #             tok_ids = self._cached_tokenizer.encode(str(digit), add_special_tokens=False)
-                #             if len(tok_ids) == 1:
-                #                 digit_token_ids.append(tok_ids[0])
-                    
-                #     if len(digit_token_ids) != 10:
-                #         # Fallback: use common tokenizer digit token IDs (ordered 0-9)
-                #         # These are typical token IDs from Llama/Mistral-style tokenizers
-                #         print(f"WARNING: Could not auto-detect digit tokens. Using default token IDs for digits 0-9.")
-                #         digit_token_ids = [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783]
-                #         # Corresponds to: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
-                
-                # # Compute expected values: E[digit] = sum(p(k) * k) for k=0..9
-                # digit_token_ids_tensor = torch.tensor(digit_token_ids, device=dev, dtype=torch.long)
-                # digit_probs = probs_group[:, digit_token_ids_tensor]  # [B, 10]
-                # digit_values = torch.arange(10, device=dev, dtype=torch.float32)  # [10]
-                
-                # expected_values = (digit_probs * digit_values).sum(dim=1)  # [B]
-                
+          
                 # Get ground truth value for this group
                 gt_value = gt_values_tensor[idxs[0]]  # All samples in group have same GT
                 
@@ -819,17 +790,7 @@ class JEPOActor(DataParallelPPOActor):
                 rewards = -squared_errors  # Negative because we want to minimize error
                 
                 # DEBUG: Print regression reward details (only rank 0, first few groups)
-                if _rank == 0:  # Only first 3 groups to avoid spam
-                    print(f"\n[DEBUG Regression] UID: {u}")
-                    print(f"  Group size (B): {B}")
-                    print(f"  Ground truth: {gt_value.item():.2f}")
-                    print(f"  Expected values: {expected_values.cpu().numpy()}")
-                    print(f"  Squared errors: {squared_errors.cpu().numpy()}")
-                    print(f"  Rewards (neg squared errors): {rewards.cpu().numpy()}")
-                    print(f"  Digit probs for first response:")
-                    # for k in range(10):
-                    #     print(f"    P({k}) = {digit_probs[0, k].item():.4f}")
-                    print(f"  E[digit] = {expected_values[0].item():.4f}")
+                
                 
                 # Compute advantages using leave-one-out baseline
                 if B > 1:
@@ -841,9 +802,22 @@ class JEPOActor(DataParallelPPOActor):
                     # Single sample: no baseline
                     A_raw = rewards - rewards.mean()  # Zero-centered
                 
-                # Normalize advantages
-                A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
-                A_raw = A_raw.clamp(-1.0, 1.0)
+                    # Normalize advantages
+                    A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
+                    A_raw = A_raw.clamp(-1.0, 1.0)
+
+                if _rank == 0:  # Only first 3 groups to avoid spam
+                    print(f"\n[DEBUG Regression] UID: {u}")
+                    print(f"  Group size (B): {B}")
+                    print(f"  Ground truth: {gt_value.item():.2f}")
+                    print(f"  Expected values: {expected_values.cpu().numpy()}")
+                    print(f"  Squared errors: {squared_errors.cpu().numpy()}")
+                    print(f"  Rewards (neg squared errors): {rewards.cpu().numpy()}")
+                    print(f"  Digit probs for first response:")
+                    print(f'LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
+                    # for k in range(10):
+                    #     print(f"    P({k}) = {digit_probs[0, k].item():.4f}")
+                    print(f"  E[digit] = {expected_values[0].item():.4f}")
                 
                 # Compute weights based on rewards (higher reward = higher weight)
                 # Use softmax on rewards (not log-probs)
