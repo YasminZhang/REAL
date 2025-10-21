@@ -252,10 +252,10 @@ class DataParallelPPOActor(BasePPOActor):
                             print(f"Valid lengths (first 5): {valid_lengths[:5].cpu().numpy()}")
                             print(f"Last token positions in original seq (first 5): {last_token_positions[:5].cpu().numpy()}")
                             print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
-                            print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
+                            print(f"Expected values (first 5): {expected_values[:5].detach().cpu().numpy()}")
 
                       
-
+                  
                         
 
                     # compute entropy
@@ -309,11 +309,8 @@ class DataParallelPPOActor(BasePPOActor):
                     batch_indices = torch.arange(batch_size, device=full_log_probs.device)
                     full_log_probs[batch_indices, last_token_positions, 0] = expected_values
                     
-                    if torch.distributed.get_rank() == 0:
-                        print(f"[expected_prob_replace] Replaced last token log-probs with expected values.")
-                        print(f"Batch indices: {batch_indices}")
-                        print(f"Last token positions: {last_token_positions}")
-                        print(f"Expected values: {expected_values}")
+                    
+                         
 
                 
 
@@ -395,7 +392,7 @@ class DataParallelPPOActor(BasePPOActor):
                             print("[non-rmpad branch] Replaced last token log-probs with expected digit values.")
                             print(f"Valid lengths (first 5): {valid_lengths[:5].cpu().numpy()}")
                             print(f"Last token positions (first 5): {last_token_positions[:5].cpu().numpy()}")
-                            print(f"Expected values (first 5): {expected_values[:5].cpu().numpy()}")
+                            print(f"Expected values (first 5): {expected_values[:5].detach().cpu().numpy()}")
 
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:

@@ -27,9 +27,9 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=4
-n_resp_per_prompt=4
-train_prompt_mini_bsz=1
+train_prompt_bsz=64
+n_resp_per_prompt=8
+train_prompt_mini_bsz=8
 
 # DAPO
 # don't do filter.
@@ -55,15 +55,15 @@ jepo_update_frequency=100000
 jepo_epochs=3
 jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-jepo_mini_batch_size_per_gpu=1 # responses per gpu
-jepo_micro_batch_size_per_gpu=1 # responses per gpu
+jepo_mini_batch_size_per_gpu=32 # responses per gpu
+jepo_micro_batch_size_per_gpu=16 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored
 
 # Ray - single node setup for 1.5B
 NNODES=1
-NGPUS_PER_NODE=4
+NGPUS_PER_NODE=8
 
 # Use 1.5B model
 MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
@@ -87,7 +87,7 @@ gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 # Use JEPO-DAPO recipe
-CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m recipe.dapo.main_jepo_dapo \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \

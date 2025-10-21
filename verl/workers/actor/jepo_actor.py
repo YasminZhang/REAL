@@ -815,6 +815,8 @@ class JEPOActor(DataParallelPPOActor):
                     print(f"  Rewards (neg squared errors): {rewards.cpu().numpy()}")
                     print(f"  Digit probs for first response:")
                     print(f'LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
+                    # print A_raw
+                    print(f'Advantages A_raw: {A_raw.cpu().numpy()}')
                     # for k in range(10):
                     #     print(f"    P({k}) = {digit_probs[0, k].item():.4f}")
                     print(f"  E[digit] = {expected_values[0].item():.4f}")
