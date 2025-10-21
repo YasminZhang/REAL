@@ -158,7 +158,7 @@ def build_jepo_teacher_forced_batch(
         found = s >= 0
         has_delimiter.append(bool(found))
         delimiter_match_kind.append(match_kind)
-        cot_ids = resp_i[:s].tolist() if found else resp_i.tolist()
+        cot_ids = resp_i[:s+1].tolist() if found else resp_i.tolist() # TODO: check here
         gt_len = len(gt_list[i])
         max_cot = max(0, max_response_length - delimiter_len - gt_len)
         if len(cot_ids) > max_cot:
@@ -183,7 +183,7 @@ def build_jepo_teacher_forced_batch(
         batch_input_tokens.append(full)
         cot_start_positions.append(len(prompt_i))
         # TODO: the gt_list = An empty space + score, and delimiter_str = 'So the overall score is', no empty space, so answer starts after the empty space
-        answer_start_positions.append(len(left_plus_delim))
+        answer_start_positions.append(len(left_plus_delim) + 1)
 
     # Validate pad token id
     if pad_token is None:
@@ -226,7 +226,8 @@ def build_jepo_teacher_forced_batch(
     else:
         position_ids = torch.empty((n, 0), dtype=torch.long, device=device)
 
- 
+    # let gt_list be the second token in each entry
+    gt_list = [(gt[1],) if len(gt) > 1 else [] for gt in gt_list]
 
     return {
         'batch_input_ids': batch_input_ids,

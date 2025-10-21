@@ -12,22 +12,24 @@ use_kl_in_reward=False
 kl_coef=0.01
 use_kl_loss=True
 kl_loss_coef=0.01
-
 clip_ratio_low=0.2
 clip_ratio_high=0.2
 
+
+
+
 max_prompt_length=2048
-max_response_length=2048
-enable_overlong_buffer=True
+max_response_length=1024
+enable_overlong_buffer=False
 overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=8
+train_prompt_bsz=4
 n_resp_per_prompt=4
-train_prompt_mini_bsz=2
+train_prompt_mini_bsz=1
 
 # DAPO
 # don't do filter.
@@ -40,17 +42,21 @@ use_jepo=True
 use_grpo=False
 jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
+
+
 jepo_beta_supp=0.001
 jepo_beta_kl=0.0
 jepo_entropy_coeff=0.0
+
+
 jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=3
 jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-jepo_mini_batch_size_per_gpu=4 # responses per gpu
-jepo_micro_batch_size_per_gpu=2 # responses per gpu
+jepo_mini_batch_size_per_gpu=1 # responses per gpu
+jepo_micro_batch_size_per_gpu=1 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored
