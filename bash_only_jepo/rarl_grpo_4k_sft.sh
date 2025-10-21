@@ -43,7 +43,7 @@ use_grpo=False
 jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
-
+jepo_lr=1e-8
 jepo_beta_supp=0.001
 jepo_beta_kl=0.0
 jepo_entropy_coeff=0.0
@@ -147,7 +147,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
-    +actor_rollout_ref.jepo_actor.optim.lr=1e-6 \
+    +actor_rollout_ref.jepo_actor.optim.lr=${jepo_lr} \
     +actor_rollout_ref.jepo_actor.optim.warmup_style=constant \
     +actor_rollout_ref.jepo_actor.optim.warmup_ratio=0.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
