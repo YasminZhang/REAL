@@ -929,6 +929,74 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="cyan", role="actor_compute_logits")
+    def compute_logits_and_log_prob(self, data: DataProto):
+        """Compute both logits and log probabilities for validation analysis.
+        
+        This method is similar to compute_log_prob but also returns the raw logits
+        for cases where you need access to the full probability distribution.
+        """
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        # Support all hardwares
+        from contextlib import nullcontext
+
+        is_lora = data.meta_info.pop("is_lora", False)
+        adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
+        data = data.to(get_device_id())
+        
+        # Set up computation parameters
+        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["return_logits"] = True  # Special flag to return logits
+        
+        # perform computation with logits
+        with self.ulysses_sharding_manager:
+            with adapter_ctx:
+                # Note: This would require modifying the actor's compute_log_prob method
+                # to optionally return logits when return_logits=True
+                try:
+                    if hasattr(self.actor, 'compute_log_prob_with_logits'):
+                        log_probs, entropys, logits = self.actor.compute_log_prob_with_logits(data=data, calculate_entropy=True)
+                    else:
+                        # Fallback to regular computation
+                        log_probs, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                        logits = None
+                        
+                except Exception:
+                    # Fallback to regular computation if modified method doesn't exist
+                    log_probs, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                    logits = None
+
+            if logits is not None:
+                output = DataProto.from_dict(
+                    tensors={"old_log_probs": log_probs, "entropys": entropys, "logits": logits},
+                    meta_info={"temperature": self.config.rollout.temperature},
+                )
+            else:
+                output = DataProto.from_dict(
+                    tensors={"old_log_probs": log_probs, "entropys": entropys},
+                    meta_info={"temperature": self.config.rollout.temperature, "logits_available": False},
+                )
+
+        output = output.to("cpu")
+
+        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
+        # unshard the root FSDP module
+        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
+            self.actor.actor_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage("After offload actor model during compute_logits_and_log_prob", logger=logger)
+
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: DataProto):
         if self._is_lora:

@@ -78,7 +78,7 @@ TEST_FILE=data/feedback_bench_for_sft/train.parquet
 temperature=0.6
 top_p=0.95
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=1.0
+val_top_p=0.95
 
 # Performance Related Parameter - adjusted for 1.5B model
 sp_size=1  # Single sequence parallel for smaller model
@@ -174,7 +174,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=8 \
+    actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \

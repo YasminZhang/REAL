@@ -88,7 +88,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False, regression=False, expected_prob_replace=False
+        self, micro_batch, temperature, calculate_entropy=False, regression=False, expected_prob_replace=False, validation=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -226,7 +226,10 @@ class DataParallelPPOActor(BasePPOActor):
                         # Since indices can be very large, we use a more efficient approach
                         
                         # rmpad_positions will be the cumsum of valid lengths minus 2, one position shifted for 0-indexing, one for next token prediction
-                        rmpad_positions = torch.cumsum(valid_lengths, dim=0) - 2
+                        if validation:
+                            rmpad_positions = torch.cumsum(valid_lengths, dim=0) - 3
+                        else:
+                            rmpad_positions = torch.cumsum(valid_lengths, dim=0) - 2
                         
                         # Get indices of last 1 in each batch
                         # Flip along the sequence dimension, find first 1 from the end
@@ -254,7 +257,7 @@ class DataParallelPPOActor(BasePPOActor):
                             print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].detach().cpu().numpy()}")
 
-                      
+                   
                   
                         
 
@@ -297,6 +300,8 @@ class DataParallelPPOActor(BasePPOActor):
                     batch=batch_size,
                     seqlen=seqlen,
                 )
+
+                
 
                 
                 # Replace the real last token's log-prob using expected value over digits 0-9
@@ -483,6 +488,63 @@ class DataParallelPPOActor(BasePPOActor):
                 entropys = restore_dynamic_batch(entropys, batch_idx_list)
 
         return log_probs, entropys
+
+
+    
+    @GPUMemoryLogger(role="dp actor", logger=logger) 
+    def compute_log_prob_with_logits(self, data: DataProto, calculate_entropy=False):
+        """Compute log probabilities, entropy, and logits for validation analysis.
+        
+        Similar to compute_log_prob but also returns the raw logits tensor.
+        """
+        # set to eval
+        self.actor_module.eval()
+
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+
+        data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
+
+        if use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+        else:
+            micro_batches = data.split(micro_batch_size)
+
+        log_probs_lst = []
+        entropy_lst = []
+        logits_lst = []
+        
+        for micro_batch in micro_batches:
+            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                entropy, log_probs, expected_values = self._forward_micro_batch(
+                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, validation=True
+                )
+            log_probs_lst.append(log_probs)
+            logits_lst.append(expected_values)
+            if calculate_entropy:
+                entropy_lst.append(entropy)
+
+        log_probs = torch.concat(log_probs_lst, dim=0)
+        logits = torch.concat(logits_lst, dim=0)
+        entropys = None
+        if calculate_entropy:
+            entropys = torch.concat(entropy_lst, dim=0)
+
+        if use_dynamic_bsz:
+            log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
+            logits = restore_dynamic_batch(logits, batch_idx_list)
+            if calculate_entropy:
+                entropys = restore_dynamic_batch(entropys, batch_idx_list)
+
+        return log_probs, entropys, logits
+
+    
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):

@@ -33,6 +33,7 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
+from scipy.stats import kendalltau, pearsonr, spearmanr
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -61,6 +62,41 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+def calculate_correlations(scores1, scores2):
+    """Calculate correlation metrics between two sets of scores.
+    
+    Args:
+        scores1: First set of scores (can be tensor or list)
+        scores2: Second set of scores (can be tensor or list)
+        
+    Returns:
+        dict: Dictionary containing Pearson, Spearman, and Kendall correlations
+    """
+    # Convert to numpy arrays if they're tensors
+    if torch.is_tensor(scores1):
+        scores1 = scores1.cpu().numpy()
+    if torch.is_tensor(scores2):
+        scores2 = scores2.cpu().numpy()
+    
+    # Convert to numpy arrays if they're lists
+    if isinstance(scores1, list):
+        scores1 = np.array(scores1)
+    if isinstance(scores2, list):
+        scores2 = np.array(scores2)
+    
+    # Calculate correlations
+    pr, _ = pearsonr(scores1, scores2)
+    sr, _ = spearmanr(scores1, scores2)
+    kt, _ = kendalltau(scores1, scores2)
+    
+    return {
+        "Pearson": pr,
+        "Kendall": kt,
+        "Spearman": sr,
+    }
+
 
 WorkerType = type[Worker]
 
@@ -560,8 +596,8 @@ class RayPPOTrainer:
         # Create extra validation dataloaders
         self.extra_val_dataloaders = []
         if self.extra_val_datasets:
-            extra_val_batch_size = val_batch_size
             for extra_val_dataset in self.extra_val_datasets:
+                extra_val_batch_size = len(extra_val_dataset)
                 extra_val_dataloader = StatefulDataLoader(
                     dataset=extra_val_dataset,
                     batch_size=extra_val_batch_size,
@@ -662,6 +698,7 @@ class RayPPOTrainer:
         sample_gts = []
         sample_scores = []
         sample_turns = []
+        sample_expected_values = []
 
         for test_data in dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -682,7 +719,7 @@ class RayPPOTrainer:
             sample_inputs.extend(input_texts)
 
             ground_truths = [
-                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
+                float(item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)) for item in test_batch
             ]
             sample_gts.extend(ground_truths)
 
@@ -738,6 +775,42 @@ class RayPPOTrainer:
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
 
+            # Recompute log probabilities and optionally logits using actor
+            # This gives you access to the model's internal computations including logits
+            test_batch.meta_info["micro_batch_size"] = self.config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu
+            test_batch.meta_info["max_token_len"] = self.config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu
+            test_batch.meta_info["use_dynamic_bsz"] = self.config.actor_rollout_ref.rollout.log_prob_use_dynamic_bsz
+            test_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            
+            # Pad batch to be divisible by dp_size for distributed computation
+            size_divisor = self.actor_rollout_wg.world_size
+            test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch, size_divisor)
+            
+            # Try to compute logits and log probabilities using the new method
+            try:
+                validation_output_padded = self.actor_rollout_wg.compute_logits_and_log_prob(test_batch_padded)
+                # Unpad the results
+                validation_output = unpad_dataproto(validation_output_padded, pad_size=pad_size)
+                
+                if "logits" in validation_output.batch:
+                    print("✅ Successfully obtained logits from validation!")
+                    print(f"Logits shape: {validation_output.batch['logits'].shape}")
+                    expected_values = validation_output.batch['logits']
+                    sample_expected_values.extend(expected_values.cpu().tolist())
+                else:
+                    print("⚠️  Logits computation method available but logits not returned")
+            except AttributeError:
+                # Fallback to regular log prob computation
+                print("📝 Using fallback method: compute_log_prob (no logits)")
+                validation_output_padded = self.actor_rollout_wg.compute_log_prob(test_batch_padded)
+                # Unpad the results
+                validation_output = unpad_dataproto(validation_output_padded, pad_size=pad_size)
+            
+            
+            print("Validation computation completed")
+ 
+      
+
             # evaluate using reward_function
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
@@ -759,8 +832,23 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
+
+
+        # correlation analysis between expected values and ground truth scores
+        correlations = None
+        if len(sample_expected_values) > 1 and len(sample_gts) > 1 and len(sample_expected_values) == len(sample_gts):
+            try:
+                correlations = calculate_correlations(torch.tensor(sample_expected_values), torch.tensor(sample_gts))
+                print(f"Correlation metrics computed: {correlations}")
+            except Exception as e:
+                print(f"Warning: Could not compute correlations: {e}")
+                correlations = None
+        else:
+            print(f"Warning: Insufficient data for correlation analysis. "
+                  f"Expected values: {len(sample_expected_values)}, Ground truths: {len(sample_gts)}")
+
         # Return all collected data for further processing
-        return {
+        result = {
             'sample_inputs': sample_inputs,
             'sample_outputs': sample_outputs, 
             'sample_gts': sample_gts,
@@ -768,8 +856,14 @@ class RayPPOTrainer:
             'sample_turns': sample_turns,
             'reward_extra_infos_dict': reward_extra_infos_dict,
             'data_source_lst': data_source_lst,
-            'dataloader_name': dataloader_name
+            'dataloader_name': dataloader_name,
         }
+        
+        # Only include correlations if they were successfully computed
+        if correlations is not None:
+            result['correlations'] = correlations
+            
+        return result
 
     def _validate(self):
         all_metrics = {}
@@ -815,6 +909,13 @@ class RayPPOTrainer:
             all_metrics["val-aux/num_turns/max"] = sample_turns.max()
             all_metrics["val-aux/num_turns/mean"] = sample_turns.mean()
 
+        # Add correlation metrics for main validation if available
+        if 'correlations' in main_results:
+            correlations = main_results['correlations']
+            all_metrics["val-core/main/correlation/pearson"] = correlations["Pearson"]
+            all_metrics["val-core/main/correlation/spearman"] = correlations["Spearman"]  
+            all_metrics["val-core/main/correlation/kendall"] = correlations["Kendall"]
+
         # Validate extra dataloaders if they exist
         if hasattr(self, 'extra_val_dataloaders') and self.extra_val_dataloaders:
             for i, extra_dataloader in enumerate(self.extra_val_dataloaders):
@@ -844,6 +945,13 @@ class RayPPOTrainer:
                                 metric_sec = f"val-{extra_name}-aux"
                             pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                             all_metrics[pfx] = metric_val
+
+                # Add correlation metrics for extra validation if available
+                if 'correlations' in extra_results:
+                    correlations = extra_results['correlations']
+                    all_metrics[f"val-{extra_name}-core/correlation/pearson"] = correlations["Pearson"]
+                    all_metrics[f"val-{extra_name}-core/correlation/spearman"] = correlations["Spearman"]
+                    all_metrics[f"val-{extra_name}-core/correlation/kendall"] = correlations["Kendall"]
 
                 # Add extra validation samples for logging (optional, only from main for now to avoid clutter)
                 # all_sample_inputs.extend(extra_results['sample_inputs'])
