@@ -29,9 +29,9 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=64
+train_prompt_bsz=256
 n_resp_per_prompt=8
-train_prompt_mini_bsz=8
+train_prompt_mini_bsz=32
 
 # DAPO
 # don't do filter.
@@ -45,8 +45,8 @@ use_grpo=False
 jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
-jepo_lr=1e-8
-jepo_beta_supp=0.001
+jepo_lr=1e-7
+jepo_beta_supp=0.000
 jepo_beta_kl=0.0
 jepo_entropy_coeff=0.0
 
@@ -57,8 +57,8 @@ jepo_update_frequency=100000
 jepo_epochs=3
 jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-jepo_mini_batch_size_per_gpu=32 # responses per gpu
-jepo_micro_batch_size_per_gpu=16 # responses per gpu
+jepo_mini_batch_size_per_gpu=128 # responses per gpu
+jepo_micro_batch_size_per_gpu=64 # responses per gpu
 
 jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored
@@ -75,10 +75,11 @@ TEST_FILE=data/feedback_bench_for_sft/train.parquet
 
 
 # Algorithm
-temperature=0.6
-top_p=0.95
+temperature=1.0
+top_p=0.9
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.95
+val_top_p=0.9
+repetition_penalty=1.03
 
 # Performance Related Parameter - adjusted for 1.5B model
 sp_size=1  # Single sequence parallel for smaller model
@@ -170,6 +171,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k=${top_k} \
+    actor_rollout_ref.rollout.repetition_penalty=${repetition_penalty} \
     actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
@@ -191,7 +193,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=10 \
-    trainer.save_freq=20 \
+    trainer.save_freq=10 \
     trainer.total_epochs=500 \
     trainer.total_training_steps=5000 \
     trainer.default_local_dir="${CKPTS_DIR}" \

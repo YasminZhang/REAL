@@ -703,10 +703,13 @@ class RayPPOTrainer:
         for test_data in dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
-            # repeat test batch
-            test_batch = test_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
-            )
+            # repeat test batch only if n > 1 (for multiple rollouts per prompt)
+            val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            if val_n > 1:
+                test_batch = test_batch.repeat(
+                    repeat_times=val_n, interleave=True
+                )
+            # If n=1, don't repeat - each prompt gets exactly one response
 
             # we only do validation on rule-based rm
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
@@ -747,6 +750,10 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
                 "global_steps": self.global_steps,
+                "temperature": self.config.actor_rollout_ref.rollout.temperature,
+                "top_k": self.config.actor_rollout_ref.rollout.top_k,
+                "top_p": self.config.actor_rollout_ref.rollout.top_p,
+                "repetition_penalty": self.config.actor_rollout_ref.rollout.repetition_penalty,
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
@@ -781,6 +788,9 @@ class RayPPOTrainer:
             test_batch.meta_info["max_token_len"] = self.config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu
             test_batch.meta_info["use_dynamic_bsz"] = self.config.actor_rollout_ref.rollout.log_prob_use_dynamic_bsz
             test_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            # top_k and top_p are only used when do_sample is True
+            test_batch.meta_info["top_k"] = self.config.actor_rollout_ref.rollout.top_k
+            test_batch.meta_info["top_p"] = self.config.actor_rollout_ref.rollout.top_p
             
             # Pad batch to be divisible by dp_size for distributed computation
             size_divisor = self.actor_rollout_wg.world_size
@@ -952,6 +962,9 @@ class RayPPOTrainer:
                     all_metrics[f"val-{extra_name}-core/correlation/pearson"] = correlations["Pearson"]
                     all_metrics[f"val-{extra_name}-core/correlation/spearman"] = correlations["Spearman"]
                     all_metrics[f"val-{extra_name}-core/correlation/kendall"] = correlations["Kendall"]
+                    all_metrics[f'val-core-correlation/{data_source}/pearson'] = correlations["Pearson"]
+                    all_metrics[f'val-core-correlation/{data_source}/spearman'] = correlations["Spearman"]
+                                                                                          
 
                 # Add extra validation samples for logging (optional, only from main for now to avoid clutter)
                 # all_sample_inputs.extend(extra_results['sample_inputs'])

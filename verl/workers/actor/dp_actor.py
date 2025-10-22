@@ -207,7 +207,7 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Get digit token IDs (default for Llama/Mistral tokenizers)
                         digit_token_ids = getattr(self.config, 'digit_token_ids', 
-                                                   [28734, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783, 28774])
+                                                   [28734, 28740, 28750, 28770, 28781, 28782])
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits_rmpad.device, dtype=torch.long)
                         
                         # Find the actual last token position for each sample using attention mask
@@ -242,9 +242,9 @@ class DataParallelPPOActor(BasePPOActor):
                         last_token_logits = logits_rmpad[rmpad_positions, :]  # (bsz, vocab_size)
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
                         
-                        # Extract probabilities for digit tokens 0-9
-                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 10)
-                        digit_values = torch.arange(10, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,9] or [1,2,3,4,5]
+                        # Extract probabilities for digit tokens 0-5
+                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
+                        digit_values = torch.arange(6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
                         
                         # Compute expected value: E[digit] = Σ p(k) * k
                         expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)

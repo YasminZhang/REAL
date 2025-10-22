@@ -294,6 +294,7 @@ class vLLMRollout(BaseRollout):
                 "top_k": -1,
                 "min_p": 0.0,
                 "temperature": 0,
+                "repetition_penalty": prompts.meta_info.get("repetition_penalty", 1.0),
                 "n": 1,  # if greedy, only 1 response
             }
         elif is_validate:
@@ -302,6 +303,7 @@ class vLLMRollout(BaseRollout):
                 "top_k": self.config.val_kwargs.top_k,
                 "top_p": self.config.val_kwargs.top_p,
                 "temperature": self.config.val_kwargs.temperature,
+                "repetition_penalty": prompts.meta_info.get("repetition_penalty", getattr(self.config.val_kwargs, 'repetition_penalty', 1.0)),
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
 

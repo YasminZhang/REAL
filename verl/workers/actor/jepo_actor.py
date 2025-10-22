@@ -735,7 +735,6 @@ class JEPOActor(DataParallelPPOActor):
         # ---------------- Stage 2: advantage/weight computation per UID group ----------------
         # NEW: Check if we should use regression-based advantages
         use_regression_reward = bool(jepo_cfg.get("use_regression_reward", True))
-        digit_token_ids = jepo_cfg.get("digit_token_ids", [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])  # List of token IDs for digits 0-9
         
         # Build uid groups preserving order of first appearance
         uids = data.non_tensor_batch.get("uid")

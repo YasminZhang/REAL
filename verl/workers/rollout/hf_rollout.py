@@ -60,6 +60,7 @@ class HFRollout(BaseRollout):
         response_length = prompts.meta_info.get("response_length", self.config.response_length)
         top_p = prompts.meta_info.get("top_p", self.config.get("top_p", 1.0))
         top_k = max(0, prompts.meta_info.get("top_k", self.config.get("top_k", 0)))  # to be compatible with vllm
+        repetition_penalty = prompts.meta_info.get("repetition_penalty", self.config.get("repetition_penalty", 1.0))
 
         if not do_sample:
             # do_sample==False -> greedy decoding
@@ -75,6 +76,7 @@ class HFRollout(BaseRollout):
                 "top_k": max(0, self.config.val_kwargs.top_k),  # to be compatible with vllm
                 "top_p": self.config.val_kwargs.top_p,
                 "temperature": self.config.val_kwargs.temperature,
+                "repetition_penalty": getattr(self.config.val_kwargs, 'repetition_penalty', 1.0),
                 "num_return_sequences": 1,  # if validate, already repeat in ray_trainer
             }
         else:
@@ -85,6 +87,7 @@ class HFRollout(BaseRollout):
                 "top_p": top_p,
                 "top_k": top_k,
                 "temperature": temperature,
+                "repetition_penalty": repetition_penalty,
                 "num_return_sequences": self.config.n,
             }
 
