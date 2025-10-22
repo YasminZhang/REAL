@@ -316,6 +316,7 @@ class RayPPOTrainer:
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
         device_name=None,
+        extra_val_datasets=True
     ):
         """
         Initialize distributed PPO trainer with Ray backend.
@@ -382,7 +383,7 @@ class RayPPOTrainer:
             self.use_critic = False
 
         self._validate_config()
-        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler, extra_val_datasets)
 
     def _validate_config(self):
         config = self.config
@@ -499,7 +500,7 @@ class RayPPOTrainer:
 
         print("[validate_config] All configuration checks passed successfully!")
 
-    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
+    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler], extra_val_datasets=None):
         """
         Creates the train and validation dataloaders.
         """
@@ -515,6 +516,15 @@ class RayPPOTrainer:
                 self.config.data.val_files, self.config.data, self.tokenizer, self.processor
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
+
+        # Handle extra validation datasets
+        self.extra_val_datasets = []
+        extra_val_files = self.config.data.get("extra_val_files", "")
+        if extra_val_files and extra_val_files.strip():
+            extra_val_file_list = [f.strip() for f in extra_val_files.split(",") if f.strip()]
+            self.extra_val_datasets = [create_rl_dataset(
+                extra_val_file, self.config.data, self.tokenizer, self.processor
+            ) for extra_val_file in extra_val_file_list]
 
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
@@ -546,6 +556,22 @@ class RayPPOTrainer:
             drop_last=False,
             collate_fn=collate_fn,
         )
+
+        # Create extra validation dataloaders
+        self.extra_val_dataloaders = []
+        if self.extra_val_datasets:
+            extra_val_batch_size = val_batch_size
+            for extra_val_dataset in self.extra_val_datasets:
+                extra_val_dataloader = StatefulDataLoader(
+                    dataset=extra_val_dataset,
+                    batch_size=extra_val_batch_size,
+                    num_workers=num_workers,
+                    shuffle=self.config.data.get("validation_shuffle", True),
+                    drop_last=False,
+                    collate_fn=collate_fn,
+                )
+                self.extra_val_dataloaders.append(extra_val_dataloader)
+            print(f"Created {len(self.extra_val_dataloaders)} extra validation dataloaders")
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
@@ -625,7 +651,8 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
-    def _validate(self):
+    def _validate_single_dataloader(self, dataloader, dataloader_name="main"):
+        """Validate on a single dataloader and return metrics, samples, and data sources."""
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -636,7 +663,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
-        for test_data in self.val_dataloader:
+        for test_data in dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -732,27 +759,35 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        # Return all collected data for further processing
+        return {
+            'sample_inputs': sample_inputs,
+            'sample_outputs': sample_outputs, 
+            'sample_gts': sample_gts,
+            'sample_scores': sample_scores,
+            'sample_turns': sample_turns,
+            'reward_extra_infos_dict': reward_extra_infos_dict,
+            'data_source_lst': data_source_lst,
+            'dataloader_name': dataloader_name
+        }
 
-        # dump generations
-        val_data_dir = self.config.trainer.get("validation_data_dir", None)
-        if val_data_dir:
-            self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                gts=sample_gts,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
-                dump_path=val_data_dir,
-            )
+    def _validate(self):
+        all_metrics = {}
+        all_sample_inputs = []
+        all_sample_outputs = []
+        all_sample_scores = []
 
-        for key_info, lst in reward_extra_infos_dict.items():
-            assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
+        # Validate main dataloader
+        main_results = self._validate_single_dataloader(self.val_dataloader, "main")
+        
+        # Process main validation results
+        for key_info, lst in main_results['reward_extra_infos_dict'].items():
+            assert len(lst) == 0 or len(lst) == len(main_results['sample_scores']), f"{key_info}: {len(lst)=}, {len(main_results['sample_scores'])=}"
 
-        data_sources = np.concatenate(data_source_lst, axis=0)
-
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
-        metric_dict = {}
+        data_sources = np.concatenate(main_results['data_source_lst'], axis=0)
+        data_src2var2metric2val = process_validation_metrics(data_sources, main_results['sample_inputs'], main_results['reward_extra_infos_dict'])
+        
+        # Process main metrics with standard prefixes
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
@@ -767,15 +802,70 @@ class RayPPOTrainer:
                     else:
                         metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
+                    all_metrics[pfx] = metric_val
 
-        if len(sample_turns) > 0:
-            sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+        # Add main validation samples for logging
+        all_sample_inputs.extend(main_results['sample_inputs'])
+        all_sample_outputs.extend(main_results['sample_outputs'])
+        all_sample_scores.extend(main_results['sample_scores'])
 
-        return metric_dict
+        if len(main_results['sample_turns']) > 0:
+            sample_turns = np.concatenate(main_results['sample_turns'])
+            all_metrics["val-aux/num_turns/min"] = sample_turns.min()
+            all_metrics["val-aux/num_turns/max"] = sample_turns.max()
+            all_metrics["val-aux/num_turns/mean"] = sample_turns.mean()
+
+        # Validate extra dataloaders if they exist
+        if hasattr(self, 'extra_val_dataloaders') and self.extra_val_dataloaders:
+            for i, extra_dataloader in enumerate(self.extra_val_dataloaders):
+                extra_name = f"extra_{i}"
+                extra_results = self._validate_single_dataloader(extra_dataloader, extra_name)
+                
+                # Process extra validation results
+                for key_info, lst in extra_results['reward_extra_infos_dict'].items():
+                    assert len(lst) == 0 or len(lst) == len(extra_results['sample_scores']), f"{extra_name} {key_info}: {len(lst)=}, {len(extra_results['sample_scores'])=}"
+
+                extra_data_sources = np.concatenate(extra_results['data_source_lst'], axis=0)
+                extra_data_src2var2metric2val = process_validation_metrics(extra_data_sources, extra_results['sample_inputs'], extra_results['reward_extra_infos_dict'])
+                
+                # Process extra metrics with extra-specific prefixes
+                for data_source, var2metric2val in extra_data_src2var2metric2val.items():
+                    core_var = "acc" if "acc" in var2metric2val else "reward"
+                    for var_name, metric2val in var2metric2val.items():
+                        n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+                        for metric_name, metric_val in metric2val.items():
+                            if (
+                                (var_name == core_var)
+                                and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                                and (f"@{n_max}" in metric_name)
+                            ):
+                                metric_sec = f"val-{extra_name}-core"
+                            else:
+                                metric_sec = f"val-{extra_name}-aux"
+                            pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                            all_metrics[pfx] = metric_val
+
+                # Add extra validation samples for logging (optional, only from main for now to avoid clutter)
+                # all_sample_inputs.extend(extra_results['sample_inputs'])
+                # all_sample_outputs.extend(extra_results['sample_outputs'])
+                # all_sample_scores.extend(extra_results['sample_scores'])
+
+        # Log validation generations (only for main validation to avoid clutter)
+        self._maybe_log_val_generations(inputs=all_sample_inputs, outputs=all_sample_outputs, scores=all_sample_scores)
+
+        # Dump generations for main validation
+        val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        if val_data_dir:
+            self._dump_generations(
+                inputs=main_results['sample_inputs'],
+                outputs=main_results['sample_outputs'],
+                gts=main_results['sample_gts'],
+                scores=main_results['sample_scores'],
+                reward_extra_infos_dict=main_results['reward_extra_infos_dict'],
+                dump_path=val_data_dir,
+            )
+
+        return all_metrics
 
     def init_workers(self):
         """Initialize distributed training workers using Ray backend.

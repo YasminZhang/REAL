@@ -71,6 +71,7 @@ CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=data/feedback_collection_for_sft/train.parquet
 TEST_FILE=data/feedback_bench_for_sft/train.parquet
 
+
 # Algorithm
 temperature=0.6
 top_p=0.95
@@ -86,10 +87,13 @@ offload=True  # Keep offload for memory efficiency
 gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
+extra_val_files=\"tract_data/feedback_collection_ood_for_sft/train.parquet,tract_data/flask_eval_for_sft/train.parquet,tract_data/mt_bench_for_sft/train.parquet,tract_data/vicuna_eval_for_sft/train.parquet\"
+
 # Use JEPO-DAPO recipe
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
+    +data.extra_val_files="${extra_val_files}" \
     data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
@@ -183,7 +187,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.test_freq=10 \
     trainer.save_freq=20 \
     trainer.total_epochs=500 \
