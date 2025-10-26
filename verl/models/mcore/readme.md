@@ -101,5 +101,5 @@ The necessary features under development for scaling up are
 
 python -m verl.model_merger merge \
     --backend fsdp \
-    --local_dir /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/GRPO-BASE-TRACT1/global_step_840/actor \
+    --local_dir /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100/ \
     --target_dir /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/GRPO-BASE-TRACT1/global_step_840/actor_hf

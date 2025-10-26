@@ -5,7 +5,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="Regression-SFT-TRACT${1}"
+exp_name="Regression-Base-TRACT${1}"
 
 adv_estimator=grpo
 
@@ -29,9 +29,9 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=128
-n_resp_per_prompt=8
-train_prompt_mini_bsz=32
+train_prompt_bsz=256
+n_resp_per_prompt=4
+train_prompt_mini_bsz=64
 
 # DAPO
 # don't do filter.
@@ -43,12 +43,13 @@ max_num_gen_batches=10
 use_jepo=True
 use_grpo=False
 jepo_delimiter=" So the overall score is "
-jepo_format_penalty=2
+jepo_format_penalty=1
 
 jepo_lr=1e-7
 jepo_beta_supp=1
 jepo_beta_kl=0.001
-jepo_entropy_coeff=0.001
+jepo_entropy_coeff=0.000
+jepo_use_format_adv=False
 
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
@@ -68,18 +69,19 @@ NNODES=1
 NGPUS_PER_NODE=8
 
 # Use 1.5B model
-MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
+# MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
+MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=data/feedback_collection_for_sft/train.parquet
-TEST_FILE=data/feedback_bench_for_sft/train.parquet
+TRAIN_FILE=data/feedback_collection_for_base/train.parquet
+TEST_FILE=data/feedback_bench_for_base/train.parquet
 
 
 # Algorithm
-temperature=1.5
+temperature=1
 top_p=0.9
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=0.9
-repetition_penalty=1
+repetition_penalty=1.0
 
 # Performance Related Parameter - adjusted for 1.5B model
 sp_size=1  # Single sequence parallel for smaller model
@@ -90,7 +92,7 @@ offload=True  # Keep offload for memory efficiency
 gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
-extra_val_files=\"tract_data/feedback_collection_ood_for_sft/train.parquet,tract_data/flask_eval_for_sft/train.parquet,tract_data/mt_bench_for_sft/train.parquet,tract_data/vicuna_eval_for_sft/train.parquet\"
+extra_val_files=\"tract_data/feedback_collection_ood_for_base/train.parquet,tract_data/flask_eval_for_base/train.parquet,tract_data/mt_bench_for_base/train.parquet,tract_data/vicuna_eval_for_base/train.parquet\"
 
 # Use JEPO-DAPO recipe
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
@@ -118,6 +120,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_config.use_last_token_as_answer=True \
     +algorithm.jepo_config.answer_token_length=1 \
     +algorithm.jepo_config.store_last_token_probs=True \
+    +algorithm.jepo_config.use_format_adv=${jepo_use_format_adv} \
     +algorithm.jepo_epochs=${jepo_epochs} \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
@@ -191,7 +194,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.test_freq=10 \
     trainer.save_freq=10 \
     trainer.total_epochs=500 \

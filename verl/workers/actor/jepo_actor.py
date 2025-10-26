@@ -258,10 +258,11 @@ class JEPOActor(DataParallelPPOActor):
                      
 
                     # add a parameter to not use format_adv_mb
-                    use_format_adv = micro_batch.batch.get("use_format_adv", False)
+                    use_format_adv = bool(jepo_cfg.get("use_format_adv", True))
                     A_all = jepo_adv_raw_mb + format_adv_mb if use_format_adv else jepo_adv_raw_mb # TODO: ablate
 
                     w_all = micro_batch.batch.get("jepo_weights", torch.ones((ids_full.size(0),), device=dev))
+                    w_all_extra = micro_batch.batch.get("jepo_extra_weights", torch.ones((ids_full.size(0),), device=dev))
 
                     prefix_lens = [int(c) for c in c_s]
                     cot_lens = [max(0, int(a) - int(c)) for a, c in zip(a_s, c_s)]
@@ -313,6 +314,8 @@ class JEPOActor(DataParallelPPOActor):
                             # attention for GT answer tokens is 1 (no eos in GT by assumption)
                             resp_pack[j, Lc : Lc + La] = ans_ids
                             mask_ans[j, Lc : Lc + La] = 1
+                            # First term: beta_supp * w_all[j] (existing)
+                            # Second term: w_all[j] * last_token_log_prob will be added after forward pass
                             A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j]
 
                       
@@ -330,11 +333,20 @@ class JEPOActor(DataParallelPPOActor):
                     }
                     calculate_entropy = entropy_coeff != 0
 
-                    
-                    entropy_tok, lp_combined, _ = self._forward_micro_batch(
+
+                    entropy_tok, lp_combined, expected_values, last_token_log_probs = self._forward_micro_batch(
                         micro, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, expected_prob_replace=True,
                     )
                     
+                    # Add second term to A_pack: w_all[j] * last_token_log_prob for answer tokens
+                    for j in range(Bp):
+                        c = int(c_s[j]); a = int(a_s[j])
+                        Lc = int(cot_lens[j]); La = int(ans_lens[j])
+                        if La > 0:
+                            # A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j] * expected_values[j] + float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
+                            A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j] * expected_values[j] 
+                         
+
                  
 
                     gpg_fn = get_policy_loss_fn("gpg")
@@ -354,6 +366,7 @@ class JEPOActor(DataParallelPPOActor):
                         advantages=comb_adv,
                         response_mask=comb_mask,
                         loss_agg_mode=loss_agg_mode,
+                
                     )
 
                     if calculate_entropy:
@@ -455,6 +468,7 @@ class JEPOActor(DataParallelPPOActor):
         jepo_adv_raw = torch.zeros(N, device=dev)
         format_adv = torch.zeros(N, device=dev)
         jepo_weights = torch.zeros(N, device=dev)
+        jepo_extra_weights = torch.zeros(N, device=dev)
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
         
         # NEW: Store full probability distribution for last token if requested
@@ -788,7 +802,7 @@ class JEPOActor(DataParallelPPOActor):
                 
                 # Compute rewards: R_i = -(E[digit]_i - y)^2
                 squared_errors = (expected_values - gt_value) ** 2
-                rewards = squared_errors  # Negative because we want to minimize error
+                rewards = -squared_errors  # Negative because we want to minimize error
                 
                 # DEBUG: Print regression reward details (only rank 0, first few groups)
                 
@@ -825,7 +839,7 @@ class JEPOActor(DataParallelPPOActor):
                 # Compute weights based on rewards (higher reward = higher weight)
                 # Use softmax on rewards (not log-probs)
                 # w_full = torch.softmax(rewards, dim=0)
-                w_full = 2 * (expected_values - gt_value) 
+                w_full = - 2 * (expected_values - gt_value) 
                 
                 # Format advantage based on valid last token (1-5 check)
                 has_delim = has_delim_all[idxs]
@@ -835,6 +849,10 @@ class JEPOActor(DataParallelPPOActor):
                     torch.tensor(-float(format_penalty), device=dev, dtype=torch.float32),
                 )
                 fmt = fmt - fmt.mean()
+
+                ans_logprob = ans_logprob_all[idxs]
+                extra_w_full = torch.softmax(ans_logprob, dim=0)
+
                 
             else:
                 # ============ ORIGINAL: Log-probability-based advantage computation ============
@@ -866,6 +884,7 @@ class JEPOActor(DataParallelPPOActor):
             jepo_adv_raw[idxs] = A_raw
             format_adv[idxs] = fmt
             jepo_weights[idxs] = w_full
+            jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
 
             _outer_pbar.update(1)
         _outer_pbar.close()
@@ -875,6 +894,7 @@ class JEPOActor(DataParallelPPOActor):
         data.batch["format_adv"] = format_adv
         data.batch["jepo_weights"] = jepo_weights
         data.batch["has_delimiter"] = has_delim_all
+        data.batch["jepo_extra_weights"] = jepo_extra_weights
         
         # NEW: Write back last token probabilities if collected
         if store_last_token_probs and last_token_probs_all is not None:
@@ -894,6 +914,7 @@ class JEPOActor(DataParallelPPOActor):
             print(f"  Has delimiter (valid format) - count: {has_delim_all.sum().item()}/{N} ({100*has_delim_all.float().mean().item():.1f}%)")
             if use_regression_reward:
                 print(f"  Weights - min: {jepo_weights.min().item():.4f}, max: {jepo_weights.max().item():.4f}, mean: {jepo_weights.mean().item():.4f}")
+                print(f"  Extra Weights - min: {jepo_extra_weights.min().item():.4f}, max: {jepo_extra_weights.max().item():.4f}, mean: {jepo_extra_weights.mean().item():.4f}")
         
         return data
 

@@ -241,6 +241,9 @@ class DataParallelPPOActor(BasePPOActor):
                         # logits_rmpad: (total_nnz, vocab_size)
                         last_token_logits = logits_rmpad[rmpad_positions, :]  # (bsz, vocab_size)
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
+                        # last_token_greedy_decode = torch.argmax(last_token_probs, dim=-1)  # (bsz,)
+                        # last_token_greedy_decode_values = last_token_greedy_decode.unsqueeze(-1).float()  # (bsz, 1)
+
                         
                         # Extract probabilities for digit tokens 0-5
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
@@ -312,10 +315,11 @@ class DataParallelPPOActor(BasePPOActor):
                     # expected_values: (bsz,)
                     
                     batch_indices = torch.arange(batch_size, device=full_log_probs.device)
-                    full_log_probs[batch_indices, last_token_positions, 0] = expected_values
-                    
-                    
-                         
+                    last_token_log_probs = full_log_probs[batch_indices, last_token_positions, 0]
+                    full_log_probs[batch_indices, last_token_positions, 0] = 1.0 # The real value will be calculated outside
+                    full_log_probs = torch.ones_like(full_log_probs)  # Placeholder to indicate replacement needed
+
+                   
 
                 
 
@@ -407,8 +411,12 @@ class DataParallelPPOActor(BasePPOActor):
 
             if not regression:
                 return entropy, log_probs
+
             else:
-                return entropy, log_probs, expected_values
+                if expected_prob_replace:
+                    return entropy, log_probs, expected_values, last_token_log_probs 
+                else:
+                    return entropy, log_probs, expected_values
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
