@@ -315,6 +315,8 @@ class JEPOActor(DataParallelPPOActor):
                             mask_ans[j, Lc : Lc + La] = 1
                             A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j]
 
+                      
+
                     # Derive positions from attention to ensure consistent left/right padding
                     if attn_pack.numel() > 0:
                         pos_from_mask = (attn_pack.cumsum(dim=1) - 1).clamp_min(0) * attn_pack
@@ -786,7 +788,7 @@ class JEPOActor(DataParallelPPOActor):
                 
                 # Compute rewards: R_i = -(E[digit]_i - y)^2
                 squared_errors = (expected_values - gt_value) ** 2
-                rewards = -squared_errors  # Negative because we want to minimize error
+                rewards = squared_errors  # Negative because we want to minimize error
                 
                 # DEBUG: Print regression reward details (only rank 0, first few groups)
                 
@@ -823,7 +825,7 @@ class JEPOActor(DataParallelPPOActor):
                 # Compute weights based on rewards (higher reward = higher weight)
                 # Use softmax on rewards (not log-probs)
                 # w_full = torch.softmax(rewards, dim=0)
-                w_full = - 2 * (expected_values - gt_value) 
+                w_full = 2 * (expected_values - gt_value) 
                 
                 # Format advantage based on valid last token (1-5 check)
                 has_delim = has_delim_all[idxs]

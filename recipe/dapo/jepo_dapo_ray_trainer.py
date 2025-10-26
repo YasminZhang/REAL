@@ -393,13 +393,20 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     partial_uids = [
                         uid for uid in all_prompt_uids if uid not in all_correct_uids and uid not in all_incorrect_uids
                     ]
+
+                    all_incorrect_uids_ = [
+                            uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
+                        ]
+                    partial_uids_ = [
+                        uid for uid in all_prompt_uids if uid not in all_correct_uids and uid not in all_incorrect_uids_
+                    ]
                     
                     num_prompt_in_batch += len(kept_prompt_uids)
                     num_prompt_in_jepo_buffer += len(all_incorrect_uids)
                     # Log solve stats for this gen batch
                     metrics["jepo_buffer/solve_all"] = len(all_correct_uids)
-                    metrics["jepo_buffer/solve_none"] = len(all_incorrect_uids)
-                    metrics["jepo_buffer/solve_partial"] = len(partial_uids)
+                    metrics["jepo_buffer/solve_none"] = len(all_incorrect_uids_)
+                    metrics["jepo_buffer/solve_partial"] = len(partial_uids_)
                     metrics["jepo_buffer/total_prompts"] = len(all_prompt_uids)
 
                     kept_traj_idxs = []
@@ -412,8 +419,9 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
 
                     # Add to JEPO buffer for each generation batch before continuing
                     if self.use_jepo:
-                        print(f"Solve None: {len(all_incorrect_uids)}")
-                        print(f"Solve Partial: {len(kept_prompt_uids)}")
+                        print(f"Solve None: {len(all_incorrect_uids_)}")
+                        print(f"Solve Partial: {len(partial_uids_)}")
+                        print(f"Solve All: {len(all_correct_uids)}")
                         print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
                         all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])

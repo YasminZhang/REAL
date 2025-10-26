@@ -29,7 +29,7 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=256
+train_prompt_bsz=128
 n_resp_per_prompt=8
 train_prompt_mini_bsz=32
 
@@ -46,9 +46,9 @@ jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
 jepo_lr=1e-7
-jepo_beta_supp=0.000
-jepo_beta_kl=0.0
-jepo_entropy_coeff=0.0
+jepo_beta_supp=1
+jepo_beta_kl=0.001
+jepo_entropy_coeff=0.001
 
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
@@ -191,7 +191,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.test_freq=10 \
     trainer.save_freq=10 \
     trainer.total_epochs=500 \

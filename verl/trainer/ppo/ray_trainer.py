@@ -964,7 +964,12 @@ class RayPPOTrainer:
                     all_metrics[f"val-{extra_name}-core/correlation/kendall"] = correlations["Kendall"]
                     all_metrics[f'val-core-correlation/{data_source}/pearson'] = correlations["Pearson"]
                     all_metrics[f'val-core-correlation/{data_source}/spearman'] = correlations["Spearman"]
-                                                                                          
+            
+            # calculate the avg pearson and spearman across all extra validations
+            if 'correlations' in extra_results:
+                all_metrics[f"val_avg/val-extra_pearson_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/pearson"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg/val-extra_spearman_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/spearman"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg/val-extra_kendall_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/kendall"] for i in range(len(self.extra_val_dataloaders))])
 
                 # Add extra validation samples for logging (optional, only from main for now to avoid clutter)
                 # all_sample_inputs.extend(extra_results['sample_inputs'])
