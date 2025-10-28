@@ -430,7 +430,10 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
                             if self.use_reference_policy:
                                 with marked_timer("ref", timing_raw, "olive"):
-                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(all_incorrect_batch)
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(all_incorrect_batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(all_incorrect_batch)
                                     all_incorrect_batch = all_incorrect_batch.union(ref_log_prob)
                             jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size*self.config.actor_rollout_ref.rollout.n])
                             metrics.update(jepo_metrics)
@@ -492,7 +495,10 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     
                     if self.use_reference_policy:
                         with marked_timer("ref", timing_raw, "olive"):
-                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            if not self.ref_in_actor:
+                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            else:
+                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     if self.use_critic:

@@ -317,7 +317,7 @@ class DataParallelPPOActor(BasePPOActor):
                     batch_indices = torch.arange(batch_size, device=full_log_probs.device)
                     last_token_log_probs = full_log_probs[batch_indices, last_token_positions, 0]
                     full_log_probs[batch_indices, last_token_positions, 0] = 1.0 # The real value will be calculated outside
-                    full_log_probs = torch.ones_like(full_log_probs)  # Placeholder to indicate replacement needed
+                  
 
                    
 

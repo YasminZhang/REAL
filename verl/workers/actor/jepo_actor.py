@@ -153,6 +153,9 @@ class JEPOActor(DataParallelPPOActor):
 
         # -------- meters --------
         meters = dict(
+            raw_jepo_loss=0.0,
+            raw_total_loss=0.0,
+            raw_kl_loss=0.0,
             jepo_loss=0.0,
             supp_loss=0.0,
             total_loss=0.0,
@@ -177,7 +180,7 @@ class JEPOActor(DataParallelPPOActor):
         else:
             jepo_adv_raw_all = data.batch["jepo_adv"]
         format_adv_all = data.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_all))
-
+        
         # Buffer-wide diagnostics for format advantage
         try:
             fmt_max = float(torch.max(format_adv_all).detach().item())
@@ -264,6 +267,8 @@ class JEPOActor(DataParallelPPOActor):
                     w_all = micro_batch.batch.get("jepo_weights", torch.ones((ids_full.size(0),), device=dev))
                     w_all_extra = micro_batch.batch.get("jepo_extra_weights", torch.ones((ids_full.size(0),), device=dev))
 
+                    gt_values = micro_batch.batch.get("gt_values", torch.zeros((ids_full.size(0),), device=dev))
+
                     prefix_lens = [int(c) for c in c_s]
                     cot_lens = [max(0, int(a) - int(c)) for a, c in zip(a_s, c_s)]
                     ans_lens = [
@@ -316,7 +321,7 @@ class JEPOActor(DataParallelPPOActor):
                             mask_ans[j, Lc : Lc + La] = 1
                             # First term: beta_supp * w_all[j] (existing)
                             # Second term: w_all[j] * last_token_log_prob will be added after forward pass
-                            A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j]
+                            A_pack[j, Lc : Lc + La] = 1.0  # placeholder TODO: fix later 
 
                       
 
@@ -337,14 +342,21 @@ class JEPOActor(DataParallelPPOActor):
                     entropy_tok, lp_combined, expected_values, last_token_log_probs = self._forward_micro_batch(
                         micro, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, expected_prob_replace=True,
                     )
+
+                    
                     
                     # Add second term to A_pack: w_all[j] * last_token_log_prob for answer tokens
-                    for j in range(Bp):
-                        c = int(c_s[j]); a = int(a_s[j])
-                        Lc = int(cot_lens[j]); La = int(ans_lens[j])
-                        if La > 0:
+                    # for j in range(Bp):
+                    #     c = int(c_s[j]); a = int(a_s[j])
+                    #     Lc = int(cot_lens[j]); La = int(ans_lens[j])
+                    #     if La > 0:
                             # A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j] * expected_values[j] + float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
-                            A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j] * expected_values[j] 
+                            # A_pack[j, Lc : Lc + La] = float(beta_supp) *  (expected_values[j] - gt_values[j])**2
+                    
+                    
+                    extra_loss = float(beta_supp) *  (expected_values - gt_values)**2
+                  
+                             
                          
 
                  
@@ -352,13 +364,7 @@ class JEPOActor(DataParallelPPOActor):
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
-
-                    # use the cot before the gt answer for regression reward
-                    # use_regression_reward = bool(jepo_cfg.get("use_regression_reward", True))
-                    # if use_regression_reward:
-                    #     entropy_tok = entropy_tok[:,:-1]
-                    #     lp_combined = lp_combined[:,:-1]
-                    #     comb_mask = comb_mask[:,:-1]
+ 
 
                     jepo_loss_part, _, _, _ = gpg_fn(
                         old_log_prob=None,
@@ -366,7 +372,8 @@ class JEPOActor(DataParallelPPOActor):
                         advantages=comb_adv,
                         response_mask=comb_mask,
                         loss_agg_mode=loss_agg_mode,
-                
+                        extra_loss=extra_loss,
+                        extra_loss_only=True
                     )
 
                     if calculate_entropy:
@@ -408,6 +415,9 @@ class JEPOActor(DataParallelPPOActor):
                     meters["total_loss"] += float(loss_chunk.detach())
                     meters["jepo_loss"] += float(jepo_loss_part.detach()) * loss_scale_factor
                     meters["supp_loss"] += 0.0
+                    meters["raw_total_loss"] += float(loss_chunk.detach()) / loss_scale_factor
+                    meters["raw_jepo_loss"] += float(jepo_loss_part.detach().item())
+                    meters["raw_kl_loss"] += float(kl_loss_part.detach().item())
                     with torch.no_grad():
                         meters["jepo_advs_mean"] += float(A_all.mean().detach())
                         meters["jepo_advs_std"] += float(A_all.std(unbiased=False).detach())
@@ -417,7 +427,7 @@ class JEPOActor(DataParallelPPOActor):
                         meters["log_mean_answer_probs_mean"] += float(answer_log_probs.mean().detach())
                     meters["kl_loss"] += float(kl_loss_part.detach()) * loss_scale_factor
                     meter_count += 1
-                    print(f"micro-batch loss: {float(loss_chunk.detach()):.6f}")
+                    print(f"micro-batch loss: {float(loss_chunk.detach()) / loss_scale_factor:.6f}")
 
                 # End of mini-batch: step optimizer
                 grad_norm = self._optimizer_step()
@@ -432,6 +442,9 @@ class JEPOActor(DataParallelPPOActor):
                 meters[k] /= meter_count
 
         return {
+            "jepo_actor/raw_jepo_loss": meters["raw_jepo_loss"],
+            "jepo_actor/raw_total_loss": meters["raw_total_loss"],
+            "jepo_actor/raw_kl_loss": meters["raw_kl_loss"],
             "jepo_actor/jepo_loss": meters["jepo_loss"],
             "jepo_actor/supp_loss": meters["supp_loss"],
             "jepo_actor/total_loss": meters["total_loss"],
@@ -470,6 +483,7 @@ class JEPOActor(DataParallelPPOActor):
         jepo_weights = torch.zeros(N, device=dev)
         jepo_extra_weights = torch.zeros(N, device=dev)
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
+        gt_values_stored = torch.zeros(N, device=dev)
         
         # NEW: Store full probability distribution for last token if requested
         if store_last_token_probs:
@@ -885,6 +899,8 @@ class JEPOActor(DataParallelPPOActor):
             format_adv[idxs] = fmt
             jepo_weights[idxs] = w_full
             jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
+            if use_regression_reward:
+                gt_values_stored[idxs] = gt_values_tensor[idxs]  
 
             _outer_pbar.update(1)
         _outer_pbar.close()
@@ -895,6 +911,7 @@ class JEPOActor(DataParallelPPOActor):
         data.batch["jepo_weights"] = jepo_weights
         data.batch["has_delimiter"] = has_delim_all
         data.batch["jepo_extra_weights"] = jepo_extra_weights
+        data.batch["gt_values"] = gt_values_stored
         
         # NEW: Write back last token probabilities if collected
         if store_last_token_probs and last_token_probs_all is not None:
@@ -915,6 +932,7 @@ class JEPOActor(DataParallelPPOActor):
             if use_regression_reward:
                 print(f"  Weights - min: {jepo_weights.min().item():.4f}, max: {jepo_weights.max().item():.4f}, mean: {jepo_weights.mean().item():.4f}")
                 print(f"  Extra Weights - min: {jepo_extra_weights.min().item():.4f}, max: {jepo_extra_weights.max().item():.4f}, mean: {jepo_extra_weights.mean().item():.4f}")
+                print(f"  GT values stored - min: {gt_values_stored.min().item():.4f}, max: {gt_values_stored.max().item():.4f}, mean: {gt_values_stored.mean().item():.4f}")
         
         return data
 

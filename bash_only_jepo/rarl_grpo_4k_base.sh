@@ -45,9 +45,9 @@ use_grpo=False
 jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
-jepo_lr=1e-7
+jepo_lr=1e-8
 jepo_beta_supp=1
-jepo_beta_kl=0.001
+jepo_beta_kl=0.000
 jepo_entropy_coeff=0.000
 jepo_use_format_adv=False
 
@@ -72,7 +72,7 @@ NGPUS_PER_NODE=8
 # MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
 MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=data/feedback_collection_for_base/train.parquet
+TRAIN_FILE=data/feedback_collection_for_base/train_sample.parquet
 TEST_FILE=data/feedback_bench_for_base/train.parquet
 
 
@@ -154,6 +154,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.lora_rank=64 \
+    actor_rollout_ref.model.lora_alpha=64.0 \
+    actor_rollout_ref.rollout.load_format="safetensors" \
+    actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.use_shm=True \
     actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \

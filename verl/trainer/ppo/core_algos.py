@@ -955,7 +955,7 @@ def compute_policy_loss_gspo(
 
 
 @register_policy_loss("gpg")
-def compute_policy_loss_gpg(old_log_prob, log_prob, advantages, response_mask, loss_agg_mode="token-mean", config=None, extra_log_probs=None):
+def compute_policy_loss_gpg(old_log_prob, log_prob, advantages, response_mask, loss_agg_mode="token-mean", config=None, extra_loss=None, extra_loss_only=False):
     """Adapted from
     https://github.com/AMAP-ML/GPG/blob/main/VisualThinker-R1-Zero/src/open-r1-multimodal/src/open_r1/trainer/grpo_trainer.py#L495
     Args:
@@ -969,10 +969,12 @@ def compute_policy_loss_gpg(old_log_prob, log_prob, advantages, response_mask, l
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via GPG
     """
+    if extra_loss_only:
+        return extra_loss.mean(), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
     pg_losses = -log_prob * advantages
-    
-
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    if extra_loss is not None:
+        pg_loss = pg_loss + extra_loss.sum()
     return pg_loss, torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
 
 
