@@ -70,7 +70,8 @@ NGPUS_PER_NODE=8
 
 # Use 1.5B model
 # MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
+# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
+MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=data/feedback_collection_for_base/train_sample.parquet
 TEST_FILE=data/feedback_bench_for_base/train.parquet

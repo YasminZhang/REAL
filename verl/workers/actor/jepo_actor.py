@@ -354,7 +354,7 @@ class JEPOActor(DataParallelPPOActor):
                             # A_pack[j, Lc : Lc + La] = float(beta_supp) *  (expected_values[j] - gt_values[j])**2
                     
                     
-                    extra_loss = float(beta_supp) *  (expected_values - gt_values)**2
+                    extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
                   
                              
                          
@@ -373,7 +373,7 @@ class JEPOActor(DataParallelPPOActor):
                         response_mask=comb_mask,
                         loss_agg_mode=loss_agg_mode,
                         extra_loss=extra_loss,
-                        extra_loss_only=True
+                        extra_loss_only=False
                     )
 
                     if calculate_entropy:
