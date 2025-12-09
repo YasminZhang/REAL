@@ -1,0 +1,4 @@
+python /home/aiscuser/jepo/examples/data_preprocess/feedback_json_to_parquet.py  --json_file=/home/aiscuser/tract/inference/data/feedback_collection_ood_test.json   --local_dir=data/feedback_ood_test
+python /home/aiscuser/jepo/examples/data_preprocess/feedback_json_to_parquet.py  --json_file=/home/aiscuser/tract/inference/data/feedback_collection_ood_test.json   --local_dir=data/feedback_ood_test
+python /home/aiscuser/jepo/examples/data_preprocess/feedback_json_to_parquet.py  --json_file=/home/aiscuser/tract/inference/data/feedback_collection_ood_test.json   --local_dir=data/feedback_ood_test
+python /home/aiscuser/jepo/examples/data_preprocess/feedback_json_to_parquet.py  --json_file=/home/aiscuser/tract/inference/data/feedback_collection_ood_test.json   --local_dir=data/feedback_ood_test

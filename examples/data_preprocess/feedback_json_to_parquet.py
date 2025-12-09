@@ -29,7 +29,7 @@ from verl.utils.hdfs_io import copy, makedirs
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--json_file", required=True, help="Path to the input JSON file")
-    parser.add_argument("--local_dir", default="./data/feedback_collection_ood_test_for_sft")
+    parser.add_argument("--local_dir", default="./data/feedback_collection_ood_test_for_base")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
@@ -40,15 +40,23 @@ if __name__ == "__main__":
         json_data = json.load(f)
 
     # let's better not add this instruction following the SFT in TRACT
-    instruction_following = "Please think step by step and then output the final score with 'So the overall score is (score)'."
+    # instruction_following = "Ignore the output format requirement above. Please think step by step and then output the final score with 'So the overall score is (score)'. Please end with the final score only without a period."
+    instruction_following = "3. The output format should look as follows: \"Feedback: (write a feedback for criteria). So the overall score is (score)\"'. Please end with the final score only without a period."
 
     # Transform data to the required format
     def process_fn(example, idx):
-        question = example["instruction"]
-        if 'base' in args.local_dir: 
-            question = question + " " + instruction_following
+        question = example.pop("instruction")
+
+        # replace "3. The output format should look as follows: "Feedback: (write a feedback for criteria) [RESULT] (an integer number between 1 and 5)"" with instruction_following
+        original_format = '3. The output format should look as follows: "Feedback: (write a feedback for criteria) [RESULT] (an integer number between 1 and 5)"'
+        # how to determined if the original_format is in the question
+        if original_format in question:
+            question = question.replace(original_format, instruction_following)
         else:
-            question = question
+            print('original_format not in question')
+
+        question = question.strip("\",\n")
+    
 
         # Use the gpt4_score as the ground truth
         answer = example["gpt4_score"]

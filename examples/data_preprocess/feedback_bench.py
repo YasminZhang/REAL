@@ -30,7 +30,7 @@ def extract_solution(solution_str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="./data/feedback_bench_for_sft")
+    parser.add_argument("--local_dir", default="./data/feedback_bench_for_base")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
@@ -44,17 +44,21 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     # test_dataset = dataset["test"]
 
-    # let's better not add this instruction following the SFT in TRACT
-    instruction_following = "Please think step by step and then output the final score with 'So the overall score is (score)'."
+    instruction_following = "3. The output format should look as follows: \"Feedback: (write a feedback for criteria). So the overall score is (score)\"'. Please end with the final score only without a period."
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
             question = example.pop("instruction")
-            if 'base' in args.local_dir: 
-                question = question + " " + instruction_following
+
+            # replace "3. The output format should look as follows: "Feedback: (write a feedback for criteria) [RESULT] (an integer number between 1 and 5)"" with instruction_following
+            original_format = '3. The output format should look as follows: "Feedback: (write a feedback for criteria) [RESULT] (an integer number between 1 and 5)"'
+            # how to determined if the original_format is in the question
+            if original_format in question:
+                question = question.replace(original_format, instruction_following)
             else:
-                question = question
+                print('original_format not in question')
+
 
             answer = example.pop("orig_score")
             solution = answer
