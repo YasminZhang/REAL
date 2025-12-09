@@ -21,6 +21,16 @@ def main():
             # print 'prompt'
             print("\nPrompt content:")
             print(df.sample(1).iloc[0]['prompt'][0]['content'])
+            if 'extra_info' in df.columns:
+                print("\nExtra info:")
+                print(df.sample(1).iloc[0]['extra_info'])
+                # print question and answer if exist
+                if 'question' in df.sample(1).iloc[0]['extra_info']:
+                    print("\nQuestion:")
+                    print(df.sample(1).iloc[0]['extra_info']['question'])
+                if 'answer' in df.sample(1).iloc[0]['extra_info']:
+                    print("\nAnswer:")
+                    print(df.sample(1).iloc[0]['extra_info']['answer'])
 
 
     except Exception as e:

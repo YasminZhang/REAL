@@ -32,7 +32,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="./data/feedback_collection_for_base")
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument("--sft", action='store_true', help="Whether to add extra_info for SFT")
 
     args = parser.parse_args()
 
@@ -71,20 +70,13 @@ if __name__ == "__main__":
             answer = example.pop("orig_score")
             solution = answer
 
-            output = example.get('output')
-            # print(f"Original output: {output}")
-            # strip  ". [RESULT] (score)" the score is an integer between 1 and 5
-            if output:
-                output = output[:-12]
-                # print(f"Processed output: {output}")
-
 
             data = {
                 "data_source": data_source,
                 "prompt": [{"role": "user", "content": question}],
                 "ability": "math",
                 "reward_model": {"style": "rule", "ground_truth": solution},
-                "extra_info": {"split": split, "index": idx, 'reward_design': False} if not args.sft else  {"split": split, "index": idx, 'reward_design': False, 'question': question, 'answer': output},
+                "extra_info": {"split": split, "index": idx, 'reward_design': False} ,
             }
             return data
 
