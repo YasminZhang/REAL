@@ -173,7 +173,7 @@ def build_jepo_teacher_forced_batch(
             min_suffix_len=max(1, delimiter_suffix_min_len),
         )
 
-        print(f"Response {i}: found delimiter at {s}, kind={match_kind}")  
+        # print(f"Response {i}: found delimiter at {s}, kind={match_kind}")  
 
         prompt_i = prompt_tokens[i] if isinstance(prompt_tokens, torch.Tensor) else torch.tensor(prompt_tokens[i], device=device)
         prompt_i = prompt_i.to(device=device, dtype=torch.long)
@@ -216,7 +216,7 @@ def build_jepo_teacher_forced_batch(
             has_delimiter.append(False)
             delimiter_match_kind.append("none")
             cot_tokens_list.append(cot_ids)
-
+            breakpoint()
          
 
     # Validate pad token id
@@ -261,9 +261,9 @@ def build_jepo_teacher_forced_batch(
         position_ids = torch.empty((n, 0), dtype=torch.long, device=device)
 
     # let gt_list be the second token in each entry
-    gt_list = [(gt[1],) if len(gt) > 1 else [] for gt in gt_list]
+    gt_list = [(gt[1],) if len(gt) > 1 else gt for gt in gt_list]
 
-    # breakpoint()
+  
 
     return {
         'batch_input_ids': batch_input_ids,

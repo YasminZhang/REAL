@@ -271,15 +271,18 @@ class DataParallelPPOActor(BasePPOActor):
                         # Compute expected value: E[digit] = Σ p(k) * k
                         expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
 
-                        breakpoint()
                         
+    
                         # print when running rank 0
                         if torch.distributed.get_rank() == 0:
+                            print("expected_prob_replace:", expected_prob_replace)
                             print("[rmpad branch] Computed expected digit values for last token (no padding).")
                             print(f"Valid lengths (first 5): {valid_lengths[:5].cpu().numpy()}")
                             print(f"Last token positions in original seq (first 5): {last_token_positions[:5].cpu().numpy()}")
                             print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].detach().cpu().numpy()}")
+
+                        
 
                    
                   

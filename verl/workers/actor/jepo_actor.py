@@ -323,6 +323,7 @@ class JEPOActor(DataParallelPPOActor):
                             # Second term: w_all[j] * last_token_log_prob will be added after forward pass
                             A_pack[j, Lc : Lc + La] = 1.0  # placeholder TODO: fix later 
 
+                         
                       
 
                     # Derive positions from attention to ensure consistent left/right padding
