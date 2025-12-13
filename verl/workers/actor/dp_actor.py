@@ -210,8 +210,8 @@ class DataParallelPPOActor(BasePPOActor):
                                                    [28734, 28740, 28750, 28770, 28781, 28782])
 
                         
-                        print('self.config', self.config)
-                        breakpoint()
+                         
+                        # breakpoint()
                         # If Qwen
                         # digit_token_ids = getattr(self.config, 'digit_token_ids', 
                         #                            [15,16,17,18,19,20]) if self.config.model_name.startswith("qwen") else digit_token_ids
@@ -245,22 +245,33 @@ class DataParallelPPOActor(BasePPOActor):
                         # Flip along the sequence dimension, find first 1 from the end
                         last_token_positions = attention_mask.size(1) - 1 - torch.argmax(attention_mask.flip(dims=[1]), dim=1) - 1 
 
-
+                        
 
                         # Extract logits for the last valid token of each sample from rmpad format
                         # logits_rmpad: (total_nnz, vocab_size)
+
+                        
+
                         last_token_logits = logits_rmpad[rmpad_positions, :]  # (bsz, vocab_size)
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
                         # last_token_greedy_decode = torch.argmax(last_token_probs, dim=-1)  # (bsz,)
                         # last_token_greedy_decode_values = last_token_greedy_decode.unsqueeze(-1).float()  # (bsz, 1)
 
+
+
                         
                         # Extract probabilities for digit tokens 0-5
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
                         digit_values = torch.arange(6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
+
+                        # print("digit_probs", digit_probs)
+
+                    
                         
                         # Compute expected value: E[digit] = Σ p(k) * k
                         expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
+
+                        breakpoint()
                         
                         # print when running rank 0
                         if torch.distributed.get_rank() == 0:
@@ -376,6 +387,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # Get digit token IDs (default for Llama/Mistral tokenizers)
                         digit_token_ids = getattr(self.config, 'digit_token_ids', 
                                                    [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])
+                        digit_token_ids = [15,16,17,18,19,20,21,22,23,24]  # For Qwen tokenizer
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits.device, dtype=torch.long)
                         
                         # Find the actual last token position for each sample using attention mask

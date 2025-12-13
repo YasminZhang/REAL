@@ -124,6 +124,9 @@ def _find_delimiter_position(
     return best_idx, best_kind
 
 
+
+     
+
 def build_jepo_teacher_forced_batch(
     response_tokens: torch.Tensor,
     prompt_tokens: torch.Tensor,
@@ -141,6 +144,10 @@ def build_jepo_teacher_forced_batch(
     # Token-ID based delimiter splitting (avoid decode/encode drift)
     n = response_tokens.size(0)
     max_response_length = response_tokens.size(1)
+    
+    # print('Delimiter str:', delimiter_str)
+    if delimiter_str[0] != ' ':
+        delimiter_str = ' ' + delimiter_str
 
     delimiter_ids = tokenizer.encode(delimiter_str, add_special_tokens=False)
     delimiter_len = len(delimiter_ids)
@@ -150,42 +157,65 @@ def build_jepo_teacher_forced_batch(
     cot_tokens_list: List[List[int]] = []
     delimiter_match_kind: List[str] = []
 
-    for i in range(n):
-        resp_i = response_tokens[i].detach().clone()
-        s, match_kind = _find_delimiter_position(
-            resp_i, delimiter_ids,
-            enable_suffix_anchor=delimiter_suffix_anchor,
-            min_suffix_len=max(1, delimiter_suffix_min_len),
-        )
-        found = s >= 0
-        has_delimiter.append(bool(found))
-        delimiter_match_kind.append(match_kind)
-        cot_ids = resp_i[:s+1].tolist() if found else resp_i.tolist() # TODO: check here
-        gt_len = len(gt_list[i])
-        max_cot = max(0, max_response_length - delimiter_len - gt_len)
-        if len(cot_ids) > max_cot:
-            cot_ids = cot_ids[:max_cot]
-        cot_tokens_list.append(cot_ids)
-
     batch_input_tokens: List[torch.Tensor] = []
     cot_start_positions: List[int] = []
     answer_start_positions: List[int] = []
 
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+
     for i in range(n):
+        resp_i = response_tokens[i].detach().clone()
+        
+        # find the first position of EOS in resp_i
+        s, match_kind = _find_delimiter_position(
+            resp_i, [eos_id],
+            enable_suffix_anchor=delimiter_suffix_anchor,
+            min_suffix_len=max(1, delimiter_suffix_min_len),
+        )
+
+        print(f"Response {i}: found delimiter at {s}, kind={match_kind}")  
+
         prompt_i = prompt_tokens[i] if isinstance(prompt_tokens, torch.Tensor) else torch.tensor(prompt_tokens[i], device=device)
         prompt_i = prompt_i.to(device=device, dtype=torch.long)
-        cot_i = torch.tensor(cot_tokens_list[i], device=device, dtype=torch.long)
-        delim_i = torch.tensor(delimiter_ids, device=device, dtype=torch.long)
-        gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
 
-        left = torch.cat([prompt_i, cot_i], dim=0)
-        left_plus_delim = torch.cat([left, delim_i], dim=0)
-        full = torch.cat([left_plus_delim, gt_i], dim=0)
-
-        batch_input_tokens.append(full)
-        cot_start_positions.append(len(prompt_i))
-        # TODO: the gt_list = An empty space + score, and delimiter_str = 'So the overall score is', no empty space, so answer starts after the empty space
-        answer_start_positions.append(len(left_plus_delim) + 1)
+        if s > 0:
+            # Found EOS at s.
+            # Last token before EOS is at s-1.
+            # CoT is everything before s-1.
+            cot_ids = resp_i[:s].tolist()
+            
+            # Use GT answer
+            # gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
+            cot_i = torch.tensor(cot_ids, device=device, dtype=torch.long)
+            
+            full = torch.cat([prompt_i, cot_i], dim=0)
+            
+            batch_input_tokens.append(full)
+            cot_start_positions.append(len(prompt_i))
+            answer_start_positions.append(len(prompt_i) + len(cot_i) - 1)
+            
+            has_delimiter.append(True)
+            delimiter_match_kind.append(match_kind)
+            cot_tokens_list.append(cot_ids)
+        else:
+            # EOS not found. Fallback: treat last token as answer.
+            if len(resp_i) > 0:
+                cot_ids = resp_i.tolist()
+            else:
+                cot_ids = []
+                
+            # gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
+            cot_i = torch.tensor(cot_ids, device=device, dtype=torch.long)
+            
+            full = torch.cat([prompt_i, cot_i], dim=0)
+            
+            batch_input_tokens.append(full)
+            cot_start_positions.append(len(prompt_i))
+            answer_start_positions.append(len(prompt_i) + len(cot_i) -1 )
+            
+            has_delimiter.append(False)
+            delimiter_match_kind.append("none")
+            cot_tokens_list.append(cot_ids)
 
          
 
@@ -232,6 +262,8 @@ def build_jepo_teacher_forced_batch(
 
     # let gt_list be the second token in each entry
     gt_list = [(gt[1],) if len(gt) > 1 else [] for gt in gt_list]
+
+    # breakpoint()
 
     return {
         'batch_input_ids': batch_input_ids,
