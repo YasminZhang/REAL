@@ -208,6 +208,16 @@ class DataParallelPPOActor(BasePPOActor):
                         # Get digit token IDs (default for Llama/Mistral tokenizers)
                         digit_token_ids = getattr(self.config, 'digit_token_ids', 
                                                    [28734, 28740, 28750, 28770, 28781, 28782])
+
+                        
+                        print('self.config', self.config)
+                        breakpoint()
+                        # If Qwen
+                        # digit_token_ids = getattr(self.config, 'digit_token_ids', 
+                        #                            [15,16,17,18,19,20]) if self.config.model_name.startswith("qwen") else digit_token_ids
+
+                        digit_token_ids = [15,16,17,18,19,20]
+
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits_rmpad.device, dtype=torch.long)
                         
                         # Find the actual last token position for each sample using attention mask

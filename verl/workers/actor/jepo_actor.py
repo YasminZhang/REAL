@@ -359,8 +359,6 @@ class JEPOActor(DataParallelPPOActor):
                              
                          
 
-                 
-
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
