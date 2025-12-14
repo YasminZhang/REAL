@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 # add eval
 
-project_name='JEPO_token'
+project_name='JEPO_token_Nov20'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
 exp_name="Regression-SFT-TRACT${1}"
 
@@ -71,7 +71,7 @@ NGPUS_PER_NODE=8
 MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=data/feedback_collection_for_sft/train.parquet
-TEST_FILE=data/feedback_bench_for_sft/train.parquet
+TEST_FILE=data/feedback_collection_ood_test_for_sft/test.parquet
 
 
 # Algorithm
@@ -90,7 +90,7 @@ offload=True  # Keep offload for memory efficiency
 gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
-extra_val_files=\"tract_data/feedback_collection_ood_for_sft/train.parquet,tract_data/flask_eval_for_sft/train.parquet,tract_data/mt_bench_for_sft/train.parquet,tract_data/vicuna_eval_for_sft/train.parquet\"
+extra_val_files=\"data/feedback_collection_ood_test_for_sft/test.parquet,data/flask_for_sft/test.parquet,data/mt_bench_for_sft/test.parquet,data/vicuna_for_sft/test.parquet\"
 
 # Use JEPO-DAPO recipe
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
