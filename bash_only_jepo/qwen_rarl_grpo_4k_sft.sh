@@ -46,7 +46,7 @@ jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
 jepo_lr=1e-8
-jepo_beta_supp=0.1
+jepo_beta_supp=1
 jepo_beta_kl=0.000
 jepo_entropy_coeff=0.000
 jepo_use_format_adv=False
@@ -211,5 +211,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.log_val_generations=5 \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
     custom_reward_function.name=deepscaler_reward_fn \
-    # actor_rollout_ref.model.lora_rank=64 \
-    # actor_rollout_ref.model.lora_alpha=64.0 \
+    actor_rollout_ref.model.lora_rank=64 \
+    actor_rollout_ref.model.lora_alpha=64.0 \
