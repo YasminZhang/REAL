@@ -973,9 +973,10 @@ def compute_policy_loss_gpg(old_log_prob, log_prob, advantages, response_mask, l
         return extra_loss.mean(), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
     pg_losses = -log_prob * advantages
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss_backup = pg_loss.detach().clone()
     if extra_loss is not None:
         pg_loss = pg_loss + extra_loss.mean()
-    return pg_loss, torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+    return pg_loss, pg_loss_backup, torch.tensor(0.0), torch.tensor(0.0)
 
 
 @register_policy_loss("clip_cov")

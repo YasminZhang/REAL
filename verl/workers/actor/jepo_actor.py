@@ -154,6 +154,10 @@ class JEPOActor(DataParallelPPOActor):
         # -------- meters --------
         meters = dict(
             raw_jepo_loss=0.0,
+            raw_cot_loss=0.0,
+            raw_log_likelihood_loss=0.0,
+            raw_l2_loss=0.0,
+            raw_supp_loss=0.0,
             raw_total_loss=0.0,
             raw_kl_loss=0.0,
             jepo_loss=0.0,
@@ -353,6 +357,10 @@ class JEPOActor(DataParallelPPOActor):
                     #     if La > 0:
                             # A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j] * expected_values[j] + float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
                             # A_pack[j, Lc : Lc + La] = float(beta_supp) *  (expected_values[j] - gt_values[j])**2
+
+                    l2_loss = ((expected_values - gt_values)**2).detach().mean().clone()
+                    log_likelihood_loss = (-last_token_log_probs).detach().mean().clone()
+
                     
                     
                     extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
@@ -365,7 +373,7 @@ class JEPOActor(DataParallelPPOActor):
                     comb_adv = A_pack
  
 
-                    jepo_loss_part, _, _, _ = gpg_fn(
+                    jepo_loss_part, cot_loss_backup, _, _ = gpg_fn(
                         old_log_prob=None,
                         log_prob=lp_combined,
                         advantages=comb_adv,
@@ -374,6 +382,7 @@ class JEPOActor(DataParallelPPOActor):
                         extra_loss=extra_loss,
                         extra_loss_only=False
                     )
+
 
                     if calculate_entropy:
                         entropy_loss = agg_loss(
@@ -413,9 +422,13 @@ class JEPOActor(DataParallelPPOActor):
 
                     meters["total_loss"] += float(loss_chunk.detach())
                     meters["jepo_loss"] += float(jepo_loss_part.detach()) * loss_scale_factor
-                    meters["supp_loss"] += 0.0
+                    
                     meters["raw_total_loss"] += float(loss_chunk.detach()) / loss_scale_factor
-                    meters["raw_jepo_loss"] += float(jepo_loss_part.detach().item())
+                    meters["raw_cot_loss"] += float(cot_loss_backup.detach()) 
+                    meters["raw_supp_loss"] += float(l2_loss.detach()) + float(log_likelihood_loss.detach())
+                    meters["raw_l2_loss"] += float(l2_loss.detach())
+                    meters["raw_log_likelihood_loss"] += float(log_likelihood_loss.detach())
+
                     meters["raw_kl_loss"] += float(kl_loss_part.detach().item())
                     with torch.no_grad():
                         meters["jepo_advs_mean"] += float(A_all.mean().detach())
@@ -435,17 +448,28 @@ class JEPOActor(DataParallelPPOActor):
 
         print("number of responses has delimiter for this rank:", num_delim)
 
+        # print raw losses
+        print("="*20 + " JEPO Actor Losses " + "="*20)
+        print(f"JEPO Actor raw_cot_loss: {meters['raw_cot_loss'] / max(meter_count, 1):.6f}")
+        print(f"JEPO Actor raw_l2_loss: {meters['raw_l2_loss'] / max(meter_count, 1):.6f}")
+        print(f"JEPO Actor raw_log_likelihood_loss: {meters['raw_log_likelihood_loss'] / max(meter_count, 1):.6f}")
+        print(f"JEPO Actor raw_supp_loss: {meters['raw_supp_loss'] / max(meter_count, 1):.6f}")
+        print(f"JEPO Actor raw_total_loss: {meters['raw_total_loss'] / max(meter_count, 1):.6f}")
+
+
         # average meters
         if meter_count > 0:
             for k in meters:
                 meters[k] /= meter_count
 
         return {
-            "jepo_actor/raw_jepo_loss": meters["raw_jepo_loss"],
+            "jepo_actor/raw_cot_loss": meters["raw_cot_loss"],
             "jepo_actor/raw_total_loss": meters["raw_total_loss"],
             "jepo_actor/raw_kl_loss": meters["raw_kl_loss"],
             "jepo_actor/jepo_loss": meters["jepo_loss"],
-            "jepo_actor/supp_loss": meters["supp_loss"],
+            "jepo_actor/raw_supp_loss": meters["raw_supp_loss"],
+            "jepo_actor/raw_l2_loss": meters["raw_l2_loss"],
+            "jepo_actor/raw_log_likelihood_loss": meters["raw_log_likelihood_loss"],
             "jepo_actor/total_loss": meters["total_loss"],
             "jepo_actor/grad_norm": meters["grad_norm"],
             "jepo_actor/jepo_advs_mean": meters["jepo_advs_mean"],
