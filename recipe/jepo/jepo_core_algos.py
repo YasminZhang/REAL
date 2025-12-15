@@ -216,7 +216,7 @@ def build_jepo_teacher_forced_batch(
             has_delimiter.append(False)
             delimiter_match_kind.append("none")
             cot_tokens_list.append(cot_ids)
-            breakpoint()
+            # breakpoint()
          
 
     # Validate pad token id

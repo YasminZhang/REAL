@@ -153,6 +153,7 @@ class JEPOActor(DataParallelPPOActor):
 
         # -------- meters --------
         meters = dict(
+            extra_loss=0.0,
             raw_jepo_loss=0.0,
             raw_cot_loss=0.0,
             raw_log_likelihood_loss=0.0,
@@ -360,10 +361,19 @@ class JEPOActor(DataParallelPPOActor):
 
                     l2_loss = ((expected_values - gt_values)**2).detach().mean().clone()
                     log_likelihood_loss = (-last_token_log_probs).detach().mean().clone()
+                    
+
 
                     
-                    
-                    extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
+                    use_log_loss = jepo_cfg.get("use_log_prob_loss", False)
+                    use_extra_loss = jepo_cfg.get("use_extra_loss", False)
+                    if use_extra_loss:
+                        if use_log_loss:
+                            extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
+                        else:
+                            extra_loss = float(beta_supp) *  (expected_values - gt_values)**2
+                    else:
+                        extra_loss = torch.tensor(0.0, device=dev)
                   
                              
                          
@@ -421,6 +431,7 @@ class JEPOActor(DataParallelPPOActor):
                     loss_chunk.backward()
 
                     meters["total_loss"] += float(loss_chunk.detach())
+                    meters["extra_loss"] += float(extra_loss.detach())  
                     meters["jepo_loss"] += float(jepo_loss_part.detach()) * loss_scale_factor
                     
                     meters["raw_total_loss"] += float(loss_chunk.detach()) / loss_scale_factor
@@ -455,6 +466,8 @@ class JEPOActor(DataParallelPPOActor):
         print(f"JEPO Actor raw_log_likelihood_loss: {meters['raw_log_likelihood_loss'] / max(meter_count, 1):.6f}")
         print(f"JEPO Actor raw_supp_loss: {meters['raw_supp_loss'] / max(meter_count, 1):.6f}")
         print(f"JEPO Actor raw_total_loss: {meters['raw_total_loss'] / max(meter_count, 1):.6f}")
+        print(f"JEPO Actor extra_loss: {meters.get('extra_loss', 0.0) / max(meter_count, 1):.6f}")
+
 
 
         # average meters
@@ -463,6 +476,7 @@ class JEPOActor(DataParallelPPOActor):
                 meters[k] /= meter_count
 
         return {
+            "jepo_actor/extra_loss": meters.get("extra_loss", 0.0),
             "jepo_actor/raw_cot_loss": meters["raw_cot_loss"],
             "jepo_actor/raw_total_loss": meters["raw_total_loss"],
             "jepo_actor/raw_kl_loss": meters["raw_kl_loss"],

@@ -45,12 +45,13 @@ use_grpo=False
 jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
-jepo_lr=1e-8
+jepo_lr=1e-6
 jepo_beta_supp=1
 jepo_beta_kl=0.000
 jepo_entropy_coeff=0.000
 jepo_use_format_adv=False
-
+jepo_use_log_prob_loss=False 
+jepo_use_extra_loss=False
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1
@@ -125,6 +126,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_config.answer_token_length=1 \
     +algorithm.jepo_config.store_last_token_probs=True \
     +algorithm.jepo_config.use_format_adv=${jepo_use_format_adv} \
+    +algorithm.jepo_config.use_log_prob_loss=${jepo_use_log_prob_loss} \
+    +algorithm.jepo_config.use_extra_loss=${jepo_use_extra_loss} \
     +algorithm.jepo_epochs=${jepo_epochs} \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
