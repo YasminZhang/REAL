@@ -869,7 +869,8 @@ class JEPOActor(DataParallelPPOActor):
                     A_raw = rewards - rewards.mean()  # Zero-centered
                 
                 # Normalize advantages
-                A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
+                if bool(jepo_cfg.get("normalize_advantages", True)):
+                    A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
                 A_raw = A_raw.clamp(-1.0, 1.0)
 
                 if _rank == 0:  # Only first 3 groups to avoid spam
