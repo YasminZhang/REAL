@@ -381,6 +381,10 @@ class JEPOActor(DataParallelPPOActor):
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
+
+                    use_cot_loss = jepo_cfg.get("use_cot_loss", True)
+                    if not use_cot_loss:
+                        lp_combined = torch.zeros_like(lp_combined)
  
 
                     jepo_loss_part, cot_loss_backup, _, _ = gpg_fn(
