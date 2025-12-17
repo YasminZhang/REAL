@@ -77,7 +77,9 @@ NGPUS_PER_NODE=8
 # MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec9/Regression-warmup-Qwen3-1.7B/global_step_1170/huggingface"
 # MODEL_PATH="Qwen/Qwen3-1.7B"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_1170/huggingface"
+# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_1170/huggingface"
+MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
+
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/train.parquet
 TEST_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet

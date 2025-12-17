@@ -365,13 +365,19 @@ class JEPOActor(DataParallelPPOActor):
 
 
                     
-                    use_log_loss = jepo_cfg.get("use_log_prob_loss", False)
-                    use_extra_loss = jepo_cfg.get("use_extra_loss", False)
+                    use_log_loss = jepo_cfg.get("use_log_prob_loss", True)
+                    use_extra_loss = jepo_cfg.get("use_extra_loss", True)
+                    use_l2_loss = jepo_cfg.get("use_l2_loss", False)
+                    extra_loss = 0.0
                     if use_extra_loss:
-                        if use_log_loss:
-                            extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
-                        else:
+                        if use_log_loss and use_l2_loss:
+                            extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 +  float(beta_supp) * w_all_extra[j] *   (-last_token_log_probs).mean()
+                        elif use_log_loss:
+                            extra_loss = -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
+                        elif use_l2_loss:
                             extra_loss = float(beta_supp) *  (expected_values - gt_values)**2
+                        else:
+                            raise RuntimeError("At least one of use_log_loss or use_l2_loss must be True if use_extra_loss is True")
                     else:
                         extra_loss = torch.tensor(0.0, device=dev)
                   
@@ -382,7 +388,7 @@ class JEPOActor(DataParallelPPOActor):
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
 
-                    use_cot_loss = jepo_cfg.get("use_cot_loss", True)
+                    use_cot_loss = jepo_cfg.get("use_cot_loss", False)
                     if not use_cot_loss:
                         lp_combined = torch.zeros_like(lp_combined)
  
@@ -435,7 +441,7 @@ class JEPOActor(DataParallelPPOActor):
                     loss_chunk.backward()
 
                     meters["total_loss"] += float(loss_chunk.detach())
-                    meters["extra_loss"] += float(extra_loss.detach())  
+                    meters["extra_loss"] += float(extra_loss.mean().detach())  
                     meters["jepo_loss"] += float(jepo_loss_part.detach()) * loss_scale_factor
                     
                     meters["raw_total_loss"] += float(loss_chunk.detach()) / loss_scale_factor
