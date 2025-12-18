@@ -15,43 +15,36 @@
 JEPO-enhanced DAPO Trainer that integrates JEPO algorithm with DAPO workflow
 """
 
+import os
+# Import JEPO components
+import sys
 import uuid
 from collections import defaultdict
 from copy import deepcopy
 from pprint import pprint
-from typing import Dict, List, Any
-import torch
+from typing import Any, Dict, List
+
 import numpy as np
+import torch
 from tqdm import tqdm
 
+from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    reduce_metrics,
-)
-from verl.trainer.ppo.ray_trainer import (
-    AdvantageEstimator,
-    apply_kl_penalty,
-    compute_advantage,
-    compute_response_mask,
-)
+from verl.trainer.ppo.metric_utils import (compute_data_metrics,
+                                           compute_throughout_metrics,
+                                           compute_timing_metrics,
+                                           reduce_metrics)
+from verl.trainer.ppo.ray_trainer import (AdvantageEstimator, Role,
+                                          apply_kl_penalty, compute_advantage,
+                                          compute_response_mask)
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
-from verl.trainer.ppo.ray_trainer import Role
 
-from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
-
-# Import JEPO components
-import sys
-import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jepo'))
 
-from jepo_core_algos import (
-    JEPOConfig
-)
+from jepo_core_algos import JEPOConfig
+
 
 class RayJEPODAPOTrainer(RayDAPOTrainer):
     """
@@ -143,6 +136,17 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             # Suffix-anchor delimiter matching config (optional)
             "delimiter_suffix_anchor": getattr(self.config.algorithm, 'jepo_delimiter_suffix_anchor', True),
             "delimiter_suffix_min_len": getattr(self.config.algorithm, 'jepo_delimiter_suffix_min_len', 2),
+            # add more JEPO-specific config here as needed
+            "use_regression_reward": getattr(self.config.algorithm, 'jepo_use_regression_reward', False),
+            "use_last_token_as_answer": getattr(self.config.algorithm, 'jepo_use_last_token_as_answer', True),
+            "answer_token_length": getattr(self.config.algorithm, 'jepo_answer_token_length', 1),
+            "store_last_token_probs": getattr(self.config.algorithm, 'jepo_store_last_token_probs', True),
+            "use_format_adv": getattr(self.config.algorithm, 'jepo_use_format_adv', False),
+            "use_log_prob_loss": getattr(self.config.algorithm, 'jepo_use_log_prob_loss', False),
+            "use_extra_loss": getattr(self.config.algorithm, 'jepo_use_extra_loss', False),
+            "use_cot_loss": getattr(self.config.algorithm, 'jepo_use_cot_loss', False),
+            "normalize_advantages": getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
+            "use_l2_loss": getattr(self.config.algorithm, 'jepo_use_l2_loss', False),
         }
         
         # Call the JEPO-specific actor update with the properly formatted DataProto
@@ -205,6 +209,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         Enhanced DAPO training loop with JEPO integration
         """
         from omegaconf import OmegaConf
+
         from verl.utils.tracking import Tracking
         logger = Tracking(
             project_name=self.config.trainer.project_name,

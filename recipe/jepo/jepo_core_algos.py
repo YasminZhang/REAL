@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import numpy as np
 import torch
 import torch.nn.functional as F
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
-from copy import deepcopy
-import numpy as np
-from collections import defaultdict
+
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
+
 
 def dummy_backward_fsdp_safe(model, scaler=None):
     device = next(model.parameters()).device
@@ -31,6 +34,7 @@ def dummy_backward_fsdp_safe(model, scaler=None):
     (scaler.scale(loss) if scaler else loss).backward()
 
 import torch.distributed as dist
+
 
 def _to_tensor_list(x, device):
     return torch.as_tensor(x, device=device) if not isinstance(x, torch.Tensor) else x.to(device)
@@ -70,6 +74,19 @@ class JEPOConfig:
     num_response_per_question: int = 8
     accum_steps: int = 4  # fixed accumulate steps for consistent backwards
     responses_micro_batch_size: int = 8
+    # add more configs as needed
+    use_last_token_as_answer: bool = False
+    answer_token_length: int = 1
+    store_last_token_probs: bool = False
+    use_regression_reward: bool = False
+    use_format_adv: bool = False
+    use_log_prob_loss: bool = False
+    use_extra_loss: bool = False
+    use_cot_loss: bool = False
+    normalize_advantages: bool = True
+    use_l2_loss: bool = False
+    
+    
 
 
 def _find_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:

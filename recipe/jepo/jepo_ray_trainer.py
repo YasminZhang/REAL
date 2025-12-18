@@ -15,21 +15,18 @@
 JEPO Ray Trainer - combines GRPO workflow with JEPO algorithm
 """
 
-from typing import Dict, List, Any, Optional
-import torch
-import numpy as np
 from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+import numpy as np
+import torch
+
 from verl.trainer.ppo.core_algos import AdvantageEstimator
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.utils.torch_functional import masked_mean
-from .jepo_core_algos import (
-    JEPOConfig, 
-    JEPOBuffer, 
-    compute_jepo_advantages,
-    compute_jepo_gradients,
-    jepo_loss
-)
+
+from .jepo_core_algos import (JEPOBuffer, JEPOConfig, compute_jepo_advantages,
+                              compute_jepo_gradients, jepo_loss)
 
 
 class RayJEPOTrainer(RayPPOTrainer):
@@ -52,7 +49,36 @@ class RayJEPOTrainer(RayPPOTrainer):
             beta_supp=getattr(self.config.algorithm, 'jepo_beta_supp', 1.0),
             beta_kl=getattr(self.config.algorithm, 'jepo_beta_kl', 0.1),
             buffer_size=getattr(self.config.algorithm, 'jepo_buffer_size', 1000),
-            jepo_steps=getattr(self.config.algorithm, 'jepo_steps', 5)
+            jepo_steps=getattr(self.config.algorithm, 'jepo_steps', 5),
+            epochs=getattr(self.config.algorithm, 'jepo_epochs', 1),
+            mini_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_mini_batch_size_per_gpu', 8),
+            micro_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_micro_batch_size_per_gpu', 1),
+            num_response_per_question=getattr(self.config.algorithm, 'jepo_num_response_per_question', 8),
+            accum_steps=getattr(self.config.algorithm, 'jepo_accum_steps', 4),
+            responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8),
+            # +algorithm.jepo_use_regression_reward=True \
+            # +algorithm.jepo_use_last_token_as_answer=True \
+            # +algorithm.jepo_answer_token_length=1 \
+            # +algorithm.jepo_store_last_token_probs=True \
+            # +algorithm.jepo_use_format_adv=${jepo_use_format_adv} \
+            # +algorithm.jepo_use_log_prob_loss=${jepo_use_log_prob_loss} \
+            # +algorithm.jepo_use_extra_loss=${jepo_use_extra_loss} \
+            # +algorithm.jepo_use_cot_loss=${jepo_use_cot_loss} \
+            # +algorithm.jepo_normalize_advantages=${jepo_normalize_advantages} \
+                
+            # add the new configs above
+            use_regression_reward=getattr(self.config.algorithm, 'jepo_use_regression_reward', True),
+            use_last_token_as_answer=getattr(self.config.algorithm, 'jepo_use_last_token_as_answer', True),
+            answer_token_length=getattr(self.config.algorithm, 'jepo_answer_token_length', 1),
+            store_last_token_probs=getattr(self.config.algorithm, 'jepo_store_last_token_probs', True),
+            use_format_adv=getattr(self.config.algorithm, 'jepo_use_format_adv', False),
+            use_log_prob_loss=getattr(self.config.algorithm, 'jepo_use_log_prob_loss', False),
+            use_extra_loss=getattr(self.config.algorithm, 'jepo_use_extra_loss', False),
+            use_cot_loss=getattr(self.config.algorithm, 'jepo_use_cot_loss', False),
+            normalize_advantages=getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
+            use_l2_loss=getattr(self.config.algorithm, 'jepo_use_l2_loss', False),    
+                
+            
         )
         
         self.jepo_buffer = JEPOBuffer(self.jepo_config.buffer_size)
@@ -60,6 +86,8 @@ class RayJEPOTrainer(RayPPOTrainer):
         
         # Enable JEPO mode if configured
         self.use_jepo = getattr(self.config.algorithm, 'use_jepo', True)
+        
+         
         
     def _check_all_responses_incorrect(self, rewards: torch.Tensor) -> bool:
         """Check if all responses in batch have reward = 0"""

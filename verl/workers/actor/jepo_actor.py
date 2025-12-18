@@ -121,7 +121,8 @@ class JEPOActor(DataParallelPPOActor):
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
-        
+ 
+        breakpoint()
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
 
@@ -343,6 +344,8 @@ class JEPOActor(DataParallelPPOActor):
                         "responses": resp_pack,
                     }
                     calculate_entropy = entropy_coeff != 0
+
+                    
 
 
                     entropy_tok, lp_combined, expected_values, last_token_log_probs = self._forward_micro_batch(
