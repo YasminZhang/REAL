@@ -85,6 +85,7 @@ class JEPOConfig:
     use_cot_loss: bool = False
     normalize_advantages: bool = True
     use_l2_loss: bool = False
+    data_type: str = "partial_incorrect"
     
     
 

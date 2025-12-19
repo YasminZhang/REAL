@@ -77,7 +77,8 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             micro_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_micro_batch_size_per_gpu', 1),
             responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8),
             num_response_per_question=getattr(self.config.actor_rollout_ref.rollout, 'n', 1),
-            accum_steps=getattr(self.config.algorithm, 'jepo_accum_steps', 4)
+            accum_steps=getattr(self.config.algorithm, 'jepo_accum_steps', 4),
+            data_type=getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
         )
         
         self.jepo_metrics = defaultdict(list)
@@ -147,6 +148,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "use_cot_loss": getattr(self.config.algorithm, 'jepo_use_cot_loss', False),
             "normalize_advantages": getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
             "use_l2_loss": getattr(self.config.algorithm, 'jepo_use_l2_loss', False),
+            "data_type": getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
         }
         
         # Call the JEPO-specific actor update with the properly formatted DataProto
@@ -416,11 +418,21 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
 
                     kept_traj_idxs = []
                     all_incorrect_traj_idxs = []
+                    all_partial_traj_idxs = []
+                    all_correct_traj_idxs = []
+                    
                     for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
                         if traj_from_prompt_uid in kept_prompt_uids:
                             kept_traj_idxs.append(idx)
-                        if traj_from_prompt_uid in all_incorrect_uids:
+                        if traj_from_prompt_uid in all_incorrect_uids_:
                             all_incorrect_traj_idxs.append(idx)
+                        if traj_from_prompt_uid in partial_uids_:
+                            all_partial_traj_idxs.append(idx)
+                        if traj_from_prompt_uid in all_correct_uids:
+                            all_correct_traj_idxs.append(idx)
+                        
+                            
+                
 
                     # Add to JEPO buffer for each generation batch before continuing
                     if self.use_jepo:
@@ -428,8 +440,23 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         print(f"Solve Partial: {len(partial_uids_)}")
                         print(f"Solve All: {len(all_correct_uids)}")
                         print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
-                        all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
+                        print('data_type:', self.jepo_config.data_type)
+                        
+                        if self.jepo_config.data_type == "partial_incorrect":
+                            all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs + all_partial_traj_idxs]
+                        elif self.jepo_config.data_type == "all":
+                            all_incorrect_new_batch = new_batch
+                        elif self.jepo_config.data_type == "incorrect":
+                            all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
+                        elif self.jepo_config.data_type == "partial":
+                            all_incorrect_new_batch = new_batch[all_partial_traj_idxs]
+                        else:
+                            raise ValueError(f"Unknown jepo_data_type: {self.jepo_config.data_type}")
+                        
+                         
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
+                        
+                        print(f"JEPO buffer size (in prompts): {len(all_incorrect_batch)}")
 
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:

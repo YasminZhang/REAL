@@ -15,46 +15,47 @@
 import logging
 import os
 import sys
-import torch
+
 import numpy as np
+import torch
 
 sys.path.append('/home/aiscuser/jepo/recipe/jepo')
 
 import logging
 import os
-import ray
 
+import ray
 import torch
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from tqdm import tqdm
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
-from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
+from verl.trainer.ppo.core_algos import (agg_loss, get_policy_loss_fn,
+                                         kl_penalty)
+from verl.utils.device import (get_device_name, is_cuda_available,
+                               is_npu_available)
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import (
-    prepare_dynamic_batch,
-)
+from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.ulysses import (gather_outputs_and_unpad, ulysses_pad,
+                                ulysses_pad_and_slice_inputs)
 from verl.workers.actor import BasePPOActor
-from verl.workers.config import ActorConfig
 from verl.workers.actor.dp_actor import DataParallelPPOActor
-from tqdm import tqdm
+from verl.workers.config import ActorConfig
 
 if is_cuda_available:
-    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+    from flash_attn.bert_padding import (index_first_axis, pad_input,
+                                         rearrange, unpad_input)
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-from jepo_core_algos import (
-    attach_jepo_adv_to_dataproto,
-    dummy_backward_fsdp_safe,
-    _allreduce_sum_scalar,
-)
+from jepo_core_algos import (_allreduce_sum_scalar,
+                             attach_jepo_adv_to_dataproto,
+                             dummy_backward_fsdp_safe)
 
 __all__ = ["JEPOActor"]
 
@@ -72,10 +73,12 @@ def compute_response_mask(data: DataProto):
 ## No custom token bucketing helpers are used here to avoid divergence from internals.
 
 
-from contextlib import nullcontext
 import math
+from contextlib import nullcontext
+
 import numpy as np
 import torch
+
 
 def _chunk_list(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
@@ -122,7 +125,7 @@ class JEPOActor(DataParallelPPOActor):
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
  
-        breakpoint()
+        print('jepo_cfg:', jepo_cfg)
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
 
@@ -344,6 +347,8 @@ class JEPOActor(DataParallelPPOActor):
                         "responses": resp_pack,
                     }
                     calculate_entropy = entropy_coeff != 0
+                    
+                     
 
                     
 
@@ -390,6 +395,8 @@ class JEPOActor(DataParallelPPOActor):
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
+                    
+                    # breakpoint()
 
                     use_cot_loss = jepo_cfg.get("use_cot_loss", False)
                     if not use_cot_loss:

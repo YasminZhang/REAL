@@ -26,21 +26,27 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
-from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
+from verl.trainer.ppo.core_algos import (agg_loss, get_policy_loss_fn,
+                                         kl_penalty)
+from verl.utils.device import (get_device_name, is_cuda_available,
+                               is_npu_available)
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
+from verl.utils.seqlen_balancing import (prepare_dynamic_batch,
+                                         restore_dynamic_batch)
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.ulysses import (gather_outputs_and_unpad, ulysses_pad,
+                                ulysses_pad_and_slice_inputs)
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 
 if is_cuda_available:
-    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+    from flash_attn.bert_padding import (index_first_axis, pad_input,
+                                         rearrange, unpad_input)
 elif is_npu_available:
-    from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
+    from transformers.integrations.npu_flash_attention import (
+        index_first_axis, pad_input, rearrange, unpad_input)
 
 
 __all__ = ["DataParallelPPOActor"]
@@ -136,7 +142,8 @@ class DataParallelPPOActor(BasePPOActor):
                     ).transpose(0, 1)
 
                 if "image_bound" in multi_modal_inputs:
-                    from verl.utils.dataset.vision_utils import process_multi_modal_inputs_for_minicpmo
+                    from verl.utils.dataset.vision_utils import \
+                        process_multi_modal_inputs_for_minicpmo
 
                     multi_modal_inputs = process_multi_modal_inputs_for_minicpmo(
                         input_ids, attention_mask, position_ids, cu_seqlens, multi_modal_inputs
@@ -183,6 +190,8 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                
+             
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
@@ -216,7 +225,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # digit_token_ids = getattr(self.config, 'digit_token_ids', 
                         #                            [15,16,17,18,19,20]) if self.config.model_name.startswith("qwen") else digit_token_ids
 
-                        digit_token_ids = [15,16,17,18,19,20]
+                        digit_token_ids = [16,17,18,19,20]
 
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits_rmpad.device, dtype=torch.long)
                         
@@ -243,7 +252,7 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Get indices of last 1 in each batch
                         # Flip along the sequence dimension, find first 1 from the end
-                        last_token_positions = attention_mask.size(1) - 1 - torch.argmax(attention_mask.flip(dims=[1]), dim=1) - 1 
+                        last_token_positions = attention_mask.size(1) - 1 - torch.argmax(attention_mask.flip(dims=[1]), dim=1)   
 
                         
 
@@ -262,7 +271,7 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Extract probabilities for digit tokens 0-5
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
-                        digit_values = torch.arange(6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
+                        digit_values = torch.arange(1, 6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
 
                         # print("digit_probs", digit_probs)
 
@@ -340,7 +349,10 @@ class DataParallelPPOActor(BasePPOActor):
                     
                     batch_indices = torch.arange(batch_size, device=full_log_probs.device)
                     last_token_log_probs = full_log_probs[batch_indices, last_token_positions, 0]
-                    full_log_probs[batch_indices, last_token_positions, 0] = 1.0 # The real value will be calculated outside
+                    # full_log_probs[batch_indices, last_token_positions, 0] = 1.0 # The real value will be calculated outside
+                    
+                    # Need to be verified during validation
+                    breakpoint()
                   
 
                    

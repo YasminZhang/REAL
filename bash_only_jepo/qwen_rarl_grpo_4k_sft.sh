@@ -30,7 +30,7 @@ loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
 train_prompt_bsz=256
-n_resp_per_prompt=4
+n_resp_per_prompt=8
 train_prompt_mini_bsz=64
 
 # DAPO
@@ -55,6 +55,7 @@ jepo_use_extra_loss=True
 jepo_normalize_advantages=False
 jepo_use_cot_loss=False
 jepo_use_l2_loss=False
+jepo_data_type="partial" # partial, all, incorrect, partial_incorrect
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1
@@ -136,6 +137,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_use_cot_loss=${jepo_use_cot_loss} \
     +algorithm.jepo_normalize_advantages=${jepo_normalize_advantages} \
     +algorithm.jepo_use_l2_loss=${jepo_use_l2_loss} \
+    +algorithm.jepo_data_type=${jepo_data_type} \
     +algorithm.jepo_epochs=${jepo_epochs} \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
     +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
