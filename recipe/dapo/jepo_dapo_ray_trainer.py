@@ -108,6 +108,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "delimiter": self.jepo_config.delimiter,
             "format_penalty": self.jepo_config.format_penalty,
             "beta_supp": self.jepo_config.beta_supp,
+            "beta_supp_log_prob": getattr(self.config.algorithm, 'jepo_beta_supp_log_prob', 0.001),
             "beta_kl": self.jepo_config.beta_kl,
             # training/loop settings read by JEPOActor
             "epochs": self.jepo_config.epochs,
@@ -149,6 +150,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "normalize_advantages": getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
             "use_l2_loss": getattr(self.config.algorithm, 'jepo_use_l2_loss', False),
             "data_type": getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
+            
         }
         
         # Call the JEPO-specific actor update with the properly formatted DataProto

@@ -265,6 +265,8 @@ class DataParallelPPOActor(BasePPOActor):
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
                         # last_token_greedy_decode = torch.argmax(last_token_probs, dim=-1)  # (bsz,)
                         # last_token_greedy_decode_values = last_token_greedy_decode.unsqueeze(-1).float()  # (bsz, 1)
+                        
+                        
 
 
 
@@ -272,8 +274,10 @@ class DataParallelPPOActor(BasePPOActor):
                         # Extract probabilities for digit tokens 0-5
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
                         digit_values = torch.arange(1, 6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
-
-                        # print("digit_probs", digit_probs)
+                        
+                        if expected_prob_replace:
+                            # calculate log probs input_ids_rmpad_rolled at last token positions
+                            last_token_log_probs = torch.log(last_token_probs.gather(1, input_ids_rmpad_rolled[rmpad_positions].unsqueeze(-1)).squeeze(-1))  # (bsz,)
 
                     
                         
@@ -340,19 +344,7 @@ class DataParallelPPOActor(BasePPOActor):
                 
 
                 
-                # Replace the real last token's log-prob using expected value over digits 0-9
-          
-                if expected_prob_replace:
-                    # full_log_probs: (bsz, seqlen, 1)
-                    # last_token_positions: (bsz,) - different position per sample
-                    # expected_values: (bsz,)
-                    
-                    batch_indices = torch.arange(batch_size, device=full_log_probs.device)
-                    last_token_log_probs = full_log_probs[batch_indices, last_token_positions, 0]
-                    # full_log_probs[batch_indices, last_token_positions, 0] = 1.0 # The real value will be calculated outside
-                    
-                    # Need to be verified during validation
-                    breakpoint()
+                
                   
 
                    
@@ -361,8 +353,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                 # only return response part:
                 if calculate_entropy:
-                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
-                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    entropy = full_entropy.squeeze(-1)[:, -response_length -2 : -2]  # (bsz, response_length)
+                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 2: -2]  # (bsz, response_length)
 
                 
                 

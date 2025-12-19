@@ -121,6 +121,7 @@ class JEPOActor(DataParallelPPOActor):
         micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))      # questions per backward call
         format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
+        beta_supp_log_prob = float(jepo_cfg.get("beta_supp_log_prob", 0.001))
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
@@ -330,7 +331,7 @@ class JEPOActor(DataParallelPPOActor):
                             mask_ans[j, Lc : Lc + La] = 1
                             # First term: beta_supp * w_all[j] (existing)
                             # Second term: w_all[j] * last_token_log_prob will be added after forward pass
-                            A_pack[j, Lc : Lc + La] = 1.0  # placeholder TODO: fix later 
+                            A_pack[j, Lc : Lc + La] = 0.0  # placeholder TODO: fix later 
 
                          
                       
@@ -356,6 +357,8 @@ class JEPOActor(DataParallelPPOActor):
                     entropy_tok, lp_combined, expected_values, last_token_log_probs = self._forward_micro_batch(
                         micro, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, expected_prob_replace=True,
                     )
+                    
+                    
 
                     
                     
@@ -379,11 +382,11 @@ class JEPOActor(DataParallelPPOActor):
                     extra_loss = 0.0
                     if use_extra_loss:
                         if use_log_loss and use_l2_loss:
-                            extra_loss = float(beta_supp) *  (expected_values - gt_values)**2 +  float(beta_supp) * w_all_extra[j] *   (-last_token_log_probs).mean()
+                            extra_loss = float(beta_supp) * ( (expected_values - gt_values)**2).mean() +  float(beta_supp_log_prob) *    (-last_token_log_probs).mean()
                         elif use_log_loss:
-                            extra_loss = -  float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
+                            extra_loss = -  float(beta_supp_log_prob) *    last_token_log_probs.mean()
                         elif use_l2_loss:
-                            extra_loss = float(beta_supp) *  (expected_values - gt_values)**2
+                            extra_loss = float(beta_supp) * ( (expected_values - gt_values)**2).mean()
                         else:
                             raise RuntimeError("At least one of use_log_loss or use_l2_loss must be True if use_extra_loss is True")
                     else:
@@ -395,6 +398,8 @@ class JEPOActor(DataParallelPPOActor):
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
+                    
+                   
                     
                     # breakpoint()
 
@@ -511,6 +516,7 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/cot_log_probs_mean": meters["cot_log_probs_mean"],
             "jepo_actor/log_mean_answer_probs_mean": meters["log_mean_answer_probs_mean"],
             "jepo_actor/beta_supp": beta_supp,
+            "jepo_actor/beta_supp_log_prob": beta_supp_log_prob,
             "jepo_actor/kl_loss": meters.get("kl_loss", 0.0),
             "jepo_actor/beta_kl": beta_kl,
             "jepo_buffer/num_has_delimiter": int(num_delim),
