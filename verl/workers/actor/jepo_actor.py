@@ -936,16 +936,28 @@ class JEPOActor(DataParallelPPOActor):
                 #################### calculate the accuracy reward ####################
                 last_token_log_probs = last_token_log_probs_all[idxs] if last_token_log_probs_all is not None else None
                 if last_token_log_probs is not None:
-                    rewards = torch.exp(last_token_log_probs)  # Convert log-probs to probs, [B]
+                    # rewards = torch.exp(last_token_log_probs)  # Convert log-probs to probs, [B]
+                    # if B > 1:
+                    #     # Leave-one-out mean reward
+                    #     total_reward = rewards.sum()
+                    #     loo_mean_rewards = (total_reward - rewards) / (B - 1)
+                    #     A_prob = rewards - loo_mean_rewards
+                    # else:
+                    #     # Single sample: no baseline
+                    #     A_prob = rewards - rewards.mean()  # Zero-centered
+                    
+                    # Groupwise math (identical)
+                    lse_all = torch.logsumexp(last_token_log_probs, dim=0)
                     if B > 1:
-                        # Leave-one-out mean reward
-                        total_reward = rewards.sum()
-                        loo_mean_rewards = (total_reward - rewards) / (B - 1)
-                        A_prob = rewards - loo_mean_rewards
+                        d = last_token_log_probs - lse_all
+                        lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+                        v_i = lse_others - math.log(B - 1)
                     else:
-                        # Single sample: no baseline
-                        A_prob = rewards - rewards.mean()  # Zero-centered
-                        
+                        v_i = ans_logprob.new_full((B,), float("-inf"))
+                    log_mean = lse_all - math.log(max(B, 1))
+                    
+                    A_prob = (log_mean - v_i)
+                                     
                     # Normalize advantages
                     if bool(jepo_cfg.get("normalize_advantages", True)):
                         A_prob = A_prob / (A_prob.std(unbiased=False) + 1e-8)
