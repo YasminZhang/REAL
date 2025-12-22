@@ -703,7 +703,7 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores, gts,expected_values):
+    def _maybe_log_val_generations(self, inputs, outputs, scores, gts=None, expected_values=None):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         generations_to_log = self.config.trainer.log_val_generations
@@ -713,8 +713,11 @@ class RayPPOTrainer:
 
         import numpy as np
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores, gts, expected_values, strict=True))
+        # Create tuples - include gts and expected_values if provided
+        if gts is not None and expected_values is not None:
+            samples = list(zip(inputs, outputs, scores, gts, expected_values, strict=True))
+        else:
+            samples = list(zip(inputs, outputs, scores, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -1062,7 +1065,13 @@ class RayPPOTrainer:
 
 
         # Log validation generations (only for main validation to avoid clutter)
-        self._maybe_log_val_generations(inputs=all_sample_inputs, outputs=all_sample_outputs, scores=all_sample_scores, gts=all_sample_gts, expected_values=main_results.get('sample_expected_values', []))
+        self._maybe_log_val_generations(
+            inputs=all_sample_inputs, 
+            outputs=all_sample_outputs, 
+            scores=all_sample_scores,
+            gts=main_results.get('sample_gts', None),
+            expected_values=main_results.get('sample_expected_values', None)
+        )
 
         # Dump generations for main validation
         val_data_dir = self.config.trainer.get("validation_data_dir", None)

@@ -446,23 +446,28 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         
                         if self.jepo_config.data_type == "partial_incorrect":
                             all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs + all_partial_traj_idxs]
-                            
+                            num_prompt_in_jepo_buffer += len(all_incorrect_uids_) + len(partial_uids_)
                         elif self.jepo_config.data_type == "all":
                             all_incorrect_new_batch = new_batch
+                            num_prompt_in_jepo_buffer += len(all_prompt_uids)
                         elif self.jepo_config.data_type == "incorrect":
                             all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
+                            num_prompt_in_jepo_buffer += len(all_incorrect_uids_)
                         elif self.jepo_config.data_type == "partial":
                             all_incorrect_new_batch = new_batch[all_partial_traj_idxs]
+                            num_prompt_in_jepo_buffer += len(partial_uids_)
                         else:
                             raise ValueError(f"Unknown jepo_data_type: {self.jepo_config.data_type}")
                         
-                        num_prompt_in_jepo_buffer += len(all_incorrect_new_batch)
+                        print(f"JEPO buffer size (in prompts): {len(all_incorrect_batch)}")
+                        
+                        
                         print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
                         
                          
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
                         
-                        print(f"JEPO buffer size (in prompts): {len(all_incorrect_batch)}")
+                        
 
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:

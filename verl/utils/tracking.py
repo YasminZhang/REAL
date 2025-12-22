@@ -294,13 +294,21 @@ class ValidationGenerationsLogger:
     def _log_generations_to_wandb(self, samples, step, wandb):
         """Log samples to wandb as a table"""
 
+        # Detect number of fields per sample (3 or 5)
+        fields_per_sample = len(samples[0]) if samples else 3
+        
         # Create column names for all samples
-        columns = ["step"] + sum(
-            [[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], []
-        )
+        if fields_per_sample == 5:
+            columns = ["step"] + sum(
+                [[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}", f"gt_{i + 1}", f"expected_value_{i + 1}"] for i in range(len(samples))], []
+            )
+        else:
+            columns = ["step"] + sum(
+                [[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], []
+            )
 
-        if not hasattr(self, "validation_table"):
-            # Initialize the table on first call
+        if not hasattr(self, "validation_table") or self.validation_table.columns != columns:
+            # Initialize the table on first call or if columns changed
             self.validation_table = wandb.Table(columns=columns)
 
         # Create a new table with same columns and existing data
