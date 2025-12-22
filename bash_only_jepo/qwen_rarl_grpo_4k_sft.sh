@@ -5,7 +5,7 @@ set -xeuo pipefail
 
 project_name='JEPO_token_Qwen'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="Regression-Base-TRACT${1}"
+exp_name="${1}"
 
 adv_estimator=grpo
 
@@ -45,9 +45,9 @@ use_grpo=False
 jepo_delimiter=" So the overall score is "
 jepo_format_penalty=1
 
-jepo_lr=1e-8
-jepo_beta_supp=0
-jepo_beta_supp_log_prob=0
+jepo_lr=2e-7
+jepo_beta_supp=1
+jepo_beta_supp_log_prob=1
 jepo_beta_kl=0.000
 jepo_entropy_coeff=0.000
 jepo_use_format_adv=False

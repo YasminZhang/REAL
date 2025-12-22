@@ -359,22 +359,9 @@ class JEPOActor(DataParallelPPOActor):
                     )
                     
                     
-
-                    
-                    
-                    # Add second term to A_pack: w_all[j] * last_token_log_prob for answer tokens
-                    # for j in range(Bp):
-                    #     c = int(c_s[j]); a = int(a_s[j])
-                    #     Lc = int(cot_lens[j]); La = int(ans_lens[j])
-                    #     if La > 0:
-                            # A_pack[j, Lc : Lc + La] = float(beta_supp) * w_all[j] * expected_values[j] + float(beta_supp) * w_all_extra[j] *   last_token_log_probs[j]
-                            # A_pack[j, Lc : Lc + La] = float(beta_supp) *  (expected_values[j] - gt_values[j])**2
-
                     l2_loss = ((expected_values - gt_values)**2).detach().mean().clone()
                     log_likelihood_loss = (-last_token_log_probs).detach().mean().clone()
                     
-
-
                     
                     use_log_loss = jepo_cfg.get("use_log_prob_loss", True)
                     use_extra_loss = jepo_cfg.get("use_extra_loss", True)

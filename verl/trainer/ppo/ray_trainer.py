@@ -98,6 +98,43 @@ def calculate_correlations(scores1, scores2):
     }
 
 
+def calculate_error_metrics(values1, values2):
+    """Calculate error metrics between two sets of values.
+    
+    Args:
+        values1: First set of values (can be tensor or list)
+        values2: Second set of values (can be tensor or list)
+        
+    Returns:
+        dict: Dictionary containing L1, L2, and RMSE metrics
+    """
+    # Convert to tensors if they're not already
+    if not torch.is_tensor(values1):
+        values1 = torch.tensor(values1)
+    if not torch.is_tensor(values2):
+        values2 = torch.tensor(values2)
+    
+    # Ensure float type for calculations
+    values1 = values1.float()
+    values2 = values2.float()
+    
+    # Ensure same device
+    if values1.device != values2.device:
+        values2 = values2.to(values1.device)
+    
+    # Calculate error metrics
+    diff = values1 - values2
+    l1 = torch.abs(diff).mean().item()
+    l2 = ((diff ** 2).mean()).item()
+    rmse = torch.sqrt((diff ** 2).mean()).item()
+    
+    return {
+        "L1": l1,
+        "L2": l2,
+        "RMSE": rmse,
+    }
+
+
 WorkerType = type[Worker]
 
 
@@ -846,15 +883,19 @@ class RayPPOTrainer:
 
         # correlation analysis between expected values and ground truth scores
         correlations = None
+        error_metrics = None
         if len(sample_expected_values) > 1 and len(sample_gts) > 1 and len(sample_expected_values) == len(sample_gts):
             try:
                 correlations = calculate_correlations(torch.tensor(sample_expected_values), torch.tensor(sample_gts))
+                error_metrics = calculate_error_metrics(torch.tensor(sample_expected_values), torch.tensor(sample_gts))
                 print(f"Correlation metrics computed: {correlations}")
+                print(f"Error metrics computed: {error_metrics}")
             except Exception as e:
-                print(f"Warning: Could not compute correlations: {e}")
+                print(f"Warning: Could not compute correlations/error metrics: {e}")
                 correlations = None
+                error_metrics = None
         else:
-            print(f"Warning: Insufficient data for correlation analysis. "
+            print(f"Warning: Insufficient data for correlation/error analysis. "
                   f"Expected values: {len(sample_expected_values)}, Ground truths: {len(sample_gts)}")
 
         # Return all collected data for further processing
@@ -872,6 +913,10 @@ class RayPPOTrainer:
         # Only include correlations if they were successfully computed
         if correlations is not None:
             result['correlations'] = correlations
+        
+        # Include error metrics if they were successfully computed
+        if error_metrics is not None:
+            result['error_metrics'] = error_metrics
             
         return result
 
@@ -925,6 +970,13 @@ class RayPPOTrainer:
             all_metrics["val-core/main/correlation/pearson"] = correlations["Pearson"]
             all_metrics["val-core/main/correlation/spearman"] = correlations["Spearman"]  
             all_metrics["val-core/main/correlation/kendall"] = correlations["Kendall"]
+        
+        # Add error metrics for main validation if available
+        if 'error_metrics' in main_results:
+            error_metrics = main_results['error_metrics']
+            all_metrics["val-core/main/error/l1"] = error_metrics["L1"]
+            all_metrics["val-core/main/error/l2"] = error_metrics["L2"]
+            all_metrics["val-core/main/error/rmse"] = error_metrics["RMSE"]
 
         # Validate extra dataloaders if they exist
         if hasattr(self, 'extra_val_dataloaders') and self.extra_val_dataloaders:
@@ -964,6 +1016,13 @@ class RayPPOTrainer:
                     all_metrics[f"val-{extra_name}-core/correlation/kendall"] = correlations["Kendall"]
                     all_metrics[f'val-core-correlation/{data_source}/pearson'] = correlations["Pearson"]
                     all_metrics[f'val-core-correlation/{data_source}/spearman'] = correlations["Spearman"]
+                
+                # if error metrics are available for extra validation, add them
+                if 'error_metrics' in extra_results:
+                    error_metrics = extra_results['error_metrics']
+                    all_metrics[f"val-{extra_name}-core/error/l1"] = error_metrics["L1"]
+                    all_metrics[f"val-{extra_name}-core/error/l2"] = error_metrics["L2"]
+                    all_metrics[f"val-{extra_name}-core/error/rmse"] = error_metrics["RMSE"]
                                                                                           
 
                 
@@ -971,6 +1030,11 @@ class RayPPOTrainer:
                 all_metrics[f"val_avg/val-extra_pearson_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/pearson"] for i in range(len(self.extra_val_dataloaders))])
                 all_metrics[f"val_avg/val-extra_spearman_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/spearman"] for i in range(len(self.extra_val_dataloaders))])
                 all_metrics[f"val_avg/val-extra_kendall_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/kendall"] for i in range(len(self.extra_val_dataloaders))])
+            
+            if 'error_metrics' in extra_results:
+                all_metrics[f"val_avg/val-extra_l1_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/l1"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg/val-extra_l2_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/l2"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg/val-extra_rmse_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/rmse"] for i in range(len(self.extra_val_dataloaders))])
 
         # Log validation generations (only for main validation to avoid clutter)
         self._maybe_log_val_generations(inputs=all_sample_inputs, outputs=all_sample_outputs, scores=all_sample_scores)
