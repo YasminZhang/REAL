@@ -672,7 +672,7 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, gts, expected_values, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
@@ -683,6 +683,7 @@ class RayPPOTrainer:
             "output": outputs,
             "gts": gts,
             "score": scores,
+            "expected_value": expected_values, 
             "step": [self.global_steps] * n,
         }
 
@@ -918,6 +919,9 @@ class RayPPOTrainer:
         if error_metrics is not None:
             result['error_metrics'] = error_metrics
             
+        if len(sample_expected_values) == len(sample_scores):
+            result['sample_expected_values'] = sample_expected_values
+            
         return result
 
     def _validate(self):
@@ -1023,8 +1027,20 @@ class RayPPOTrainer:
                     all_metrics[f"val-{extra_name}-core/error/l1"] = error_metrics["L1"]
                     all_metrics[f"val-{extra_name}-core/error/l2"] = error_metrics["L2"]
                     all_metrics[f"val-{extra_name}-core/error/rmse"] = error_metrics["RMSE"]
-                                                                                          
-
+                
+                # Dump generations for extra validation dataloader
+                val_data_dir = self.config.trainer.get("validation_data_dir", None)
+                if val_data_dir:
+                    extra_dump_path = os.path.join(val_data_dir, extra_name)
+                    self._dump_generations(
+                        inputs=extra_results['sample_inputs'],
+                        outputs=extra_results['sample_outputs'],
+                        gts=extra_results['sample_gts'],
+                        expected_values=extra_results.get('sample_expected_values', []),
+                        scores=extra_results['sample_scores'],
+                        reward_extra_infos_dict=extra_results['reward_extra_infos_dict'],
+                        dump_path=extra_dump_path,
+                    )
                 
             if 'correlations' in extra_results:
                 all_metrics[f"val_avg/val-extra_pearson_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation/pearson"] for i in range(len(self.extra_val_dataloaders))])
@@ -1036,6 +1052,11 @@ class RayPPOTrainer:
                 all_metrics[f"val_avg/val-extra_l2_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/l2"] for i in range(len(self.extra_val_dataloaders))])
                 all_metrics[f"val_avg/val-extra_rmse_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/rmse"] for i in range(len(self.extra_val_dataloaders))])
 
+
+
+
+
+
         # Log validation generations (only for main validation to avoid clutter)
         self._maybe_log_val_generations(inputs=all_sample_inputs, outputs=all_sample_outputs, scores=all_sample_scores)
 
@@ -1046,6 +1067,7 @@ class RayPPOTrainer:
                 inputs=main_results['sample_inputs'],
                 outputs=main_results['sample_outputs'],
                 gts=main_results['sample_gts'],
+                expected_values=main_results.get('sample_expected_values', []),
                 scores=main_results['sample_scores'],
                 reward_extra_infos_dict=main_results['reward_extra_infos_dict'],
                 dump_path=val_data_dir,
