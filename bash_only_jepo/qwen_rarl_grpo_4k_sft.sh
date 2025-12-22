@@ -56,7 +56,7 @@ jepo_use_extra_loss=False
 jepo_normalize_advantages=True
 jepo_use_cot_loss=True
 jepo_use_l2_loss=False
-jepo_data_type="partial_incorrect" # partial, all, incorrect, partial_incorrect
+jepo_data_type="all" # partial, all, incorrect, partial_incorrect
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1

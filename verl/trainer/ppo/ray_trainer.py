@@ -931,6 +931,7 @@ class RayPPOTrainer:
         all_sample_inputs = []
         all_sample_outputs = []
         all_sample_scores = []
+        all_sample_gts = []
 
         # Validate main dataloader
         main_results = self._validate_single_dataloader(self.val_dataloader, "main")
@@ -963,6 +964,7 @@ class RayPPOTrainer:
         all_sample_inputs.extend(main_results['sample_inputs'])
         all_sample_outputs.extend(main_results['sample_outputs'])
         all_sample_scores.extend(main_results['sample_scores'])
+        all_sample_gts.extend(main_results['sample_gts'])
 
         if len(main_results['sample_turns']) > 0:
             sample_turns = np.concatenate(main_results['sample_turns'])
