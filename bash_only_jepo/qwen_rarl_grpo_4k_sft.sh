@@ -57,6 +57,7 @@ jepo_normalize_advantages=True
 jepo_use_cot_loss=True
 jepo_use_l2_loss=False
 jepo_data_type="all" # partial, all, incorrect, partial_incorrect
+jepo_use_prob_as_reward=True
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1
@@ -139,6 +140,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     +algorithm.jepo_use_cot_loss=${jepo_use_cot_loss} \
     +algorithm.jepo_normalize_advantages=${jepo_normalize_advantages} \
     +algorithm.jepo_use_l2_loss=${jepo_use_l2_loss} \
+    +algorithm.jepo_use_prob_as_reward=${jepo_use_prob_as_reward} \
     +algorithm.jepo_data_type=${jepo_data_type} \
     +algorithm.jepo_epochs=${jepo_epochs} \
     +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \

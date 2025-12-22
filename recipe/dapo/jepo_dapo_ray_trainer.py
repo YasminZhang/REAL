@@ -78,7 +78,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8),
             num_response_per_question=getattr(self.config.actor_rollout_ref.rollout, 'n', 1),
             accum_steps=getattr(self.config.algorithm, 'jepo_accum_steps', 4),
-            data_type=getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
+            data_type=getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect,
         )
         
         self.jepo_metrics = defaultdict(list)
@@ -150,6 +150,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "normalize_advantages": getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
             "use_l2_loss": getattr(self.config.algorithm, 'jepo_use_l2_loss', False),
             "data_type": getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
+            "use_prob_as_reward": getattr(self.config.algorithm, 'jepo_use_prob_as_reward', False),
             
         }
         
@@ -459,7 +460,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         else:
                             raise ValueError(f"Unknown jepo_data_type: {self.jepo_config.data_type}")
                         
-                        print(f"JEPO buffer size (in prompts): {len(all_incorrect_batch)}")
+                    
                         
                         
                         print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
