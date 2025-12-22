@@ -965,7 +965,10 @@ class JEPOActor(DataParallelPPOActor):
                     
                     if _rank == 0:  # Only first 3 groups to avoid spam
                         print(f"\n[DEBUG Regression - Accuracy Reward] UID: {u}")
-                        print(f"  Last token probs: {rewards.cpu().numpy()}")
+                        print(f"  Last token probs: {last_token_log_probs.cpu().numpy()}")
+                        # print prob, exp(log_prob)
+                        probs = torch.exp(last_token_log_probs)
+                        print(f"  Last token probabilities: {probs.cpu().numpy()}")
                         print(f'  LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
                         print(f'  Advantages A_prob: {A_prob.cpu().numpy()}')
                         
