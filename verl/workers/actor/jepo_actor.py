@@ -560,6 +560,7 @@ class JEPOActor(DataParallelPPOActor):
         logp_sum_all = []  # accumulate per-mini then extend in order
         expected_values_all = []
         last_token_log_probs_all = []
+        accs_all = []
 
         # One steady inner pbar across all microbatches (count responses, not just non-empty)
         # Option B: allow per-rank bars written to files to avoid console interleaving
@@ -607,6 +608,7 @@ class JEPOActor(DataParallelPPOActor):
                 logp_sum_mini = [0.0] * Bmini
                 expected_values_mini = [0.0] * Bmini
                 last_token_log_probs_mini = [0.0] * Bmini
+                accs_mini = [0.0] * Bmini
                 for micro_batch, idx_local in zip(micro_batches, idx_lists):
                     bs = len(idx_local)
                     if bs == 0:
@@ -616,6 +618,7 @@ class JEPOActor(DataParallelPPOActor):
                     attn_src = micro_batch.batch.get("attention_mask")
                     pos_src = micro_batch.batch.get("position_ids")
                     ans_start = micro_batch.batch.get("answer_start_positions")
+                    accs_mb = micro_batch.non_tensor_batch.get("acc", torch.zeros(bs, device=dev, dtype=torch.float32))
                     gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
                     gt_tokens_len_mb = [
                         (int(len(t)) if (t is not None) else 0) for t in gt_tokens_mb
@@ -744,6 +747,14 @@ class JEPOActor(DataParallelPPOActor):
                         else:
                             gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
                         resp_mb[slot, :L_ans] = gt_i_t[:L_ans] 
+                        
+                        print('ids_mb[slot, l_i - 1]', ids_mb[slot, l_i - 1])
+                        print('gt_i_t[0]', gt_i_t[0])
+                        ids_mb[slot, l_i - 1] = gt_i_t[0]
+                        
+                        
+                        
+                        # breakpoint()
 
 
                     # Derive positions from attention so first attended token starts at 0
@@ -799,16 +810,23 @@ class JEPOActor(DataParallelPPOActor):
                     if store_last_token_probs:
                         expected_values_cpu = expected_values.detach().to("cpu")
                         last_token_log_probs_cpu = last_token_log_probs.detach().to("cpu")
+                        
                         for slot, mini_pos in enumerate(idx_local):
                             L_ans = int(ans_lens_mb[slot])
                             if L_ans > 0:
                                 expected_values_mini[mini_pos] = float(expected_values_cpu[slot].item())
                                 last_token_log_probs_mini[mini_pos] = float(last_token_log_probs_cpu[slot].item())
                     
+                    # Accumulate accs
+                    accs_mb_cpu = accs_mb.detach().to("cpu")
+                    for slot, mini_pos in enumerate(idx_local):
+                        accs_mini[mini_pos] = float(accs_mb_cpu[slot].item())
+                    
 
                 # Append this mini-batch results to the global list in order
                 expected_values_all.extend(expected_values_mini)
                 last_token_log_probs_all.extend(last_token_log_probs_mini)
+                accs_all.extend(accs_mini)
                 logp_sum_all.extend(logp_sum_mini)
         _inner_pbar.close()
         try:
@@ -834,6 +852,7 @@ class JEPOActor(DataParallelPPOActor):
         ans_logprob_all = torch.as_tensor(logp_sum_all, device=dev, dtype=torch.float32)
         expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32) if store_last_token_probs else None
         last_token_log_probs_all = torch.as_tensor(last_token_log_probs_all, device=dev, dtype=torch.float32) if store_last_token_probs else None
+        accs_all = torch.as_tensor(accs_all, device=dev, dtype=torch.float32)
         has_delim_src = data.batch.get("has_delimiter")
         has_delim_all = has_delim_src.clone() if isinstance(has_delim_src, torch.Tensor) else torch.as_tensor(has_delim_src, device=dev, dtype=torch.bool)
 
@@ -869,6 +888,7 @@ class JEPOActor(DataParallelPPOActor):
             
             # Initialize A_prob for all code paths
             A_prob = torch.zeros(B, device=dev, dtype=torch.float32)
+            A_acc = torch.zeros(B, device=dev, dtype=torch.float32)
             
             if use_regression_reward and store_last_token_probs:
                 expected_values = expected_values_all[idxs]  # [B]
@@ -880,8 +900,7 @@ class JEPOActor(DataParallelPPOActor):
                 squared_errors = (expected_values - gt_value) ** 2
                 rewards = -squared_errors  # Negative because we want to minimize error
                 
-                # DEBUG: Print regression reward details (only rank 0, first few groups)
-                
+               
                 
                 # Compute advantages using leave-one-out baseline
                 if B > 1:
@@ -946,6 +965,8 @@ class JEPOActor(DataParallelPPOActor):
                     #     # Single sample: no baseline
                     #     A_prob = rewards - rewards.mean()  # Zero-centered
                     
+                    ###########################################
+                    
                     # Groupwise math (identical)
                     lse_all = torch.logsumexp(last_token_log_probs, dim=0)
                     if B > 1:
@@ -963,6 +984,8 @@ class JEPOActor(DataParallelPPOActor):
                         A_prob = A_prob / (A_prob.std(unbiased=False) + 1e-8)
                     A_prob = A_prob.clamp(-1.0, 1.0)
                     
+                    ###############################################
+                    
                     if _rank == 0:  # Only first 3 groups to avoid spam
                         print(f"\n[DEBUG Regression - Accuracy Reward] UID: {u}")
                         print(f"  Last token probs: {last_token_log_probs.cpu().numpy()}")
@@ -971,6 +994,31 @@ class JEPOActor(DataParallelPPOActor):
                         print(f"  Last token probabilities: {probs.cpu().numpy()}")
                         print(f'  LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
                         print(f'  Advantages A_prob: {A_prob.cpu().numpy()}')
+                        
+                        
+                # use accuracy as extra advantage
+                rewards_acc = accs_all[idxs]  # [B]
+                
+                if B > 1:
+                    # Leave-one-out mean reward
+                    total_reward_acc = rewards_acc.sum()
+                    loo_mean_rewards_acc = (total_reward_acc - rewards_acc) / (B - 1)
+                    A_acc = rewards_acc - loo_mean_rewards_acc
+                else:
+                    # Single sample: no baseline
+                    A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
+                # Normalize advantages
+                if bool(jepo_cfg.get("normalize_advantages", True)):
+                    A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
+                A_acc = A_acc.clamp(-1.0, 1.0)  
+
+                if _rank == 0:  # Only first 3 groups to avoid spam
+                    print(f"\n[DEBUG Regression - Accuracy Advantage] UID: {u}")
+                    print(f"  Accuracies: {rewards_acc.cpu().numpy()}")
+                    print(f'  LOO mean rewards (acc): {loo_mean_rewards_acc.cpu().numpy()}' if B > 1 else "  LOO mean rewards (acc): N/A (B=1)")
+                    print(f'  Advantages A_acc: {A_acc.cpu().numpy()}')
+            
+                    
                         
                 
 
@@ -1002,7 +1050,7 @@ class JEPOActor(DataParallelPPOActor):
                 fmt = fmt - fmt.mean()
                 w_full = torch.softmax(ans_logprob, dim=0)
 
-            jepo_adv_raw[idxs] = A_raw + A_prob
+            jepo_adv_raw[idxs] = A_raw + A_prob + A_acc
             format_adv[idxs] = fmt
             jepo_weights[idxs] = w_full
             jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
