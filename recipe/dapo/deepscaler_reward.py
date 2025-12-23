@@ -3,12 +3,13 @@ Self-contained reward function for evaluating mathematical answers.
 Evaluates mathematical expressions using sympy and string matching.
 """
 import re
-from typing import List, Union, Optional
-from pylatexenc import latex2text
-import sympy
-from sympy.parsing import sympy_parser
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import List, Optional, Union
+
+import sympy
+from pylatexenc import latex2text
+from sympy.parsing import sympy_parser
 
 # Reward function constants
 THOUGHT_DELIMITER_START = "<think>"
@@ -539,9 +540,13 @@ class RewardOutput:
 
 
 def extract_answer_tract(passage: str) -> str:
-    if "So the overall score is " in passage:
-        return passage.split("So the overall score is ")[1][0]
+    try:
+        if "So the overall score is " in passage:
+            return passage.split("So the overall score is ")[1][0]
+    except:
+        return None
     return None
+
 
 
 class RewardMathFn:
