@@ -748,9 +748,10 @@ class JEPOActor(DataParallelPPOActor):
                             gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
                         resp_mb[slot, :L_ans] = gt_i_t[:L_ans] 
                         
-                        print('ids_mb[slot, l_i - 1]', ids_mb[slot, l_i - 1])
-                        print('gt_i_t[0]', gt_i_t[0])
-                        ids_mb[slot, l_i - 1] = gt_i_t[0]
+                        
+                        print('ids_mb[slot, l_i - 1]', ids_mb[slot, l_i - 1], 'gt_i_t[0]', gt_i_t[0])
+                         
+                        # ids_mb[slot, l_i - 1] = gt_i_t[0]
                         
                         
                         
@@ -818,7 +819,7 @@ class JEPOActor(DataParallelPPOActor):
                                 last_token_log_probs_mini[mini_pos] = float(last_token_log_probs_cpu[slot].item())
                     
                     # Accumulate accs
-                    accs_mb_cpu = accs_mb.detach().to("cpu")
+                    accs_mb_cpu = accs_mb
                     for slot, mini_pos in enumerate(idx_local):
                         accs_mini[mini_pos] = float(accs_mb_cpu[slot].item())
                     

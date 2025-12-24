@@ -170,6 +170,8 @@ def build_jepo_teacher_forced_batch(
     delimiter_ids = tokenizer.encode(delimiter_str, add_special_tokens=False)
     delimiter_len = len(delimiter_ids)
     gt_list: List[List[int]] = [list(x) if isinstance(x, (list, tuple)) else list(x.tolist()) for x in ground_truth_answer_tokens]
+    # let gt_list be the second token in each entry
+    gt_list = [(gt[1],) if len(gt) > 1 else gt for gt in gt_list]
 
     has_delimiter: List[bool] = []
     cot_tokens_list: List[List[int]] = []
@@ -223,7 +225,10 @@ def build_jepo_teacher_forced_batch(
                 cot_ids = []
                 
             # gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
+            cot_ids[-1] = gt_list[i][0]  # Replace last token of CoT with GT answer
+            
             cot_i = torch.tensor(cot_ids, device=device, dtype=torch.long)
+            
             
             full = torch.cat([prompt_i, cot_i], dim=0)
             
@@ -278,8 +283,7 @@ def build_jepo_teacher_forced_batch(
     else:
         position_ids = torch.empty((n, 0), dtype=torch.long, device=device)
 
-    # let gt_list be the second token in each entry
-    gt_list = [(gt[1],) if len(gt) > 1 else gt for gt in gt_list]
+    
 
   
 
