@@ -121,7 +121,7 @@ class JEPOActor(DataParallelPPOActor):
         micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))      # questions per backward call
         format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
         beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
-        beta_supp_log_prob = float(jepo_cfg.get("beta_supp_log_prob", 0.001))
+        beta_supp_extra = float(jepo_cfg.get("beta_supp_extra", 0.001))
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
@@ -364,11 +364,11 @@ class JEPOActor(DataParallelPPOActor):
                     extra_loss = 0.0
                     if use_extra_loss:
                         if use_log_loss and use_l2_loss:
-                            extra_loss = float(beta_supp) * ( (expected_values - gt_values)**2).mean() +  float(beta_supp_log_prob) *    (-last_token_log_probs).mean()
+                            extra_loss = float(beta_supp_extra) *   float(beta_supp) * ( (expected_values - gt_values)**2).mean() +  float(beta_supp_extra) *    (-last_token_log_probs).mean()
                         elif use_log_loss:
-                            extra_loss = -  float(beta_supp_log_prob) *    last_token_log_probs.mean()
+                            extra_loss = -  float(beta_supp_extra) *    last_token_log_probs.mean()
                         elif use_l2_loss:
-                            extra_loss = float(beta_supp) * ( (expected_values - gt_values)**2).mean()
+                            extra_loss = float(beta_supp_extra) *   float(beta_supp) * ( (expected_values - gt_values)**2).mean()
                         else:
                             raise RuntimeError("At least one of use_log_loss or use_l2_loss must be True if use_extra_loss is True")
                     else:
@@ -498,7 +498,7 @@ class JEPOActor(DataParallelPPOActor):
             "jepo_actor/cot_log_probs_mean": meters["cot_log_probs_mean"],
             "jepo_actor/log_mean_answer_probs_mean": meters["log_mean_answer_probs_mean"],
             "jepo_actor/beta_supp": beta_supp,
-            "jepo_actor/beta_supp_log_prob": beta_supp_log_prob,
+            "jepo_actor/beta_supp_extra": beta_supp_extra,
             "jepo_actor/kl_loss": meters.get("kl_loss", 0.0),
             "jepo_actor/beta_kl": beta_kl,
             "jepo_buffer/num_has_delimiter": int(num_delim),
@@ -521,6 +521,7 @@ class JEPOActor(DataParallelPPOActor):
         vocab_size = self.actor_module.config.vocab_size if hasattr(self.actor_module, 'config') else 32000
         jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
         store_last_token_probs = bool(jepo_cfg.get("store_last_token_probs", True))
+        beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
 
         # Outputs to fill (on device for final writeback)
         jepo_adv_raw = torch.zeros(N, device=dev)
@@ -902,7 +903,6 @@ class JEPOActor(DataParallelPPOActor):
                 rewards = -squared_errors  # Negative because we want to minimize error
                 
                
-                
                 # Compute advantages using leave-one-out baseline
                 if B > 1:
                     # Leave-one-out mean reward
@@ -956,29 +956,29 @@ class JEPOActor(DataParallelPPOActor):
                 #################### calculate the accuracy reward ####################
                 last_token_log_probs = last_token_log_probs_all[idxs] if last_token_log_probs_all is not None else None
                 if last_token_log_probs is not None:
-                    # rewards = torch.exp(last_token_log_probs)  # Convert log-probs to probs, [B]
-                    # if B > 1:
-                    #     # Leave-one-out mean reward
-                    #     total_reward = rewards.sum()
-                    #     loo_mean_rewards = (total_reward - rewards) / (B - 1)
-                    #     A_prob = rewards - loo_mean_rewards
-                    # else:
-                    #     # Single sample: no baseline
-                    #     A_prob = rewards - rewards.mean()  # Zero-centered
+                    rewards = torch.exp(last_token_log_probs)  # Convert log-probs to probs, [B]
+                    if B > 1:
+                        # Leave-one-out mean reward
+                        total_reward = rewards.sum()
+                        loo_mean_rewards = (total_reward - rewards) / (B - 1)
+                        A_prob = rewards - loo_mean_rewards
+                    else:
+                        # Single sample: no baseline
+                        A_prob = rewards - rewards.mean()  # Zero-centered
                     
                     ###########################################
                     
-                    # Groupwise math (identical)
-                    lse_all = torch.logsumexp(last_token_log_probs, dim=0)
-                    if B > 1:
-                        d = last_token_log_probs - lse_all
-                        lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-                        v_i = lse_others - math.log(B - 1)
-                    else:
-                        v_i = ans_logprob.new_full((B,), float("-inf"))
-                    log_mean = lse_all - math.log(max(B, 1))
+                    # # Groupwise math (identical)
+                    # lse_all = torch.logsumexp(last_token_log_probs, dim=0)
+                    # if B > 1:
+                    #     d = last_token_log_probs - lse_all
+                    #     lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
+                    #     v_i = lse_others - math.log(B - 1)
+                    # else:
+                    #     v_i = ans_logprob.new_full((B,), float("-inf"))
+                    # log_mean = lse_all - math.log(max(B, 1))
                     
-                    A_prob = (log_mean - v_i)
+                    # A_prob = (log_mean - v_i)
                                      
                     # Normalize advantages
                     if bool(jepo_cfg.get("normalize_advantages", True)):
@@ -997,27 +997,27 @@ class JEPOActor(DataParallelPPOActor):
                         print(f'  Advantages A_prob: {A_prob.cpu().numpy()}')
                         
                         
-                # use accuracy as extra advantage
-                rewards_acc = accs_all[idxs]  # [B]
+                # # use accuracy as extra advantage
+                # rewards_acc = accs_all[idxs]  # [B]
                 
-                if B > 1:
-                    # Leave-one-out mean reward
-                    total_reward_acc = rewards_acc.sum()
-                    loo_mean_rewards_acc = (total_reward_acc - rewards_acc) / (B - 1)
-                    A_acc = rewards_acc - loo_mean_rewards_acc
-                else:
-                    # Single sample: no baseline
-                    A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
-                # Normalize advantages
-                if bool(jepo_cfg.get("normalize_advantages", True)):
-                    A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
-                A_acc = A_acc.clamp(-1.0, 1.0)  
+                # if B > 1:
+                #     # Leave-one-out mean reward
+                #     total_reward_acc = rewards_acc.sum()
+                #     loo_mean_rewards_acc = (total_reward_acc - rewards_acc) / (B - 1)
+                #     A_acc = rewards_acc - loo_mean_rewards_acc
+                # else:
+                #     # Single sample: no baseline
+                #     A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
+                # # Normalize advantages
+                # if bool(jepo_cfg.get("normalize_advantages", True)):
+                #     A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
+                # A_acc = A_acc.clamp(-1.0, 1.0)  
 
-                if _rank == 0:  # Only first 3 groups to avoid spam
-                    print(f"\n[DEBUG Regression - Accuracy Advantage] UID: {u}")
-                    print(f"  Accuracies: {rewards_acc.cpu().numpy()}")
-                    print(f'  LOO mean rewards (acc): {loo_mean_rewards_acc.cpu().numpy()}' if B > 1 else "  LOO mean rewards (acc): N/A (B=1)")
-                    print(f'  Advantages A_acc: {A_acc.cpu().numpy()}')
+                # if _rank == 0:  # Only first 3 groups to avoid spam
+                #     print(f"\n[DEBUG Regression - Accuracy Advantage] UID: {u}")
+                #     print(f"  Accuracies: {rewards_acc.cpu().numpy()}")
+                #     print(f'  LOO mean rewards (acc): {loo_mean_rewards_acc.cpu().numpy()}' if B > 1 else "  LOO mean rewards (acc): N/A (B=1)")
+                #     print(f'  Advantages A_acc: {A_acc.cpu().numpy()}')
             
                     
                         
@@ -1051,7 +1051,7 @@ class JEPOActor(DataParallelPPOActor):
                 fmt = fmt - fmt.mean()
                 w_full = torch.softmax(ans_logprob, dim=0)
 
-            jepo_adv_raw[idxs] = A_raw + A_prob + A_acc
+            jepo_adv_raw[idxs] = A_raw + beta_supp * A_prob 
             format_adv[idxs] = fmt
             jepo_weights[idxs] = w_full
             jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)

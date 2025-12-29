@@ -108,7 +108,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "delimiter": self.jepo_config.delimiter,
             "format_penalty": self.jepo_config.format_penalty,
             "beta_supp": self.jepo_config.beta_supp,
-            "beta_supp_log_prob": getattr(self.config.algorithm, 'jepo_beta_supp_log_prob', 0.001),
+            "beta_supp_extra": getattr(self.config.algorithm, 'jepo_beta_supp_extra', 0.001),
             "beta_kl": self.jepo_config.beta_kl,
             # training/loop settings read by JEPOActor
             "epochs": self.jepo_config.epochs,
