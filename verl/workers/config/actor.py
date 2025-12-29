@@ -209,6 +209,7 @@ class FSDPActorConfig(ActorConfig):
         entropy_checkpointing (bool): Whether to use gradient checkpointing for entropy computation.
         fsdp_config (dict[str, Any]): Configuration for FSDP settings.
         use_remove_padding (bool): Whether to remove padding tokens in inputs during training
+        model_name (str): Model name identifier for determining tokenizer-specific settings
     """
 
     strategy: str = "fsdp"
@@ -218,6 +219,7 @@ class FSDPActorConfig(ActorConfig):
     entropy_checkpointing: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     use_remove_padding: bool = False
+    model_name: str = "unknown_model"
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
