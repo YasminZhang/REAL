@@ -43,6 +43,29 @@ def is_non_local(path):
     return path.startswith(_HDFS_PREFIX)
 
 
+def is_huggingface_model_id(path):
+    """Check if a path is a HuggingFace model identifier.
+    
+    HuggingFace model IDs have format: username/model-name or org/model-name
+    They are not absolute paths and contain exactly one '/'.
+    
+    Args:
+        path (str): The path to check.
+        
+    Returns:
+        bool: True if the path appears to be a HuggingFace model ID, False otherwise.
+    """
+    # HF model IDs: don't start with /, contain exactly one /, and aren't paths
+    if not path or path.startswith('/') or path.startswith('./') or path.startswith('../'):
+        return False
+    if path.startswith(_HDFS_PREFIX):
+        return False
+    # Check if it looks like a HF model ID: contains / and doesn't exist as a local path
+    if '/' in path and not os.path.exists(path):
+        return True
+    return False
+
+
 def md5_encode(path: str) -> str:
     """Generate an MD5 hash of a path string.
 
@@ -198,7 +221,7 @@ def copy_to_local(
     """Copy files/directories from HDFS to local cache with validation.
 
     Args:
-        src (str): Source path - HDFS path (hdfs://...) or local filesystem path
+        src (str): Source path - HDFS path (hdfs://...), HuggingFace model ID, or local filesystem path
         cache_dir (str, optional): Local directory for cached files. Uses system tempdir if None
         filelock (str): Base name for file lock. Defaults to ".file.lock"
         verbose (bool): Enable copy operation logging. Defaults to False
@@ -206,8 +229,12 @@ def copy_to_local(
         use_shm (bool): Enable shared memory copy. Defaults to False
 
     Returns:
-        str: Local filesystem path to copied resource
+        str: Local filesystem path to copied resource, or original HuggingFace model ID
     """
+    # HuggingFace model IDs should be passed through without copying
+    if is_huggingface_model_id(src):
+        return src
+    
     # Save to a local path for persistence.
     local_path = copy_local_path_from_hdfs(src, cache_dir, filelock, verbose, always_recopy)
     # Load into shm to improve efficiency.

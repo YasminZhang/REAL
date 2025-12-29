@@ -75,8 +75,11 @@ class DataParallelPPOActor(BasePPOActor):
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_remove_padding={self.use_remove_padding}")
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
+        
+        self.model_name = self.config.get("model_name", "unknown_model")
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_fused_kernels={self.use_fused_kernels}")
+            
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
@@ -209,23 +212,18 @@ class DataParallelPPOActor(BasePPOActor):
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
                     )
+                    
+                    print("model_name:", self.model_name)
+                    if 'qwen' in self.model_name.lower():
+                            digit_token_ids = [16,17,18,19,20]
+                    elif 'mistral' in self.model_name.lower():
+                        digit_token_ids = [28740, 28750, 28770, 28781, 28782]
+                    else:
+                        print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
+                        digit_token_ids = [28740, 28750, 28770, 28781, 28782]
 
                     if regression:
-                        # For regression with remove_padding, find last token WITHOUT padding back
-                        # This avoids the memory overhead of pad_input
-                        
-                        # Get digit token IDs (default for Llama/Mistral tokenizers)
-                        digit_token_ids = getattr(self.config, 'digit_token_ids', 
-                                                   [28734, 28740, 28750, 28770, 28781, 28782])
-
-                        
                          
-                        # breakpoint()
-                        # If Qwen
-                        # digit_token_ids = getattr(self.config, 'digit_token_ids', 
-                        #                            [15,16,17,18,19,20]) if self.config.model_name.startswith("qwen") else digit_token_ids
-
-                        digit_token_ids = [16,17,18,19,20]
 
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits_rmpad.device, dtype=torch.long)
                         
@@ -278,6 +276,8 @@ class DataParallelPPOActor(BasePPOActor):
                         if expected_prob_replace:
                             # calculate log probs input_ids_rmpad_rolled at last token positions
                             last_token_log_probs = torch.log(last_token_probs.gather(1, input_ids_rmpad_rolled[rmpad_positions].unsqueeze(-1)).squeeze(-1))  # (bsz,)
+                            
+                            breakpoint()
 
                     
                         
