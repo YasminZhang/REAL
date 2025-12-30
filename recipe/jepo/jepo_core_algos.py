@@ -104,7 +104,7 @@ def _find_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
     return -1
 
 def _rfind_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int:
-    """Return start index of the last occurrence of needle_ids in haystack_ids, or -1."""
+    """Return start index of the first occurrence of needle_ids in haystack_ids, or -1."""
     if len(needle_ids) == 0:
         return -1
     T = haystack_ids.numel()
@@ -112,7 +112,7 @@ def _rfind_subsequence(haystack_ids: torch.Tensor, needle_ids: List[int]) -> int
     if L > T:
         return -1
     needle = torch.tensor(needle_ids, device=haystack_ids.device, dtype=haystack_ids.dtype)
-    for s in range(T - L, -1, -1):
+    for s in range(0, T - L + 1):
         if torch.equal(haystack_ids[s : s + L], needle):
             return s
     return -1
@@ -206,6 +206,7 @@ def build_jepo_teacher_forced_batch(
             
             # Use GT answer
             # gt_i = torch.tensor(gt_list[i], device=device, dtype=torch.long)
+            cot_ids[-1] = gt_list[i][0]  # Replace last token of CoT with GT answer
             cot_i = torch.tensor(cot_ids, device=device, dtype=torch.long)
             
             full = torch.cat([prompt_i, cot_i], dim=0)
@@ -239,7 +240,7 @@ def build_jepo_teacher_forced_batch(
             has_delimiter.append(False)
             delimiter_match_kind.append("none")
             cot_tokens_list.append(cot_ids)
-            # breakpoint()
+       
          
 
     # Validate pad token id

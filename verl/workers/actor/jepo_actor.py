@@ -852,8 +852,8 @@ class JEPOActor(DataParallelPPOActor):
             uids_list = [str(x) for x in (uids.tolist() if hasattr(uids, "tolist") else list(uids))]
 
         ans_logprob_all = torch.as_tensor(logp_sum_all, device=dev, dtype=torch.float32)
-        expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32) if store_last_token_probs else None
-        last_token_log_probs_all = torch.as_tensor(last_token_log_probs_all, device=dev, dtype=torch.float32) if store_last_token_probs else None
+        expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32)  
+        last_token_log_probs_all = torch.as_tensor(last_token_log_probs_all, device=dev, dtype=torch.float32)  
         accs_all = torch.as_tensor(accs_all, device=dev, dtype=torch.float32)
         has_delim_src = data.batch.get("has_delimiter")
         has_delim_all = has_delim_src.clone() if isinstance(has_delim_src, torch.Tensor) else torch.as_tensor(has_delim_src, device=dev, dtype=torch.bool)

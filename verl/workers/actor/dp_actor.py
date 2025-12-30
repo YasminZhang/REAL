@@ -79,6 +79,16 @@ class DataParallelPPOActor(BasePPOActor):
         self.model_name = self.config.get("model_name", "unknown_model")
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_fused_kernels={self.use_fused_kernels}")
+            print(f"{role} model_name={self.model_name}")
+            
+        print("model_name:", self.model_name)
+        if 'qwen' in self.model_name.lower():
+            self.digit_token_ids = [16,17,18,19,20]
+        elif 'mistral' in self.model_name.lower():
+            self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
+        else:
+            print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
+            self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
             
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
@@ -213,14 +223,8 @@ class DataParallelPPOActor(BasePPOActor):
                         inplace_backward=inplace_backward,
                     )
                     
-                    print("model_name:", self.model_name)
-                    if 'qwen' in self.model_name.lower():
-                            digit_token_ids = [16,17,18,19,20]
-                    elif 'mistral' in self.model_name.lower():
-                        digit_token_ids = [28740, 28750, 28770, 28781, 28782]
-                    else:
-                        print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
-                        digit_token_ids = [28740, 28750, 28770, 28781, 28782]
+                    digit_token_ids = self.digit_token_ids
+                    
 
                     if regression:
                          
@@ -276,9 +280,7 @@ class DataParallelPPOActor(BasePPOActor):
                         if expected_prob_replace:
                             # calculate log probs input_ids_rmpad_rolled at last token positions
                             last_token_log_probs = torch.log(last_token_probs.gather(1, input_ids_rmpad_rolled[rmpad_positions].unsqueeze(-1)).squeeze(-1))  # (bsz,)
-                            
-                            breakpoint()
-
+                       
                     
                         
                         # Compute expected value: E[digit] = Σ p(k) * k
