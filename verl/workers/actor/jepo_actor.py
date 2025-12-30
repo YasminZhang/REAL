@@ -611,6 +611,7 @@ class JEPOActor(DataParallelPPOActor):
                 expected_values_mini = [0.0] * Bmini
                 last_token_log_probs_mini = [0.0] * Bmini
                 accs_mini = [0.0] * Bmini
+                gts_mini = [None] * Bmini
                 for micro_batch, idx_local in zip(micro_batches, idx_lists):
                     bs = len(idx_local)
                     if bs == 0:
@@ -622,6 +623,7 @@ class JEPOActor(DataParallelPPOActor):
                     ans_start = micro_batch.batch.get("answer_start_positions")
                     accs_mb = micro_batch.non_tensor_batch.get("acc", torch.zeros(bs, device=dev, dtype=torch.float32))
                     gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
+                    
                     gt_tokens_len_mb = [
                         (int(len(t)) if (t is not None) else 0) for t in gt_tokens_mb
                     ]
@@ -820,16 +822,18 @@ class JEPOActor(DataParallelPPOActor):
                                 expected_values_mini[mini_pos] = float(expected_values_cpu[slot].item())
                                 last_token_log_probs_mini[mini_pos] = float(last_token_log_probs_cpu[slot].item())
                     
-                    # Accumulate accs
+                    # Accumulate accs and gts
                     accs_mb_cpu = accs_mb
                     for slot, mini_pos in enumerate(idx_local):
                         accs_mini[mini_pos] = float(accs_mb_cpu[slot].item())
+                        gts_mini[mini_pos] = gt_tokens_mb[slot]
                     
 
                 # Append this mini-batch results to the global list in order
                 expected_values_all.extend(expected_values_mini)
                 last_token_log_probs_all.extend(last_token_log_probs_mini)
                 accs_all.extend(accs_mini)
+                gts_all.extend(gts_mini)
                 logp_sum_all.extend(logp_sum_mini)
         _inner_pbar.close()
         try:
@@ -856,6 +860,7 @@ class JEPOActor(DataParallelPPOActor):
         expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32)  
         last_token_log_probs_all = torch.as_tensor(last_token_log_probs_all, device=dev, dtype=torch.float32)  
         accs_all = torch.as_tensor(accs_all, device=dev, dtype=torch.float32)
+        gts_all = torch.as_tensor(gts_all, device=dev, dtype=torch.float32)
         has_delim_src = data.batch.get("has_delimiter")
         has_delim_all = has_delim_src.clone() if isinstance(has_delim_src, torch.Tensor) else torch.as_tensor(has_delim_src, device=dev, dtype=torch.bool)
 
@@ -897,7 +902,15 @@ class JEPOActor(DataParallelPPOActor):
                 expected_values = expected_values_all[idxs]  # [B]
           
                 # Get ground truth value for this group
-                gt_value = gt_values_tensor[idxs[0]]  # All samples in group have same GT
+                # gt_value = gt_values_tensor[idxs[0]]  # All samples in group have same GT
+                
+                gt_values_token = gts_all[idxs[0]]  # list of ground truth token sequences
+                
+                token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+                
+                gt_value = token_to_digit.get(int(gt_values_token[0].item()), 0)
+                
+                # breakpoint()
                 
                 # Compute rewards: R_i = -(E[digit]_i - y)^2
                 squared_errors = (expected_values - gt_value) ** 2
@@ -1056,8 +1069,9 @@ class JEPOActor(DataParallelPPOActor):
             format_adv[idxs] = fmt
             jepo_weights[idxs] = w_full
             jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
+            
             if use_regression_reward:
-                gt_values_stored[idxs] = gt_values_tensor[idxs]  
+                gt_values_stored[idxs] = gt_value  
 
             _outer_pbar.update(1)
         _outer_pbar.close()

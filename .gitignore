@@ -1,3 +1,5 @@
+
+plot/
 *.md
 tract_data/
 **/*.pt
