@@ -12,6 +12,9 @@ defaults:
 # and teacher ref
 model: null
 
+# Model name identifier for determining tokenizer-specific settings (e.g., digit token IDs)
+model_name: unknown_model
+
 # config for FSDP strategy
 fsdp_config:
 

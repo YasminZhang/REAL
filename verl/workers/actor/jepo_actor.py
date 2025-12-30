@@ -562,6 +562,7 @@ class JEPOActor(DataParallelPPOActor):
         expected_values_all = []
         last_token_log_probs_all = []
         accs_all = []
+        gts_all = []
 
         # One steady inner pbar across all microbatches (count responses, not just non-empty)
         # Option B: allow per-rank bars written to files to avoid console interleaving
