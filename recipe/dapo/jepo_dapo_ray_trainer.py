@@ -151,7 +151,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
             "use_l2_loss": getattr(self.config.algorithm, 'jepo_use_l2_loss', False),
             "data_type": getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
             "use_prob_as_reward": getattr(self.config.algorithm, 'jepo_use_prob_as_reward', False),
-            
+            "model_name": getattr(self.config.algorithm, 'model_name', 'unknown_model'),
         }
         
         # Call the JEPO-specific actor update with the properly formatted DataProto

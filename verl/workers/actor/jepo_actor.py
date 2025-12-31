@@ -125,7 +125,7 @@ class JEPOActor(DataParallelPPOActor):
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
- 
+        
         print('jepo_cfg:', jepo_cfg)
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
@@ -555,6 +555,18 @@ class JEPOActor(DataParallelPPOActor):
         )
         # use_prob_as_reward
         use_prob_as_reward = bool(jepo_cfg.get("use_prob_as_reward", False))
+        
+        model_name = str(jepo_cfg.get("model_name", "unknown_model"))
+        
+        if 'qwen' in model_name.lower():
+            token_to_digit = {16:1,17:2,18:3,19:4,20:5}
+        elif 'mistral' in model_name.lower():
+            token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+        elif 'llama' in model_name.lower():
+            token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+        else:
+            print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
+            token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
 
 
         # Preallocate accumulators
@@ -906,7 +918,7 @@ class JEPOActor(DataParallelPPOActor):
                 
                 gt_values_token = gts_all[idxs[0]]  # list of ground truth token sequences
                 
-                token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+                
                 
                 gt_value = token_to_digit.get(int(gt_values_token[0].item()), 0)
                 
@@ -935,7 +947,7 @@ class JEPOActor(DataParallelPPOActor):
                 if _rank == 0:  # Only first 3 groups to avoid spam
                     print(f"\n[DEBUG Regression] UID: {u}")
                     print(f"  Group size (B): {B}")
-                    print(f"  Ground truth: {gt_value.item():.2f}")
+                    print(f"  Ground truth: {gt_value:.2f}")
                     print(f"  Expected values: {expected_values.cpu().numpy()}")
                     print(f"  Squared errors: {squared_errors.cpu().numpy()}")
                     print(f"  Rewards (neg squared errors): {rewards.cpu().numpy()}")

@@ -268,10 +268,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # last_token_greedy_decode = torch.argmax(last_token_probs, dim=-1)  # (bsz,)
                         # last_token_greedy_decode_values = last_token_greedy_decode.unsqueeze(-1).float()  # (bsz, 1)
                         
-                        
-
-
-
+                    
                         
                         # Extract probabilities for digit tokens 0-5
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
