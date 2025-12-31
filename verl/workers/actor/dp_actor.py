@@ -86,6 +86,8 @@ class DataParallelPPOActor(BasePPOActor):
             self.digit_token_ids = [16,17,18,19,20]
         elif 'mistral' in self.model_name.lower():
             self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
+        elif 'llama' in self.model_name.lower():
+            self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
         else:
             print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
             self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
