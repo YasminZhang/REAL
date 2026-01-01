@@ -87,7 +87,7 @@ class DataParallelPPOActor(BasePPOActor):
         elif 'mistral' in self.model_name.lower():
             self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
         elif 'llama' in self.model_name.lower():
-            self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
+            self.digit_token_ids =[16,17,18,19,20]
         else:
             print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
             self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
@@ -275,6 +275,8 @@ class DataParallelPPOActor(BasePPOActor):
                         # Extract probabilities for digit tokens 0-5
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
                         digit_values = torch.arange(1, 6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
+                        
+                        breakpoint()
                         
                         if expected_prob_replace:
                             # calculate log probs input_ids_rmpad_rolled at last token positions

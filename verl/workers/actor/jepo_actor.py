@@ -563,7 +563,7 @@ class JEPOActor(DataParallelPPOActor):
         elif 'mistral' in model_name.lower():
             token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
         elif 'llama' in model_name.lower():
-            token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+            token_to_digit =  {16:1,17:2,18:3,19:4,20:5}
         else:
             print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
             token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
