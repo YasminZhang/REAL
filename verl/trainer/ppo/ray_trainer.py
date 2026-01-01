@@ -742,6 +742,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_expected_values = []
+        sample_sampled_digits = []
 
         for test_data in dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -821,6 +822,12 @@ class RayPPOTrainer:
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
+            
+            for output_text in output_texts:
+                if output_text and output_text[-1].isdigit():
+                    sample_sampled_digits.append(float(output_text[-1]))
+                else:
+                    sample_sampled_digits.append(0.0)
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -903,6 +910,22 @@ class RayPPOTrainer:
         else:
             print(f"Warning: Insufficient data for correlation/error analysis. "
                   f"Expected values: {len(sample_expected_values)}, Ground truths: {len(sample_gts)}")
+            
+        correlations_sampled = None
+        error_metrics_sampled = None
+        if len(sample_sampled_digits) > 1 and len(sample_gts) > 1 and len(sample_sampled_digits) == len(sample_gts):
+            try:
+                correlations_sampled = calculate_correlations(torch.tensor(sample_sampled_digits), torch.tensor(sample_gts))
+                error_metrics_sampled = calculate_error_metrics(torch.tensor(sample_sampled_digits), torch.tensor(sample_gts))
+                print(f"Correlation (sampled) metrics computed: {correlations_sampled}")
+                print(f"Error (sampled) metrics computed: {error_metrics_sampled}")
+            except Exception as e:
+                print(f"Warning: Could not compute correlations/error metrics (sampled): {e}")
+                correlations_sampled = None
+                error_metrics_sampled = None
+        else:
+            print(f"Warning: Insufficient data for correlation/error analysis (sampled). "
+                  f"Sampled digits: {len(sample_sampled_digits)}, Ground truths: {len(sample_gts)}")
 
         # Return all collected data for further processing
         result = {
@@ -926,6 +949,12 @@ class RayPPOTrainer:
             
         if len(sample_expected_values) == len(sample_scores):
             result['sample_expected_values'] = sample_expected_values
+            
+        if correlations_sampled is not None:
+            result['correlations_sampled'] = correlations_sampled
+            
+        if error_metrics_sampled is not None:
+            result['error_metrics_sampled'] = error_metrics_sampled
             
         return result
 
@@ -988,6 +1017,18 @@ class RayPPOTrainer:
             all_metrics["val-core/main/error/l1"] = error_metrics["L1"]
             all_metrics["val-core/main/error/l2"] = error_metrics["L2"]
             all_metrics["val-core/main/error/rmse"] = error_metrics["RMSE"]
+            
+        if 'correlations_sampled' in main_results:
+            correlations_sampled = main_results['correlations_sampled']
+            all_metrics["val-core/main/correlation_sampled/pearson"] = correlations_sampled["Pearson"]
+            all_metrics["val-core/main/correlation_sampled/spearman"] = correlations_sampled["Spearman"]  
+            all_metrics["val-core/main/correlation_sampled/kendall"] = correlations_sampled["Kendall"]
+            
+        if 'error_metrics_sampled' in main_results:
+            error_metrics_sampled = main_results['error_metrics_sampled']
+            all_metrics["val-core/main/error_sampled/l1"] = error_metrics_sampled["L1"]
+            all_metrics["val-core/main/error_sampled/l2"] = error_metrics_sampled["L2"]
+            all_metrics["val-core/main/error_sampled/rmse"] = error_metrics_sampled["RMSE"]
 
         # Validate extra dataloaders if they exist
         if hasattr(self, 'extra_val_dataloaders') and self.extra_val_dataloaders:
@@ -1035,6 +1076,19 @@ class RayPPOTrainer:
                     all_metrics[f"val-{extra_name}-core/error/l2"] = error_metrics["L2"]
                     all_metrics[f"val-{extra_name}-core/error/rmse"] = error_metrics["RMSE"]
                 
+                if 'correlations_sampled' in extra_results:
+                    correlations_sampled = extra_results['correlations_sampled']
+                    all_metrics[f"val-{extra_name}-core/correlation_sampled/pearson"] = correlations_sampled["Pearson"]
+                    all_metrics[f"val-{extra_name}-core/correlation_sampled/spearman"] = correlations_sampled["Spearman"]
+                    all_metrics[f"val-{extra_name}-core/correlation_sampled/kendall"] = correlations_sampled["Kendall"]
+                    
+                if 'error_metrics_sampled' in extra_results:
+                    error_metrics_sampled = extra_results['error_metrics_sampled']
+                    all_metrics[f"val-{extra_name}-core/error_sampled/l1"] = error_metrics_sampled["L1"]
+                    all_metrics[f"val-{extra_name}-core/error_sampled/l2"] = error_metrics_sampled["L2"]
+                    all_metrics[f"val-{extra_name}-core/error_sampled/rmse"] = error_metrics_sampled["RMSE"]
+                
+                
                 # Dump generations for extra validation dataloader
                 val_data_dir = self.config.trainer.get("validation_data_dir", None)
                 if val_data_dir:
@@ -1058,8 +1112,17 @@ class RayPPOTrainer:
                 all_metrics[f"val_avg/val-extra_l1_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/l1"] for i in range(len(self.extra_val_dataloaders))])
                 all_metrics[f"val_avg/val-extra_l2_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/l2"] for i in range(len(self.extra_val_dataloaders))])
                 all_metrics[f"val_avg/val-extra_rmse_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error/rmse"] for i in range(len(self.extra_val_dataloaders))])
+                
+            if 'correlations_sampled' in extra_results:
+                all_metrics[f"val_avg_sampled/val-extra_correlation_sampled_pearson_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation_sampled/pearson"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg_sampled/val-extra_correlation_sampled_spearman_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation_sampled/spearman"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg_sampled/val-extra_correlation_sampled_kendall_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/correlation_sampled/kendall"] for i in range(len(self.extra_val_dataloaders))])
 
 
+            if 'error_metrics_sampled' in extra_results:
+                all_metrics[f"val_avg_sampled/val-extra_error_sampled_l1_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error_sampled/l1"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg_sampled/val-extra_error_sampled_l2_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error_sampled/l2"] for i in range(len(self.extra_val_dataloaders))])
+                all_metrics[f"val_avg_sampled/val-extra_error_sampled_rmse_avg"] = np.mean([all_metrics[f"val-extra_{i}-core/error_sampled/rmse"] for i in range(len(self.extra_val_dataloaders))])
 
 
 
