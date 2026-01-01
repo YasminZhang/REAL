@@ -276,7 +276,7 @@ class DataParallelPPOActor(BasePPOActor):
                         digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
                         digit_values = torch.arange(1, 6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
                         
-                        breakpoint()
+                    
                         
                         if expected_prob_replace:
                             # calculate log probs input_ids_rmpad_rolled at last token positions

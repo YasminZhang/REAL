@@ -45,7 +45,7 @@ use_grpo=False
 jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
-jepo_lr=5e-7
+jepo_lr=1e-7
 jepo_beta_supp=1.0
 jepo_beta_supp_extra=0.00
 jepo_beta_kl=0.000
@@ -222,7 +222,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.test_freq=10 \
     trainer.save_freq=10 \
     trainer.total_epochs=500 \
