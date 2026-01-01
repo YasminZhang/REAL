@@ -125,6 +125,7 @@ class JEPOActor(DataParallelPPOActor):
         beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
+        use_rloo = bool(jepo_cfg.get("use_rloo", False))
         
         print('jepo_cfg:', jepo_cfg)
 
@@ -331,7 +332,10 @@ class JEPOActor(DataParallelPPOActor):
                             mask_ans[j, Lc : Lc + La] = 1
                             # First term: beta_supp * w_all[j] (existing)
                             # Second term: w_all[j] * last_token_log_prob will be added after forward pass
-                            A_pack[j, Lc : Lc + La] = 0.0  # placeholder TODO: fix later 
+                            if not use_rloo:
+                                A_pack[j, Lc : Lc + La] = 0.0  # placeholder TODO: fix later 
+                            else:
+                                A_pack[j, Lc : Lc + La] = A_all[j]
 
                          
                       
@@ -380,6 +384,8 @@ class JEPOActor(DataParallelPPOActor):
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
+                    
+                  
                     
                    
                     
@@ -555,6 +561,8 @@ class JEPOActor(DataParallelPPOActor):
         )
         # use_prob_as_reward
         use_prob_as_reward = bool(jepo_cfg.get("use_prob_as_reward", False))
+        
+        use_rloo = bool(jepo_cfg.get("use_rloo", False))
         
         model_name = str(jepo_cfg.get("model_name", "unknown_model"))
         
@@ -1022,28 +1030,29 @@ class JEPOActor(DataParallelPPOActor):
                         print(f'  LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
                         print(f'  Advantages A_prob: {A_prob.cpu().numpy()}')
                         
-                        
-                # # use accuracy as extra advantage
-                # rewards_acc = accs_all[idxs]  # [B]
-                
-                # if B > 1:
-                #     # Leave-one-out mean reward
-                #     total_reward_acc = rewards_acc.sum()
-                #     loo_mean_rewards_acc = (total_reward_acc - rewards_acc) / (B - 1)
-                #     A_acc = rewards_acc - loo_mean_rewards_acc
-                # else:
-                #     # Single sample: no baseline
-                #     A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
-                # # Normalize advantages
-                # if bool(jepo_cfg.get("normalize_advantages", True)):
-                #     A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
-                # A_acc = A_acc.clamp(-1.0, 1.0)  
 
-                # if _rank == 0:  # Only first 3 groups to avoid spam
-                #     print(f"\n[DEBUG Regression - Accuracy Advantage] UID: {u}")
-                #     print(f"  Accuracies: {rewards_acc.cpu().numpy()}")
-                #     print(f'  LOO mean rewards (acc): {loo_mean_rewards_acc.cpu().numpy()}' if B > 1 else "  LOO mean rewards (acc): N/A (B=1)")
-                #     print(f'  Advantages A_acc: {A_acc.cpu().numpy()}')
+                if use_rloo:
+                    # use accuracy as extra advantage
+                    rewards_acc = accs_all[idxs]  # [B]
+                    
+                    if B > 1:
+                        # Leave-one-out mean reward
+                        total_reward_acc = rewards_acc.sum()
+                        loo_mean_rewards_acc = (total_reward_acc - rewards_acc) / (B - 1)
+                        A_acc = rewards_acc - loo_mean_rewards_acc
+                    else:
+                        # Single sample: no baseline
+                        A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
+                    # Normalize advantages
+                    if bool(jepo_cfg.get("normalize_advantages", True)):
+                        A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
+                    A_acc = A_acc.clamp(-1.0, 1.0)  
+
+                    if _rank == 0:  # Only first 3 groups to avoid spam
+                        print(f"\n[DEBUG Regression - Accuracy Advantage] UID: {u}")
+                        print(f"  Accuracies: {rewards_acc.cpu().numpy()}")
+                        print(f'  LOO mean rewards (acc): {loo_mean_rewards_acc.cpu().numpy()}' if B > 1 else "  LOO mean rewards (acc): N/A (B=1)")
+                        print(f'  Advantages A_acc: {A_acc.cpu().numpy()}')
             
                     
                         
@@ -1077,7 +1086,10 @@ class JEPOActor(DataParallelPPOActor):
                 fmt = fmt - fmt.mean()
                 w_full = torch.softmax(ans_logprob, dim=0)
 
-            jepo_adv_raw[idxs] = A_raw + beta_supp * A_prob 
+            if use_rloo:
+                jepo_adv_raw[idxs] = A_acc
+            else:
+                jepo_adv_raw[idxs] = A_raw + beta_supp * A_prob 
             format_adv[idxs] = fmt
             jepo_weights[idxs] = w_full
             jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
