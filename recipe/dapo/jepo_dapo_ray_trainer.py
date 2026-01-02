@@ -458,6 +458,9 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                         elif self.jepo_config.data_type == "partial":
                             all_incorrect_new_batch = new_batch[all_partial_traj_idxs]
                             num_prompt_in_jepo_buffer += len(partial_uids_)
+                        elif self.jepo_config.data_type == "partial_correct":
+                            all_incorrect_new_batch = new_batch[all_partial_traj_idxs + all_correct_traj_idxs]
+                            num_prompt_in_jepo_buffer += len(partial_uids_) + len(all_correct_uids)
                         else:
                             raise ValueError(f"Unknown jepo_data_type: {self.jepo_config.data_type}")
                         
