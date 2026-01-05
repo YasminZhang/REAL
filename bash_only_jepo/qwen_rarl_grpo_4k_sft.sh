@@ -30,7 +30,7 @@ loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
 train_prompt_bsz=256
-n_resp_per_prompt=8
+
 train_prompt_mini_bsz=64
 
 # DAPO
@@ -45,20 +45,26 @@ use_grpo=False
 jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
-jepo_lr=5e-6
-jepo_beta_supp=1.0
-jepo_beta_supp_extra=0.000
+#######################################################################
+n_resp_per_prompt=8
+jepo_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+jepo_beta_supp=1.0 # lambda
+jepo_beta_supp_extra=0.000 # beta
 jepo_beta_kl=0.000
 jepo_entropy_coeff=0.000
 jepo_use_format_adv=False
-jepo_use_log_prob_loss=True
+
 jepo_use_extra_loss=False
-jepo_normalize_advantages=True
-jepo_use_cot_loss=True
+jepo_use_log_prob_loss=True
 jepo_use_l2_loss=True
+
+jepo_normalize_advantages=True # keep it as it is
+jepo_use_cot_loss=True
 jepo_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
-jepo_use_prob_as_reward=True
-jepo_use_rloo=False
+jepo_use_prob_as_reward=True # keep it as it is
+jepo_use_rloo=False # if True, please set use_extra_loss to False
+jepo_update_freq=10 # Qwen -> 20
+##########################################################################
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
 jepo_steps=1
@@ -83,9 +89,10 @@ NGPUS_PER_NODE=8
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec9/Regression-warmup-Qwen3-1.7B/global_step_1170/huggingface"
 # MODEL_PATH="Qwen/Qwen3-1.7B"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_100/huggingface"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2/global_step_1950/huggingface"
+MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
+# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2/global_step_1950/huggingface"
 # MODEL_PATH="yasiz/Llama-3.1-8B-Instruct-TRACT-copy"
+# MODEL_PATH=" /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_100/huggingface"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/train.parquet
 TEST_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet
@@ -224,9 +231,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=False \
-    trainer.test_freq=20 \
-    trainer.save_freq=20 \
+    trainer.val_before_train=True \
+    trainer.test_freq=${jepo_update_freq} \
+    trainer.save_freq=${jepo_update_freq} \
     trainer.total_epochs=500 \
     trainer.total_training_steps=5000 \
     trainer.default_local_dir="${CKPTS_DIR}" \
