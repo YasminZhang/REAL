@@ -1,31 +1,32 @@
 import torch
 import time
+import torch.multiprocessing as mp
 
-# Ensure GPU is available
-device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+MATRIX_SIZE = 8192
 
-# Matrix size (adjust if needed)
-MATRIX_SIZE = 8192  # Large enough to keep GPU busy
+def worker(gpu_id):
+    torch.cuda.set_device(gpu_id)
+    device = torch.device(f"cuda:{gpu_id}")
 
-# Create random matrices on GPU
-def generate_matrices():
-    A = torch.randn(MATRIX_SIZE, MATRIX_SIZE, device=device)
-    B = torch.randn(MATRIX_SIZE, MATRIX_SIZE, device=device)
-    return A, B
-
-# Infinite loop for continuous GPU load
-try:
     while True:
-        A, B = generate_matrices()
-        start_time = time.time()
+        A = torch.randn(MATRIX_SIZE, MATRIX_SIZE, device=device)
+        B = torch.randn(MATRIX_SIZE, MATRIX_SIZE, device=device)
 
-        # Matrix multiplication
+        start = time.time()
         C = torch.matmul(A, B)
-
-        # Ensure computation finishes
         torch.cuda.synchronize()
+        end = time.time()
 
-        end_time = time.time()
+def main():
+    num_gpus = torch.cuda.device_count()
+    print(f"Using {num_gpus} GPUs")
 
-except KeyboardInterrupt:
-    print("Script interrupted. Exiting...")
+    mp.spawn(
+        worker,
+        args=(),
+        nprocs=num_gpus,
+        join=True
+    )
+
+if __name__ == "__main__":
+    main()

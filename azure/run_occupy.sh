@@ -4,7 +4,7 @@
 idle_count=0
 
 # Threshold for idleness in minutes
-threshold=20
+threshold=15
 
 while true; do
     # Get all GPU utilizations using nvidia-smi
