@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 # add eval
 
-project_name='JEPO_token_Qwen'
+project_name='JEPO_token_Ablation'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
 exp_name="${1}"
 
@@ -46,8 +46,8 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=8
-jepo_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+n_resp_per_prompt=32
+jepo_lr=5e-8 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
 jepo_beta_kl=0.000
@@ -85,11 +85,11 @@ NGPUS_PER_NODE=8
 # Use 1.5B model
 # MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
-# MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
+MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec9/Regression-warmup-Qwen3-1.7B/global_step_1170/huggingface"
 # MODEL_PATH="Qwen/Qwen3-1.7B"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_100/huggingface"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
+# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2/global_step_1950/huggingface"
 # MODEL_PATH="yasiz/Llama-3.1-8B-Instruct-TRACT-copy"
 # MODEL_PATH=" /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_100/huggingface"
