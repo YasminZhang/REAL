@@ -2,7 +2,7 @@ import torch
 import time
 import torch.multiprocessing as mp
 
-MATRIX_SIZE = 8192
+MATRIX_SIZE = 8192*7
 
 def worker(gpu_id):
     torch.cuda.set_device(gpu_id)
