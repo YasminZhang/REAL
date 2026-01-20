@@ -46,7 +46,7 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=32
+n_resp_per_prompt=16
 jepo_lr=5e-8 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
@@ -61,7 +61,7 @@ jepo_use_l2_loss=True
 jepo_normalize_advantages=True # keep it as it is
 jepo_use_cot_loss=True
 jepo_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
-jepo_use_prob_as_reward=True # keep it as it is
+jepo_use_prob_as_reward=False # keep it as it is
 jepo_use_rloo=False # if True, please set use_extra_loss to False
 jepo_update_freq=10 # Qwen -> 20
 ##########################################################################

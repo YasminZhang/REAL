@@ -368,11 +368,11 @@ class JEPOActor(DataParallelPPOActor):
                     extra_loss = 0.0
                     if use_extra_loss:
                         if use_log_loss and use_l2_loss:
-                            extra_loss = float(beta_supp_extra) *   float(beta_supp) * ( (expected_values - gt_values)**2).mean() +  float(beta_supp_extra) *    (-last_token_log_probs).mean()
+                            extra_loss = float(beta_supp_extra) *   ( (expected_values - gt_values)**2).mean() +  float(beta_supp_extra) *   float(beta_supp) *  (-last_token_log_probs).mean()
                         elif use_log_loss:
-                            extra_loss = -  float(beta_supp_extra) *    last_token_log_probs.mean()
+                            extra_loss = -  float(beta_supp_extra) *   float(beta_supp) *  last_token_log_probs.mean()
                         elif use_l2_loss:
-                            extra_loss = float(beta_supp_extra) *   float(beta_supp) * ( (expected_values - gt_values)**2).mean()
+                            extra_loss = float(beta_supp_extra) *   ( (expected_values - gt_values)**2).mean()
                         else:
                             raise RuntimeError("At least one of use_log_loss or use_l2_loss must be True if use_extra_loss is True")
                     else:
