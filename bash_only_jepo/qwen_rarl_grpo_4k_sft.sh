@@ -63,7 +63,7 @@ jepo_use_cot_loss=True
 jepo_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
 jepo_use_prob_as_reward=True # keep it as it is
 jepo_use_rloo=False # if True, please set use_extra_loss to False
-jepo_update_freq=30 # Qwen -> 20
+jepo_update_freq=20 # Qwen -> 20
 val_before_train=False
 ##########################################################################
 
