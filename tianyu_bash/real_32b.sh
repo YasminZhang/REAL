@@ -29,9 +29,9 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=256
+train_prompt_bsz=16
 
-train_prompt_mini_bsz=64
+train_prompt_mini_bsz=4
 
 # DAPO
 # don't do filter.
@@ -131,6 +131,13 @@ export NCCL_SOCKET_IFNAME=eth0
 
 # If not using InfiniBand, disable it
 export NCCL_IB_DISABLE=1
+
+# Force NCCL to use a specific port range to avoid conflicts
+export NCCL_MIN_NCHANNELS=1
+
+# Ray/distributed training specific
+export NCCL_P2P_DISABLE=0
+export NCCL_SHM_DISABLE=0
 
 # Use JEPO-DAPO recipe
 python3 -m recipe.dapo.main_jepo_dapo \
