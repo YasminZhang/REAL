@@ -46,7 +46,7 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=8
+n_resp_per_prompt=16
 jepo_lr=5e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
