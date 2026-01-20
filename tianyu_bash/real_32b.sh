@@ -117,6 +117,21 @@ fsdp_size=-1  # Auto FSDP size
 
 extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
 
+# NCCL Configuration for multi-node training
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=ALL
+export NCCL_TIMEOUT=3600  # 1 hour timeout instead of indefinite hang
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_SOCKET_NTHREADS=4
+export NCCL_NSOCKS_PERTHREAD=4
+
+# Network interface - adjust if needed (common options: eth0, ens, ib0)
+# Check your network interface with: ifconfig or ip addr show
+export NCCL_SOCKET_IFNAME=eth0
+
+# If not using InfiniBand, disable it
+export NCCL_IB_DISABLE=1
+
 # Use JEPO-DAPO recipe
 python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
