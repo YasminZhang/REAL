@@ -29,9 +29,9 @@ overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 
 # Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=16
+train_prompt_bsz=256
 
-train_prompt_mini_bsz=4
+train_prompt_mini_bsz=64
 
 # DAPO
 # don't do filter.
@@ -46,8 +46,8 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=32
-jepo_lr=5e-8 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+n_resp_per_prompt=8
+jepo_lr=5e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
 jepo_beta_kl=0.000
