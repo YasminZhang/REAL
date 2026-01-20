@@ -112,10 +112,24 @@ use_dynamic_bsz=True
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 offload=True  # Keep offload for memory efficiency
-gen_tp=2  # Single tensor parallel for 1.5B
+gen_tp=4  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
+
+# 1. Force NCCL to look in your conda environment for the IB libraries
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+# 2. Enable InfiniBand and tell NCCL which interfaces to use
+export NCCL_IB_DISABLE=0
+export NCCL_IB_HCA=mlx5_ib  # This matches your 'ls' output
+export NCCL_IB_GID_INDEX=3   # Commonly required for RoCE/IB on many clusters
+
+# 3. Use eth0 ONLY for the initial 'handshake', but IB for the heavy data
+export NCCL_SOCKET_IFNAME=eth0
+
+# 4. Debugging (keep this on for the first run to verify "Using network IB")
+export NCCL_DEBUG=INFO
 
 # Submit job to Ray
 ray job submit \
@@ -214,7 +228,7 @@ ray job submit \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.90 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.70 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -227,7 +241,7 @@ ray job submit \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     reward_model.reward_manager=dapo \

@@ -117,23 +117,25 @@ fsdp_size=-1  # Auto FSDP size
 
 extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
 
-# NCCL Configuration for multi-node training
+# NCCL Configuration for Azure InfiniBand (Mellanox mlx5 with RoCE v1)
 export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=ALL
+export NCCL_DEBUG_SUBSYS=INIT,NET
 export NCCL_TIMEOUT=3600  # 1 hour timeout instead of indefinite hang
 export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_SOCKET_NTHREADS=4
-export NCCL_NSOCKS_PERTHREAD=4
 
-# Network interface - adjust if needed (common options: eth0, ens, ib0)
-# Check your network interface with: ifconfig or ip addr show
+# Azure InfiniBand/RoCE configuration
+export NCCL_IB_DISABLE=0  # ENABLE InfiniBand - you have mlx5 hardware!
+export NCCL_IB_HCA=mlx5  # Use Mellanox mlx5 devices
+export NCCL_IB_GID_INDEX=0  # RoCE v1 - use GID index 0
+export NCCL_NET_GDR_LEVEL=PHB  # GPU Direct RDMA for Azure
+export NCCL_IB_TC=136  # Traffic class for Azure IB
+
+# Network interface for fallback
 export NCCL_SOCKET_IFNAME=eth0
 
-# If not using InfiniBand, disable it
-export NCCL_IB_DISABLE=1
-
-# Force NCCL to use a specific port range to avoid conflicts
-export NCCL_MIN_NCHANNELS=1
+# Socket parameters (used as fallback if IB fails)
+export NCCL_SOCKET_NTHREADS=4
+export NCCL_NSOCKS_PERTHREAD=4
 
 # Ray/distributed training specific
 export NCCL_P2P_DISABLE=0
