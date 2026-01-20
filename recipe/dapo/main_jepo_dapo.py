@@ -29,7 +29,7 @@ from recipe.dapo.jepo_dapo_ray_trainer import RayJEPODAPOTrainer
 
 ray.init(
     runtime_env={
-        "env_vars": {"RAY_DEBUG_POST_MORTEM": "1"},
+        "env_vars": {"RAY_DEBUG_POST_MORTEM": "0"},
     }
 )
 
