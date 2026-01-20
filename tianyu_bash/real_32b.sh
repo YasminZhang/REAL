@@ -79,7 +79,7 @@ jepo_responses_micro_batch_size=1024 # this param will be ignored
 jepo_accum_steps=1 # this is also ignored
 
 # Ray - single node setup for 1.5B
-NNODES=1
+NNODES=2
 NGPUS_PER_NODE=8
 
 # Use 1.5B model
@@ -118,7 +118,7 @@ fsdp_size=-1  # Auto FSDP size
 extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
 
 # Use JEPO-DAPO recipe
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
+python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     +data.extra_val_files="${extra_val_files}" \
