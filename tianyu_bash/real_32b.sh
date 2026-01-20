@@ -127,6 +127,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
+    data.trust_remote_code=True \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
@@ -190,9 +191,11 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.rollout.load_format="safetensors" \
+    +actor_rollout_ref.rollout.trust_remote_code=True \
     actor_rollout_ref.model.target_modules=all-linear \
-    actor_rollout_ref.model.use_shm=True \
+    actor_rollout_ref.model.use_shm=False \
     actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
