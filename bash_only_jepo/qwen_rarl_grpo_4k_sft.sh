@@ -46,8 +46,8 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=16
-jepo_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+n_resp_per_prompt=8
+jepo_lr=5e-8 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
 jepo_beta_kl=0.000
@@ -63,8 +63,7 @@ jepo_use_cot_loss=True
 jepo_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
 jepo_use_prob_as_reward=True # keep it as it is
 jepo_use_rloo=False # if True, please set use_extra_loss to False
-jepo_update_freq=20 # Qwen -> 20
-val_before_train=False
+jepo_update_freq=10 # Qwen -> 20
 ##########################################################################
 
 jepo_buffer_size=${train_prompt_bsz} # number of questions
@@ -84,12 +83,12 @@ NNODES=1
 NGPUS_PER_NODE=8
 
 # Use 1.5B model
+# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1200/huggingface"
 # MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
+MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
 # MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec9/Regression-warmup-Qwen3-1.7B/global_step_1170/huggingface"
 # MODEL_PATH="Qwen/Qwen3-1.7B"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2_cot_generated_by_step_800/global_step_780/huggingface"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_100/huggingface"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
 # MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2/global_step_1950/huggingface"
@@ -233,7 +232,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=${val_before_train}\
+    trainer.val_before_train=False \
     trainer.test_freq=${jepo_update_freq} \
     trainer.save_freq=${jepo_update_freq} \
     trainer.total_epochs=500 \
