@@ -9,7 +9,7 @@ exp_name="32B_r64_alpha128_5e-6"
 
 adv_estimator=grpo
 
-lr=1e-6
+lr=1e-7
 use_kl_in_reward=False
 kl_coef=0.01
 use_kl_loss=True
@@ -256,7 +256,7 @@ ray job submit \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.test_freq=${jepo_update_freq} \
     trainer.save_freq=${jepo_update_freq} \
     trainer.total_epochs=500 \
