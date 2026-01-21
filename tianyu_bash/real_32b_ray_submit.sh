@@ -9,7 +9,7 @@ exp_name="32B_r64_alpha128_5e-6"
 
 adv_estimator=grpo
 
-lr=5e-6
+lr=1e-6
 use_kl_in_reward=False
 kl_coef=0.01
 use_kl_loss=True
@@ -46,8 +46,8 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=16
-jepo_lr=5e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+n_resp_per_prompt=8
+jepo_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
 jepo_beta_kl=0.000
@@ -94,7 +94,7 @@ NGPUS_PER_NODE=8
 # MODEL_PATH="yasiz/Llama-3.1-8B-Instruct-TRACT-copy"
 # MODEL_PATH=" /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_100/huggingface"
 MODEL_PATH="Qwen/Qwen3-32B"
-CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
+CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}_$(date +%Y%m%d_%H%M%S)"
 TRAIN_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/train.parquet
 TEST_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet
 
@@ -137,6 +137,7 @@ ray job submit \
     --no-wait \
     --job-id="${project_name}_${exp_name}_$(date +%Y%m%d_%H%M%S)" \
     --working-dir="$(pwd)" \
+    --runtime-env-json='{"env_vars": {"WANDB_ENTITY": "yszhang"}}' \
     -- python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
