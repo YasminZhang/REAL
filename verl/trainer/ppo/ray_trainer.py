@@ -824,7 +824,7 @@ class RayPPOTrainer:
             sample_outputs.extend(output_texts)
             
             for output_text in output_texts:
-                if output_text and output_text[-1].isdigit():
+                if output_text and output_text[-1] in '0123456789':
                     sample_sampled_digits.append(float(output_text[-1]))
                 else:
                     sample_sampled_digits.append(0.0)
