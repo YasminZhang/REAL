@@ -5,7 +5,7 @@ set -xeuo pipefail
 
 project_name='REAL_32B'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="32B_r64_alpha128_1e-6_from_raft_r128"
+exp_name="32B_r64_alpha128_1e-4_from_raft_r128"
 
 adv_estimator=grpo
 
