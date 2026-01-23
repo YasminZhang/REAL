@@ -215,7 +215,6 @@ ray job submit \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.rollout.load_format="safetensors" \
     +actor_rollout_ref.rollout.trust_remote_code=True \
-    actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.model.use_shm=False \
     actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
