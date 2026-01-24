@@ -134,7 +134,7 @@ export NCCL_DEBUG=INFO
 
 # Submit job to Ray
 ray job submit \
-    --address="http://127.0.0.1:8265" \
+    --address="http://127.0.0.1:8266" \
     --no-wait \
     --job-id="${project_name}_${exp_name}_$(date +%Y%m%d_%H%M%S)" \
     --working-dir="$(pwd)" \
