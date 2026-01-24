@@ -131,7 +131,7 @@ export NCCL_SOCKET_IFNAME=eth0
 
 # 4. Debugging (keep this on for the first run to verify "Using network IB")
 export NCCL_DEBUG=INFO
-
+# ray start --head --dashboard-port 8266
 # Submit job to Ray
 ray job submit \
     --address="http://127.0.0.1:8266" \
