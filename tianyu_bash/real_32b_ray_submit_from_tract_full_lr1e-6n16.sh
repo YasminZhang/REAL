@@ -5,11 +5,11 @@ set -xeuo pipefail
 
 project_name='REAL_32B'
 #exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
-exp_name="32B_full_lr_1e-5_from_tract"
+exp_name="32B_full_lr_1e-6_from_tract_n16"
 
 adv_estimator=grpo
 
-lr=1e-5
+lr=1e-6
 use_kl_in_reward=False
 kl_coef=0.01
 use_kl_loss=True
@@ -46,8 +46,8 @@ jepo_delimiter=" So the overall score is " # no use
 jepo_format_penalty=1
 
 #######################################################################
-n_resp_per_prompt=8
-jepo_lr=1e-5 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+n_resp_per_prompt=16
+jepo_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
 jepo_beta_supp=1.0 # lambda
 jepo_beta_supp_extra=0.000 # beta
 jepo_beta_kl=0.000
@@ -134,7 +134,7 @@ export NCCL_DEBUG=INFO
 # ray start --head --dashboard-port 8266
 # Submit job to Ray
 ray job submit \
-    --address="http://127.0.0.1:8265" \
+    --address="http://127.0.0.1:8266" \
     --no-wait \
     --job-id="${project_name}_${exp_name}_$(date +%Y%m%d_%H%M%S)" \
     --working-dir="$(pwd)" \
