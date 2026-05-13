@@ -476,6 +476,17 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
 
                         # Perform JEPO training if buffer is full
                         if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
+                            # Truncate all_incorrect_batch to be divisible by dp_size before any operations
+                            dp_size = self.actor_rollout_wg.world_size
+                            current_size = len(all_incorrect_batch)
+                            remainder = current_size % dp_size
+                            if remainder != 0:
+                                truncate_size = current_size - remainder
+                                print(f"[JEPO Buffer Truncation] Original size: {current_size}, Truncated to: {truncate_size}, Remainder removed: {remainder}, dp_size: {dp_size}")
+                                all_incorrect_batch = all_incorrect_batch[:truncate_size]
+                            else:
+                                print(f"[JEPO Buffer Truncation] No truncation needed. Batch size {current_size} is divisible by dp_size={dp_size}")
+                            
                             if self.use_reference_policy:
                                 with marked_timer("ref", timing_raw, "olive"):
                                     if not self.ref_in_actor:

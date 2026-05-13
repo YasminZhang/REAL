@@ -7,3 +7,4 @@ pip install flash-attn==2.8.1 --no-build-isolation
 pip install "transformers<4.54.0"
 pip install "ray[default]"  
 pip install ray==2.38
+conda install -c conda-forge rdma-core
