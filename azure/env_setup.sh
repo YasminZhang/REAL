@@ -1,5 +1,5 @@
-conda create -n jepo1 python=3.12 -y
-source activate jepo1
+conda create -n real python=3.12 -y
+source activate real
 pip install -e .
 pip3 install -e .[vllm]
 # pip install flash-attn
