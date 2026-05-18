@@ -90,13 +90,19 @@ NNODES=1
 NGPUS_PER_NODE=8
 
 # ---------- Model & data paths ----------
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
-CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/train.parquet
-TEST_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet
+# NOTE: MODEL_PATH below is the downloaded REAL FSDP checkpoint. vLLM/HF
+# from_pretrained will not load it directly — run the verl FSDP -> HF
+# conversion first if you haven't already.
+# Paths are relative to the jepo project root — run this script from there:
+#   bash bash_real/run_real.sh <exp_name>
+DATA_DIR=./data/real_data/real_dataset
+MODEL_PATH=./ckpts/Mistral-7b-v0.2-Instruct-REAL/actor/huggingface
+CKPTS_DIR=./outputs/${project_name}/${exp_name}
+TRAIN_FILE=${DATA_DIR}/train.parquet
+TEST_FILE=${DATA_DIR}/feedback_ood_test/test.parquet
 
 # Extra eval sets reported alongside the primary TEST_FILE.
-extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
+extra_val_files=\"${DATA_DIR}/feedback_ood_test/test.parquet,${DATA_DIR}/flask/test.parquet,${DATA_DIR}/mt_bench/test.parquet,${DATA_DIR}/vicuna/test.parquet\"
 
 # ---------- Generation (vLLM rollout) ----------
 temperature=1
@@ -239,4 +245,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.log_val_generations=10 \
     trainer.validation_data_dir="${CKPTS_DIR}/validations" \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
-    custom_reward_function.name=deepscaler_reward_fn
+    custom_reward_function.name=deepscaler_reward_fn \
+    # actor_rollout_ref.model.lora_rank=64 \
+    # actor_rollout_ref.model.lora_alpha=64.0 \

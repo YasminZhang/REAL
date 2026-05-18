@@ -4,7 +4,7 @@ REAL is a principled reinforcement learning framework designed to optimize **reg
 
 **Paper**: [REAL: Regression-Aware Reinforcement Learning for LLM-as-a-Judge](https://arxiv.org/abs/2603.17145) (ICML 2026)
 
-**Authors**: Yasi Zhang, Tianyu Chen, Mingyuan Zhou, Oscar Leong, Ying Nian Wu, Michal Lukasik
+**Authors**: Yasi Zhang*, Tianyu Chen*, Mingyuan Zhou, Oscar Leong, Ying Nian Wu, Michal Lukasik
 
 ## Key Features
 
@@ -107,6 +107,9 @@ under the `yasiz/` namespace.
 
 | Checkpoint                                                                                                      | Method              | Base model               | Size   |
 | --------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------ | ------ |
+| `[Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B)`                                                       | Base                | —                        | ~62 GB |
+| `[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)`                                                         | Base                | —                        | ~16 GB |
+| `[mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)`               | Base                | —                        | ~14 GB |
 | `[yasiz/Qwen3-32B-REAL](https://huggingface.co/yasiz/Qwen3-32B-REAL)`                                           | REAL (ours)         | Qwen3-32B                | 393 GB |
 | `[yasiz/Qwen3-8B-REAL](https://huggingface.co/yasiz/Qwen3-8B-REAL)`                                             | REAL (ours)         | Qwen3-8B                 | 98 GB  |
 | `[yasiz/Mistral-7b-v0.2-Instruct-REAL](https://huggingface.co/yasiz/Mistral-7b-v0.2-Instruct-REAL)`             | REAL (ours)         | Mistral-7B-v0.2-Instruct | 101 GB |
