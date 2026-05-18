@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
+# Launches a REAL RL training run on a single 8-GPU node.
+# Usage: bash run_real.sh <experiment_name>
+#   <experiment_name> is used for the wandb run name and the checkpoint subdir.
 set -xeuo pipefail
 
-# add eval
-
-project_name='JEPO_token_Ablation'
-#exp_name='deepscaler-1.5b-2k-format-test-g1-delimiter-token-math'
+# ---------- Experiment identity ----------
+project_name='REAL_Ablation'
 exp_name="${1}"
 
+# ---------- Core RL algorithm ----------
+# GRPO-style advantage estimator; KL is applied as a loss term, not in the reward.
 adv_estimator=grpo
-
 lr=1e-7
 use_kl_in_reward=False
 kl_coef=0.01
@@ -17,9 +19,8 @@ kl_loss_coef=0.01
 clip_ratio_low=0.2
 clip_ratio_high=0.2
 
-
-
-
+# ---------- Sequence lengths ----------
+# Overlong-buffer penalty is off; responses past max_response_length are simply truncated.
 max_prompt_length=2048
 max_response_length=1024
 enable_overlong_buffer=False
@@ -28,28 +29,32 @@ overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-# Adjusted for 1.5B model - smaller batch sizes
+# ---------- Batch sizes (sized for a 1.5B–7B model on 8 GPUs) ----------
 train_prompt_bsz=256
-
 train_prompt_mini_bsz=64
 
-# DAPO
-# don't do filter.
+# ---------- DAPO filter groups ----------
+# Disabled here: we do NOT filter generation batches by accuracy.
 enable_filter_groups=False
 filter_groups_metric=acc
 max_num_gen_batches=10
 
-# JEPO specific parameters
+# ---------- JEPO mode ----------
+# Toggle JEPO on / GRPO off. The two are mutually exclusive paths in the trainer.
 use_jepo=True
 use_grpo=False
-jepo_delimiter=" So the overall score is " # no use
+jepo_delimiter=" So the overall score is "   # passed through but unused in current code path
 jepo_format_penalty=1
 
-#######################################################################
+
+#############################################################################################
+# ---------- REAL hyperparameters ----------
+# lr scale rule of thumb: Qwen ~1e-6; Mistral ~5e-8; LoRA = ~10x full-finetune lr.
+#############################################################################################
 n_resp_per_prompt=8
-jepo_lr=5e-8 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
-jepo_beta_supp=1.0 # lambda
-jepo_beta_supp_extra=0.000 # beta
+jepo_lr=5e-8
+jepo_beta_supp=1.0          # lambda (support loss weight)
+jepo_beta_supp_extra=0.000  # beta (extra support loss weight)
 jepo_beta_kl=0.000
 jepo_entropy_coeff=0.000
 jepo_use_format_adv=False
@@ -58,66 +63,58 @@ jepo_use_extra_loss=False
 jepo_use_log_prob_loss=True
 jepo_use_l2_loss=True
 
-jepo_normalize_advantages=True # keep it as it is
+jepo_normalize_advantages=True
 jepo_use_cot_loss=True
-jepo_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
-jepo_use_prob_as_reward=True # keep it as it is
-jepo_use_rloo=False # if True, please set use_extra_loss to False
-jepo_update_freq=10 # Qwen -> 20
-##########################################################################
+jepo_data_type="partial"        # one of: partial, all, incorrect, partial_incorrect, partial_correct
+jepo_use_prob_as_reward=True
+jepo_use_rloo=False             # if True, set jepo_use_extra_loss=False
+jepo_update_freq=10             # eval/save cadence; Qwen runs typically use 20
 
-jepo_buffer_size=${train_prompt_bsz} # number of questions
+# ---------- JEPO buffer / batching ----------
+# Dynamic batching: the per-GPU "responses" counts below cap micro-batches by token budget.
+jepo_buffer_size=${train_prompt_bsz}
 jepo_steps=1
 jepo_update_frequency=100000
 jepo_epochs=3
 jepo_use_dynamic_bsz=True
 jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-jepo_mini_batch_size_per_gpu=128 # responses per gpu
-jepo_micro_batch_size_per_gpu=64 # responses per gpu
+jepo_mini_batch_size_per_gpu=128
+jepo_micro_batch_size_per_gpu=64
 
-jepo_responses_micro_batch_size=1024 # this param will be ignored
-jepo_accum_steps=1 # this is also ignored
+# Kept for config compatibility; runtime ignores these when dynamic_bsz=True.
+jepo_responses_micro_batch_size=1024
+jepo_accum_steps=1
 
-# Ray - single node setup for 1.5B
+# ---------- Distributed setup ----------
 NNODES=1
 NGPUS_PER_NODE=8
 
-# Use 1.5B model
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1200/huggingface"
-# MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
+# ---------- Model & data paths ----------
 MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
-# MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec9/Regression-warmup-Qwen3-1.7B/global_step_1170/huggingface"
-# MODEL_PATH="Qwen/Qwen3-1.7B"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_100/huggingface"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2/global_step_1950/huggingface"
-# MODEL_PATH="yasiz/Llama-3.1-8B-Instruct-TRACT-copy"
-# MODEL_PATH=" /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_100/huggingface"
 CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/train.parquet
 TEST_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet
 
+# Extra eval sets reported alongside the primary TEST_FILE.
+extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
 
-# Algorithm
+# ---------- Generation (vLLM rollout) ----------
 temperature=1
 top_p=0.9
-top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
+top_k=-1                # 0 for HF rollout, -1 for vLLM
 val_top_p=0.9
 repetition_penalty=1.0
 
-# Performance Related Parameter - adjusted for 1.5B model
-sp_size=1  # Single sequence parallel for smaller model
+# ---------- Performance / parallelism ----------
+sp_size=1               # Ulysses sequence parallel (1 = off)
 use_dynamic_bsz=True
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-offload=True  # Keep offload for memory efficiency
-gen_tp=1  # Single tensor parallel for 1.5B
-fsdp_size=-1  # Auto FSDP size
+offload=True            # FSDP param/optimizer offload to CPU for memory headroom
+gen_tp=1                # vLLM tensor parallel per replica
+fsdp_size=-1            # auto
 
-extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
-
-# Use JEPO-DAPO recipe
+# ---------- Launch ----------
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
@@ -242,6 +239,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_jepo_dapo \
     trainer.log_val_generations=10 \
     trainer.validation_data_dir="${CKPTS_DIR}/validations" \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
-    custom_reward_function.name=deepscaler_reward_fn \
-    # actor_rollout_ref.model.lora_rank=64 \
-    # actor_rollout_ref.model.lora_alpha=64.0 \
+    custom_reward_function.name=deepscaler_reward_fn

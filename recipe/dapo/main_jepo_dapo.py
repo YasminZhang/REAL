@@ -33,7 +33,7 @@ ray.init(
     }
 )
 
-@hydra.main(config_path="/home/aiscuser/jepo/recipe/dapo/config", config_name="jepo_dapo_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="jepo_dapo_trainer", version_base=None)
 def main(config):
     run_jepo_dapo(config)
 
