@@ -135,9 +135,7 @@ Then point `MODEL_PATH` in your launch script (e.g. [bash_real/run_real.sh](bash
 at the local directory.
 
 > The REAL checkpoints (and `Qwen3-32B-RAFT`) are exported in raw FSDP shard
-> format from training. To load via `from_pretrained`, convert them to the
-> standard Hugging Face safetensors layout first (see `tools/` and `verl/`
-> conversion utilities).
+> format from training. Use its subfolder: ./ckpts/Qwen3-8B-REAL/actor/huggingface instead.
 
 ## Quick Start
 
@@ -153,6 +151,13 @@ If you want to run 32B models:
 
 ```bash
 bash bash_real/run_real_32B.sh <experiment_name>
+```
+
+A quick sanity check is that in the printing:
+
+Expected values should be reasonable decimals, instead of numbers very close to 0 (that means the digit token's index might be wrong.) For example:
+```
+Expected values (first 5): [1.8960844 2.8807998 4.1740913 2.6792083 2.679181]
 ```
 
 ## Training Configuration
