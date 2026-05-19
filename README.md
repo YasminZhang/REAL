@@ -48,6 +48,12 @@ conda install -c conda-forge rdma-core
 
 Or run [azure/env_setup.sh](azure/env_setup.sh) under the main folder for the full setup script.
 
+
+You can login wandb first:
+```
+wandb login
+```
+
 ## Data Preparation
 
 ### Option 1 — Download the prepared parquet files (recommended)
@@ -142,6 +148,12 @@ bash bash_real/run_real.sh <experiment_name>
 ```
 
 This launches REAL training on 8 GPUs (single node) using vLLM for rollout generation. The training entry point is `recipe.dapo.main_jepo_dapo`.
+
+If you want to run 32B models:
+
+```bash
+bash bash_real/run_real_32B.sh <experiment_name>
+```
 
 ## Training Configuration
 

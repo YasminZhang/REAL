@@ -53,6 +53,11 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
+import sys as _sys
+from pathlib import Path as _Path
+# Avoid recipe.jepo/__init__.py which references stale symbols; import the
+# module directly via sys.path, matching recipe/dapo/jepo_dapo_ray_trainer.py.
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3] / "recipe" / "jepo"))
 from jepo_core_algos import (_allreduce_sum_scalar,
                              attach_jepo_adv_to_dataproto,
                              dummy_backward_fsdp_safe)
