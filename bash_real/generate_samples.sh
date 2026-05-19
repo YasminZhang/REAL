@@ -2,17 +2,17 @@
 set -x
 
 # Usage: bash generate_samples.sh <checkpoint_path>
-# Example: bash generate_samples.sh /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100
+# Example: bash generate_samples.sh /blob/v-tianyuchen/Projects/real/ckpts/real_token/Regression-warmup/global_step_100
 
 if [ "$#" -lt 1 ]; then
     echo "Usage: generate_samples.sh <checkpoint_path>"
-    echo "Example: generate_samples.sh /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100"
+    echo "Example: generate_samples.sh ./Projects/real/ckpts/real_token/Regression-warmup/global_step_100"
     exit 1
 fi
 
 checkpoint_path=$1
 nproc_per_node=8
-output_dir="/home/aiscuser/jepo/outputs/generation_samples"
+output_dir="/home/aiscuser/real/outputs/generation_samples"
 mkdir -p $output_dir
 
 # Generate unique output filename with timestamp
@@ -24,7 +24,7 @@ echo "Output will be saved to: $output_file"
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
     verl/trainer/main_generation.py \
-    data.path=/home/aiscuser/jepo/data/feedback_bench_for_base_warmup/train.parquet \
+    data.path=/home/aiscuser/real/data/feedback_bench_for_base_warmup/train.parquet \
     data.prompt_key=extra_info \
     data.prompt_dict_keys=['question'] \
     data.n_samples=3 \

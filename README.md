@@ -35,7 +35,7 @@ Create and activate the `real` conda environment:
 
 ```bash
 conda create -n real python=3.12 -y
-source activate real
+conda activate real
 
 pip install -e .
 pip3 install -e .[vllm]
@@ -54,7 +54,6 @@ You can login wandb first:
 wandb login
 ```
 
-## Data Preparation
 
 ## Datasets
 
@@ -69,7 +68,7 @@ wandb login
 ### Option 1 — Download the prepared parquet files (recommended)
 
 All preprocessed train/eval splits are mirrored on the Hugging Face Hub at
-`[yasiz/real_data](https://huggingface.co/datasets/yasiz/real_data)`:
+[yasiz/real_data](https://huggingface.co/datasets/yasiz/real_data):
 
 ```bash
 huggingface-cli download yasiz/real_data \
@@ -123,16 +122,16 @@ under the `yasiz/` namespace.
 
 | Checkpoint                                                                                                      | Method              | Base model               | Size   |
 | --------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------ | ------ |
-| `[Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B)`                                                       | Base                | —                        | ~62 GB |
-| `[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)`                                                         | Base                | —                        | ~16 GB |
-| `[mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)`               | Base                | —                        | ~14 GB |
-| `[yasiz/Qwen3-32B-REAL](https://huggingface.co/yasiz/Qwen3-32B-REAL)`                                           | REAL (ours)         | Qwen3-32B                | 393 GB |
-| `[yasiz/Qwen3-8B-REAL](https://huggingface.co/yasiz/Qwen3-8B-REAL)`                                             | REAL (ours)         | Qwen3-8B                 | 98 GB  |
-| `[yasiz/Mistral-7b-v0.2-Instruct-REAL](https://huggingface.co/yasiz/Mistral-7b-v0.2-Instruct-REAL)`             | REAL (ours)         | Mistral-7B-v0.2-Instruct | 101 GB |
-| `[yasiz/Qwen3-32B-RAFT](https://huggingface.co/yasiz/Qwen3-32B-RAFT)`                                           | RAFT (SFT baseline) | Qwen3-32B                | 66 GB  |
-| `[yasiz/Qwen3-8B-RAFT](https://huggingface.co/yasiz/Qwen3-8B-RAFT)`                                             | RAFT (SFT baseline) | Qwen3-8B                 | 33 GB  |
-| `[yasiz/Qwen3-8B-TRACT](https://huggingface.co/yasiz/Qwen3-8B-TRACT)`                                           | TRACT baseline      | Qwen3-8B                 | 33 GB  |
-| `[yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy](https://huggingface.co/yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy)` | TRACT baseline      | Mistral-7B-v0.2-Instruct | 29 GB  |
+| [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B)                                                       | Base                | —                        | ~62 GB |
+| [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)                                                         | Base                | —                        | ~16 GB |
+| [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)               | Base                | —                        | ~14 GB |
+| [yasiz/Qwen3-32B-REAL](https://huggingface.co/yasiz/Qwen3-32B-REAL)                                          | REAL (ours)         | Qwen3-32B                | 393 GB |
+| [yasiz/Qwen3-8B-REAL](https://huggingface.co/yasiz/Qwen3-8B-REAL)                                            | REAL (ours)         | Qwen3-8B                 | 98 GB  |
+| [yasiz/Mistral-7b-v0.2-Instruct-REAL](https://huggingface.co/yasiz/Mistral-7b-v0.2-Instruct-REAL)             | REAL (ours)         | Mistral-7B-v0.2-Instruct | 101 GB |
+| [yasiz/Qwen3-32B-RAFT](https://huggingface.co/yasiz/Qwen3-32B-RAFT)                                           | RAFT (SFT baseline) | Qwen3-32B                | 66 GB  |
+| [yasiz/Qwen3-8B-RAFT](https://huggingface.co/yasiz/Qwen3-8B-RAFT)                                             | RAFT (SFT baseline) | Qwen3-8B                 | 33 GB  |
+| [yasiz/Qwen3-8B-TRACT](https://huggingface.co/yasiz/Qwen3-8B-TRACT)                                           | TRACT baseline      | Qwen3-8B                 | 33 GB  |
+| [yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy](https://huggingface.co/yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy) | TRACT baseline      | Mistral-7B-v0.2-Instruct | 29 GB  |
 
 
 Download a single checkpoint:
@@ -175,6 +174,7 @@ Expected values (first 5): [1.8960844 2.8807998 4.1740913 2.6792083 2.679181]
 All defaults below are taken from [`bash_real/run_real.sh`](bash_real/run_real.sh). Edit the corresponding bash variable to change a value — every entry is wired straight through to a Hydra override on the `python3 -m recipe.dapo.main_real_dapo` line.
 
 
+
 ### Sequence lengths
 
 | Variable                  | Default | Description                                                                    |
@@ -197,10 +197,10 @@ All defaults below are taken from [`bash_real/run_real.sh`](bash_real/run_real.s
 | -------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `real_lr`            | `5e-8`  | REAL actor LR. Rule of thumb: **Qwen ~1e-6**, **Mistral ~5e-8**, **LoRA ≈ 10× full-finetune LR**.                            |
 | `real_beta_supp`     | `1.0`   | λ — weight on the support (log-likelihood) loss. Recommended `1.0` for best correlation.                                    |
-| `real_beta_supp_extra` | `0.0` | β — weight on the L2 + log-likelihood extra-loss bundle. `0.0` is faster and gives reasonable results.                       |
+| `real_beta_supp_extra` | `0.0` | β — weight on the L2 + log-likelihood extra-loss bundle. `0.0` is faster and gives reasonable results. 0.01 gives the best performance.                        |
 | `real_beta_kl`       | `0.0`   | KL coefficient on the original rollout policy (off by default).                                                             |
 | `real_entropy_coeff` | `0.0`   | Entropy regularization (off by default).                                                                                    |
-| `real_update_freq`   | `10`    | Eval/save cadence (steps). Qwen runs typically use `20`.                                                                    |
+| `real_update_freq`   | `10`    | Eval/save cadence (steps). Qwen models run typically use `20`.                                                                    |
 | `val_before_train`   | `True`  | Run validation once before any training step (sanity-check baseline metrics).                                               |
 
 
