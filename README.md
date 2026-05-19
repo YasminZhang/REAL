@@ -4,9 +4,9 @@ REAL is a principled reinforcement learning framework designed to optimize **reg
 
 **Paper**: [REAL: Regression-Aware Reinforcement Learning for LLM-as-a-Judge](https://arxiv.org/abs/2603.17145) (ICML 2026)
 
-**Authors**: [Yasi Zhang](https://yasminzhang.github.io/)<sup>\*</sup>, [Tianyu Chen](https://tianyucodings.github.io/)<sup>\*</sup>, Mingyuan Zhou, Oscar Leong, Ying Nian Wu, [Michal Lukasik](https://mlukasik.github.io/)
+**Authors**: [Yasi Zhang](https://yasminzhang.github.io/)<sup>†</sup>, [Tianyu Chen](https://tianyucodings.github.io/)<sup>†</sup>, Mingyuan Zhou, Oscar Leong, Ying Nian Wu, [Michal Lukasik](https://mlukasik.github.io/)
+ 
 
-<sup>\*</sup> Equal contribution.
 
 ## Key Features
 
