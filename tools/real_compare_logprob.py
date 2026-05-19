@@ -7,7 +7,7 @@ Minimal script to compare log-prob computation methods:
 - optional no-shift variant for illustration
 
 Usage:
-  python tools/jepo_compare_logprob.py \
+  python tools/real_compare_logprob.py \
     --model gpt2 \
     --prompt "What is 2+3?" \
     --response "Let's think step by step. The answer is 5." \

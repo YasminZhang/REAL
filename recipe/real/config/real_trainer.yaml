@@ -18,13 +18,13 @@ reward_model:
     log: False
 
 algorithm:
-  # JEPO specific parameters
-  jepo_delimiter: "\n\n"  # delimiter to split chain-of-thought from response
-  jepo_format_penalty: 0.1  # penalty p for responses without delimiter
-  jepo_beta_supp: 1.0  # coefficient for grad2 (suppression gradient)
-  jepo_beta_kl: 0.1  # coefficient for KL divergence gradient
-  jepo_buffer_size: 1000  # maximum buffer size for storing incorrect responses
-  jepo_steps: 5  # number of JEPO steps when buffer is full
+  # REAL specific parameters
+  real_delimiter: "\n\n"  # delimiter to split chain-of-thought from response
+  real_format_penalty: 0.1  # penalty p for responses without delimiter
+  real_beta_supp: 1.0  # coefficient for grad2 (suppression gradient)
+  real_beta_kl: 0.1  # coefficient for KL divergence gradient
+  real_buffer_size: 1000  # maximum buffer size for storing incorrect responses
+  real_steps: 5  # number of REAL steps when buffer is full
   
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
@@ -33,4 +33,4 @@ algorithm:
     max_num_gen_batches: 0 # Non-positive values mean no upper limit
 
 trainer:
-  project_name: verl-jepo
+  project_name: verl-real

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-JEPO-enhanced DAPO Trainer that integrates JEPO algorithm with DAPO workflow
+REAL-enhanced DAPO Trainer that integrates REAL algorithm with DAPO workflow
 """
 
 import os
-# Import JEPO components
+# Import REAL components
 import sys
 import uuid
 from collections import defaultdict
@@ -41,60 +41,60 @@ from verl.trainer.ppo.ray_trainer import (AdvantageEstimator, Role,
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jepo'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'real'))
 
-from jepo_core_algos import JEPOConfig
+from real_core_algos import REALConfig
 
 
-class RayJEPODAPOTrainer(RayDAPOTrainer):
+class RayREALDAPOTrainer(RayDAPOTrainer):
     """
-    JEPO-enhanced DAPO Trainer that integrates JEPO algorithm with standard DAPO training
+    REAL-enhanced DAPO Trainer that integrates REAL algorithm with standard DAPO training
     
     Workflow:
     1. Perform standard DAPO training (GRPO with advantage estimation)
     2. Track responses where all answers are incorrect (reward = 0)
-    3. When JEPO buffer reaches threshold, perform JEPO training steps
-    4. JEPO training replaces/augments the standard actor update for incorrect response batches
+    3. When REAL buffer reaches threshold, perform REAL training steps
+    4. REAL training replaces/augments the standard actor update for incorrect response batches
     """
     
     def __init__(self, *args, **kwargs):
         # Initialize parent DAPO trainer without modifying workers
-        # JEPO logic will be handled in the trainer methods, not by replacing workers
+        # REAL logic will be handled in the trainer methods, not by replacing workers
         super().__init__(*args, **kwargs)
         
-        print(f"JEPO-DAPO Trainer initialized with actor class: {self.role_worker_mapping.get(Role.ActorRollout, 'Unknown')}")
+        print(f"REAL-DAPO Trainer initialized with actor class: {self.role_worker_mapping.get(Role.ActorRollout, 'Unknown')}")
         
-        # Initialize JEPO components
-        self.jepo_config = JEPOConfig(
-            delimiter=getattr(self.config.algorithm, 'jepo_delimiter', '\n\n'),
-            format_penalty=getattr(self.config.algorithm, 'jepo_format_penalty', 0.1),
-            beta_supp=getattr(self.config.algorithm, 'jepo_beta_supp', 1.0),
-            beta_kl=getattr(self.config.algorithm, 'jepo_beta_kl', 0.1),
-            buffer_size=getattr(self.config.algorithm, 'jepo_buffer_size', 100),
-            jepo_steps=getattr(self.config.algorithm, 'jepo_steps', 5),
-            epochs=getattr(self.config.algorithm, 'jepo_epochs', 1),
-            mini_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_mini_batch_size_per_gpu', 8),
-            micro_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_micro_batch_size_per_gpu', 1),
-            responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8),
+        # Initialize REAL components
+        self.real_config = REALConfig(
+            delimiter=getattr(self.config.algorithm, 'real_delimiter', '\n\n'),
+            format_penalty=getattr(self.config.algorithm, 'real_format_penalty', 0.1),
+            beta_supp=getattr(self.config.algorithm, 'real_beta_supp', 1.0),
+            beta_kl=getattr(self.config.algorithm, 'real_beta_kl', 0.1),
+            buffer_size=getattr(self.config.algorithm, 'real_buffer_size', 100),
+            real_steps=getattr(self.config.algorithm, 'real_steps', 5),
+            epochs=getattr(self.config.algorithm, 'real_epochs', 1),
+            mini_batch_size_per_gpu=getattr(self.config.algorithm, 'real_mini_batch_size_per_gpu', 8),
+            micro_batch_size_per_gpu=getattr(self.config.algorithm, 'real_micro_batch_size_per_gpu', 1),
+            responses_micro_batch_size=getattr(self.config.algorithm, 'real_responses_micro_batch_size', 8),
             num_response_per_question=getattr(self.config.actor_rollout_ref.rollout, 'n', 1),
-            accum_steps=getattr(self.config.algorithm, 'jepo_accum_steps', 4),
-            data_type=getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect,
+            accum_steps=getattr(self.config.algorithm, 'real_accum_steps', 4),
+            data_type=getattr(self.config.algorithm, 'real_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect,
         )
         
-        self.jepo_metrics = defaultdict(list)
+        self.real_metrics = defaultdict(list)
         
-        # Enable JEPO mode
-        self.use_jepo = getattr(self.config.algorithm, 'use_jepo', True)
-        self.jepo_update_frequency = getattr(self.config.algorithm, 'jepo_update_frequency', 10)
+        # Enable REAL mode
+        self.use_real = getattr(self.config.algorithm, 'use_real', True)
+        self.real_update_frequency = getattr(self.config.algorithm, 'real_update_frequency', 10)
         
-        print(f"JEPO-DAPO Trainer initialized with buffer_size={self.jepo_config.buffer_size}, use_jepo={self.use_jepo}")
+        print(f"REAL-DAPO Trainer initialized with buffer_size={self.real_config.buffer_size}, use_real={self.use_real}")
     
-    def _perform_jepo_training_step(self, jepo_batch: DataProto) -> Dict[str, float]:
+    def _perform_real_training_step(self, real_batch: DataProto) -> Dict[str, float]:
         """
-        Perform one JEPO training step using the worker group
+        Perform one REAL training step using the worker group
         
         Args:
-            jepo_batch: DataProto containing buffered data with all-incorrect responses
+            real_batch: DataProto containing buffered data with all-incorrect responses
                       - prompts are under batch.batch["prompts"] (tokens)
                       - responses are under batch.batch["responses"] (tokens)  
                       - ground_truth_answer is under batch.non_tensor_batch["reward_model"]["ground_truth"] (str)
@@ -102,75 +102,75 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         Returns:
             Dictionary of training metrics
         """
-        # Add full JEPO config to the batch meta_info so JEPOActor can consume it
-        # Note: keep key names in sync with verl/workers/actor/jepo_actor.py
-        jepo_batch.meta_info["jepo_config"] = {
-            "delimiter": self.jepo_config.delimiter,
-            "format_penalty": self.jepo_config.format_penalty,
-            "beta_supp": self.jepo_config.beta_supp,
-            "beta_supp_extra": getattr(self.config.algorithm, 'jepo_beta_supp_extra', 0.001),
-            "beta_kl": self.jepo_config.beta_kl,
-            # training/loop settings read by JEPOActor
-            "epochs": self.jepo_config.epochs,
-            "mini_batch_size_per_gpu": self.jepo_config.mini_batch_size_per_gpu,
-            "micro_batch_size_per_gpu": self.jepo_config.micro_batch_size_per_gpu,
-            "responses_micro_batch_size": self.jepo_config.responses_micro_batch_size,
-            # token cap per GPU used by JEPOActor when use_dynamic_bsz
+        # Add full REAL config to the batch meta_info so REALActor can consume it
+        # Note: keep key names in sync with verl/workers/actor/real_actor.py
+        real_batch.meta_info["real_config"] = {
+            "delimiter": self.real_config.delimiter,
+            "format_penalty": self.real_config.format_penalty,
+            "beta_supp": self.real_config.beta_supp,
+            "beta_supp_extra": getattr(self.config.algorithm, 'real_beta_supp_extra', 0.001),
+            "beta_kl": self.real_config.beta_kl,
+            # training/loop settings read by REALActor
+            "epochs": self.real_config.epochs,
+            "mini_batch_size_per_gpu": self.real_config.mini_batch_size_per_gpu,
+            "micro_batch_size_per_gpu": self.real_config.micro_batch_size_per_gpu,
+            "responses_micro_batch_size": self.real_config.responses_micro_batch_size,
+            # token cap per GPU used by REALActor when use_dynamic_bsz
             "ppo_max_token_len_per_gpu": getattr(
                 self.config.algorithm,
-                'jepo_ppo_max_token_len_per_gpu',
+                'real_ppo_max_token_len_per_gpu',
                 getattr(self.config.actor_rollout_ref.actor, 'ppo_max_token_len_per_gpu', 16384),
             ),
-            "accum_steps": self.jepo_config.accum_steps,
-            "num_response_per_question": self.jepo_config.num_response_per_question,
-            # JEPO-specific knobs to keep JEPOActor self-contained
-            "entropy_coeff": getattr(self.config.algorithm, 'jepo_entropy_coeff', getattr(self.config.actor_rollout_ref.actor, 'entropy_coeff', 0.0)),
-            "loss_agg_mode": getattr(self.config.algorithm, 'jepo_loss_agg_mode', getattr(self.config.actor_rollout_ref.actor, 'loss_agg_mode', 'token-mean')),
-            "use_dynamic_bsz": getattr(self.config.algorithm, 'jepo_use_dynamic_bsz', getattr(self.config.actor_rollout_ref.actor, 'use_dynamic_bsz', True)),
-            "use_dynamic_balancer": getattr(self.config.algorithm, 'jepo_use_dynamic_balancer', False),
+            "accum_steps": self.real_config.accum_steps,
+            "num_response_per_question": self.real_config.num_response_per_question,
+            # REAL-specific knobs to keep REALActor self-contained
+            "entropy_coeff": getattr(self.config.algorithm, 'real_entropy_coeff', getattr(self.config.actor_rollout_ref.actor, 'entropy_coeff', 0.0)),
+            "loss_agg_mode": getattr(self.config.algorithm, 'real_loss_agg_mode', getattr(self.config.actor_rollout_ref.actor, 'loss_agg_mode', 'token-mean')),
+            "use_dynamic_bsz": getattr(self.config.algorithm, 'real_use_dynamic_bsz', getattr(self.config.actor_rollout_ref.actor, 'use_dynamic_bsz', True)),
+            "use_dynamic_balancer": getattr(self.config.algorithm, 'real_use_dynamic_balancer', False),
             # Debug hooks
-            "dummy_forward_rank": getattr(self.config.algorithm, 'jepo_dummy_forward_rank', -1),
-            "dummy_forward_value": getattr(self.config.algorithm, 'jepo_dummy_forward_value', 0.0),
-            "dummy_forward_min_seq": getattr(self.config.algorithm, 'jepo_dummy_forward_min_seq', 0),
+            "dummy_forward_rank": getattr(self.config.algorithm, 'real_dummy_forward_rank', -1),
+            "dummy_forward_value": getattr(self.config.algorithm, 'real_dummy_forward_value', 0.0),
+            "dummy_forward_min_seq": getattr(self.config.algorithm, 'real_dummy_forward_min_seq', 0),
             # Progress bar output options
-            "show_all_rank_pbar_to_file": getattr(self.config.algorithm, 'jepo_show_all_rank_pbar_to_file', False),
-            "pbar_file_dir": getattr(self.config.algorithm, 'jepo_pbar_file_dir', 'user_logs'),
+            "show_all_rank_pbar_to_file": getattr(self.config.algorithm, 'real_show_all_rank_pbar_to_file', False),
+            "pbar_file_dir": getattr(self.config.algorithm, 'real_pbar_file_dir', 'user_logs'),
             # Suffix-anchor delimiter matching config (optional)
-            "delimiter_suffix_anchor": getattr(self.config.algorithm, 'jepo_delimiter_suffix_anchor', True),
-            "delimiter_suffix_min_len": getattr(self.config.algorithm, 'jepo_delimiter_suffix_min_len', 2),
-            # add more JEPO-specific config here as needed
-            "use_regression_reward": getattr(self.config.algorithm, 'jepo_use_regression_reward', False),
-            "use_last_token_as_answer": getattr(self.config.algorithm, 'jepo_use_last_token_as_answer', True),
-            "answer_token_length": getattr(self.config.algorithm, 'jepo_answer_token_length', 1),
-            "store_last_token_probs": getattr(self.config.algorithm, 'jepo_store_last_token_probs', True),
-            "use_format_adv": getattr(self.config.algorithm, 'jepo_use_format_adv', False),
-            "use_log_prob_loss": getattr(self.config.algorithm, 'jepo_use_log_prob_loss', False),
-            "use_extra_loss": getattr(self.config.algorithm, 'jepo_use_extra_loss', False),
-            "use_cot_loss": getattr(self.config.algorithm, 'jepo_use_cot_loss', False),
-            "normalize_advantages": getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
-            "use_l2_loss": getattr(self.config.algorithm, 'jepo_use_l2_loss', False),
-            "data_type": getattr(self.config.algorithm, 'jepo_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
-            "use_prob_as_reward": getattr(self.config.algorithm, 'jepo_use_prob_as_reward', False),
+            "delimiter_suffix_anchor": getattr(self.config.algorithm, 'real_delimiter_suffix_anchor', True),
+            "delimiter_suffix_min_len": getattr(self.config.algorithm, 'real_delimiter_suffix_min_len', 2),
+            # add more REAL-specific config here as needed
+            "use_regression_reward": getattr(self.config.algorithm, 'real_use_regression_reward', False),
+            "use_last_token_as_answer": getattr(self.config.algorithm, 'real_use_last_token_as_answer', True),
+            "answer_token_length": getattr(self.config.algorithm, 'real_answer_token_length', 1),
+            "store_last_token_probs": getattr(self.config.algorithm, 'real_store_last_token_probs', True),
+            "use_format_adv": getattr(self.config.algorithm, 'real_use_format_adv', False),
+            "use_log_prob_loss": getattr(self.config.algorithm, 'real_use_log_prob_loss', False),
+            "use_extra_loss": getattr(self.config.algorithm, 'real_use_extra_loss', False),
+            "use_cot_loss": getattr(self.config.algorithm, 'real_use_cot_loss', False),
+            "normalize_advantages": getattr(self.config.algorithm, 'real_normalize_advantages', False),
+            "use_l2_loss": getattr(self.config.algorithm, 'real_use_l2_loss', False),
+            "data_type": getattr(self.config.algorithm, 'real_data_type', 'partial_incorrect'), # partial, all, incorrect, partial_incorrect
+            "use_prob_as_reward": getattr(self.config.algorithm, 'real_use_prob_as_reward', False),
             "model_name": getattr(self.config.algorithm, 'model_name', 'unknown_model'),
-            "use_rloo": getattr(self.config.algorithm, 'jepo_use_rloo', False),
+            "use_rloo": getattr(self.config.algorithm, 'real_use_rloo', False),
         }
         
-        # Call the JEPO-specific actor update with the properly formatted DataProto
-        actor_output = self.actor_rollout_wg.jepo_update_actor(jepo_batch)
+        # Call the REAL-specific actor update with the properly formatted DataProto
+        actor_output = self.actor_rollout_wg.real_update_actor(real_batch)
         
         # Extract metrics
         metrics = {}
         if "metrics" in actor_output.meta_info:
             actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             for key, value in actor_metrics.items():
-                metrics[f"jepo_{key}"] = value
+                metrics[f"real_{key}"] = value
         
         return metrics
 
 
-    def _run_jepo_training(self, all_incorrect_batch: DataProto) -> Dict[str, float]:
+    def _run_real_training(self, all_incorrect_batch: DataProto) -> Dict[str, float]:
         """
-        Run JEPO training on DataProto batch object
+        Run REAL training on DataProto batch object
         
         Args:
             all_incorrect_batch: DataProto containing all incorrect responses
@@ -180,16 +180,16 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         """
 
         batch_size = len(all_incorrect_batch.batch["prompts"])
-        print(f"Running JEPO training with {batch_size} samples...")
+        print(f"Running REAL training with {batch_size} samples...")
         
         all_metrics = defaultdict(list)
         
-        # Perform JEPO steps on the provided batch
-        for step in range(self.jepo_config.jepo_steps):
+        # Perform REAL steps on the provided batch
+        for step in range(self.real_config.real_steps):
             # Process batch in micro batches to avoid OOM
             step_metrics = defaultdict(list)
             
-            metrics = self._perform_jepo_training_step(all_incorrect_batch)
+            metrics = self._perform_real_training_step(all_incorrect_batch)
                 
             # Collect metrics from this micro batch
             for key, value in metrics.items():
@@ -212,7 +212,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
     
     def fit(self):
         """
-        Enhanced DAPO training loop with JEPO integration
+        Enhanced DAPO training loop with REAL integration
         """
         from omegaconf import OmegaConf
 
@@ -262,7 +262,7 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
         timing_raw = defaultdict(float)
         batch = None
         num_prompt_in_batch = 0
-        num_prompt_in_jepo_buffer = 0
+        num_prompt_in_real_buffer = 0
         num_gen_batches = 0
         all_incorrect_batch = None  # Buffer for all incorrect responses
         
@@ -386,12 +386,12 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     ]
                     # Prompts where all responses are incorrect (acc == 0 across n samples)
                     # NOTE: For accuracy-style metrics in {0,1}, the “all incorrect” case means mean == 0.
-                    # Using ">= 0" incorrectly included almost all prompts and diluted JEPO training.
-                    if self.config.algorithm.use_grpo: # if use grpo, then use all incorrect question for jepo
+                    # Using ">= 0" incorrectly included almost all prompts and diluted REAL training.
+                    if self.config.algorithm.use_grpo: # if use grpo, then use all incorrect question for real
                         all_incorrect_uids = [
                             uid for uid, mean in prompt_uid2metric_mean.items() if np.isclose(mean, 0.0)
                         ]
-                    else: # if there is no grpo, then only use jepo with all questions
+                    else: # if there is no grpo, then only use real with all questions
                         all_incorrect_uids = [
                             uid for uid, mean in prompt_uid2metric_mean.items() if mean >= 0
                         ]
@@ -415,10 +415,10 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                     num_prompt_in_batch += len(kept_prompt_uids)
                     
                     # Log solve stats for this gen batch
-                    metrics["jepo_buffer/solve_all"] = len(all_correct_uids)
-                    metrics["jepo_buffer/solve_none"] = len(all_incorrect_uids_)
-                    metrics["jepo_buffer/solve_partial"] = len(partial_uids_)
-                    metrics["jepo_buffer/total_prompts"] = len(all_prompt_uids)
+                    metrics["real_buffer/solve_all"] = len(all_correct_uids)
+                    metrics["real_buffer/solve_none"] = len(all_incorrect_uids_)
+                    metrics["real_buffer/solve_partial"] = len(partial_uids_)
+                    metrics["real_buffer/total_prompts"] = len(all_prompt_uids)
 
                     kept_traj_idxs = []
                     all_incorrect_traj_idxs = []
@@ -438,54 +438,54 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             
                 
 
-                    # Add to JEPO buffer for each generation batch before continuing
-                    if self.use_jepo:
+                    # Add to REAL buffer for each generation batch before continuing
+                    if self.use_real:
                         print(f"Solve None: {len(all_incorrect_uids_)}")
                         print(f"Solve Partial: {len(partial_uids_)}")
                         print(f"Solve All: {len(all_correct_uids)}")
                         
-                        print('data_type:', self.jepo_config.data_type)
+                        print('data_type:', self.real_config.data_type)
                         
-                        if self.jepo_config.data_type == "partial_incorrect":
+                        if self.real_config.data_type == "partial_incorrect":
                             all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs + all_partial_traj_idxs]
-                            num_prompt_in_jepo_buffer += len(all_incorrect_uids_) + len(partial_uids_)
-                        elif self.jepo_config.data_type == "all":
+                            num_prompt_in_real_buffer += len(all_incorrect_uids_) + len(partial_uids_)
+                        elif self.real_config.data_type == "all":
                             all_incorrect_new_batch = new_batch
-                            num_prompt_in_jepo_buffer += len(all_prompt_uids)
-                        elif self.jepo_config.data_type == "incorrect":
+                            num_prompt_in_real_buffer += len(all_prompt_uids)
+                        elif self.real_config.data_type == "incorrect":
                             all_incorrect_new_batch = new_batch[all_incorrect_traj_idxs]
-                            num_prompt_in_jepo_buffer += len(all_incorrect_uids_)
-                        elif self.jepo_config.data_type == "partial":
+                            num_prompt_in_real_buffer += len(all_incorrect_uids_)
+                        elif self.real_config.data_type == "partial":
                             all_incorrect_new_batch = new_batch[all_partial_traj_idxs]
-                            num_prompt_in_jepo_buffer += len(partial_uids_)
-                        elif self.jepo_config.data_type == "partial_correct":
+                            num_prompt_in_real_buffer += len(partial_uids_)
+                        elif self.real_config.data_type == "partial_correct":
                             all_incorrect_new_batch = new_batch[all_partial_traj_idxs + all_correct_traj_idxs]
-                            num_prompt_in_jepo_buffer += len(partial_uids_) + len(all_correct_uids)
+                            num_prompt_in_real_buffer += len(partial_uids_) + len(all_correct_uids)
                         else:
-                            raise ValueError(f"Unknown jepo_data_type: {self.jepo_config.data_type}")
+                            raise ValueError(f"Unknown real_data_type: {self.real_config.data_type}")
                         
                     
                         
                         
-                        print(f"Total prompts in jepo buffer: {num_prompt_in_jepo_buffer}")
+                        print(f"Total prompts in real buffer: {num_prompt_in_real_buffer}")
                         
                          
                         all_incorrect_batch = deepcopy(all_incorrect_new_batch) if all_incorrect_batch is None else DataProto.concat([all_incorrect_batch, all_incorrect_new_batch])
                         
                         
 
-                        # Perform JEPO training if buffer is full
-                        if num_prompt_in_jepo_buffer >= self.jepo_config.buffer_size:
+                        # Perform REAL training if buffer is full
+                        if num_prompt_in_real_buffer >= self.real_config.buffer_size:
                             # Truncate all_incorrect_batch to be divisible by dp_size before any operations
                             dp_size = self.actor_rollout_wg.world_size
                             current_size = len(all_incorrect_batch)
                             remainder = current_size % dp_size
                             if remainder != 0:
                                 truncate_size = current_size - remainder
-                                print(f"[JEPO Buffer Truncation] Original size: {current_size}, Truncated to: {truncate_size}, Remainder removed: {remainder}, dp_size: {dp_size}")
+                                print(f"[REAL Buffer Truncation] Original size: {current_size}, Truncated to: {truncate_size}, Remainder removed: {remainder}, dp_size: {dp_size}")
                                 all_incorrect_batch = all_incorrect_batch[:truncate_size]
                             else:
-                                print(f"[JEPO Buffer Truncation] No truncation needed. Batch size {current_size} is divisible by dp_size={dp_size}")
+                                print(f"[REAL Buffer Truncation] No truncation needed. Batch size {current_size} is divisible by dp_size={dp_size}")
                             
                             if self.use_reference_policy:
                                 with marked_timer("ref", timing_raw, "olive"):
@@ -494,13 +494,13 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                                     else:
                                         ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(all_incorrect_batch)
                                     all_incorrect_batch = all_incorrect_batch.union(ref_log_prob)
-                            jepo_metrics = self._run_jepo_training(all_incorrect_batch[:self.jepo_config.buffer_size*self.config.actor_rollout_ref.rollout.n])
-                            metrics.update(jepo_metrics)
-                            print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
-                            all_incorrect_batch = None # clear the jepo batch
-                            num_prompt_in_jepo_buffer = 0
-                            if jepo_metrics:
-                                print(f"JEPO training completed with metrics: {jepo_metrics}")
+                            real_metrics = self._run_real_training(all_incorrect_batch[:self.real_config.buffer_size*self.config.actor_rollout_ref.rollout.n])
+                            metrics.update(real_metrics)
+                            print(f"✅ REAL TRAINING COMPLETED - Metrics: {list(real_metrics.keys()) if real_metrics else 'None'}")
+                            all_incorrect_batch = None # clear the real batch
+                            num_prompt_in_real_buffer = 0
+                            if real_metrics:
+                                print(f"REAL training completed with metrics: {real_metrics}")
                     
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
@@ -592,16 +592,16 @@ class RayJEPODAPOTrainer(RayDAPOTrainer):
                             metrics.update(actor_output_metrics)
 
                     # TODO: Skip this part for now
-                    # # Perform JEPO training when frequency is hit
-                    # frequency_met = self.global_steps % self.jepo_update_frequency == 0
-                    # if (self.use_jepo and all_incorrect_batch is not None and frequency_met):
-                    #     jepo_metrics = self._run_jepo_training(all_incorrect_batch)
-                    #     metrics.update(jepo_metrics)
-                    #     print(f"✅ JEPO TRAINING COMPLETED - Metrics: {list(jepo_metrics.keys()) if jepo_metrics else 'None'}")
-                    #     all_incorrect_batch = None # clear the jepo batch
-                    #     num_prompt_in_jepo_buffer = 0
-                    #     if jepo_metrics:
-                    #         print(f"JEPO training completed with metrics: {jepo_metrics}")
+                    # # Perform REAL training when frequency is hit
+                    # frequency_met = self.global_steps % self.real_update_frequency == 0
+                    # if (self.use_real and all_incorrect_batch is not None and frequency_met):
+                    #     real_metrics = self._run_real_training(all_incorrect_batch)
+                    #     metrics.update(real_metrics)
+                    #     print(f"✅ REAL TRAINING COMPLETED - Metrics: {list(real_metrics.keys()) if real_metrics else 'None'}")
+                    #     all_incorrect_batch = None # clear the real batch
+                    #     num_prompt_in_real_buffer = 0
+                    #     if real_metrics:
+                    #         print(f"REAL training completed with metrics: {real_metrics}")
 
                     # validation
                     if (

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='JEPO'
-exp_name='JEPO-Qwen2.5-7b-MATH-test'
+project_name='REAL'
+exp_name='REAL-Qwen2.5-7b-MATH-test'
 
 adv_estimator=grpo
 
@@ -26,13 +26,13 @@ train_prompt_bsz=512
 n_resp_per_prompt=16
 train_prompt_mini_bsz=32
 
-# JEPO specific parameters
-jepo_delimiter="\n\n"
-jepo_format_penalty=0.1
-jepo_beta_supp=1.0
-jepo_beta_kl=0.1
-jepo_buffer_size=1000
-jepo_steps=5
+# REAL specific parameters
+real_delimiter="\n\n"
+real_format_penalty=0.1
+real_beta_supp=1.0
+real_beta_kl=0.1
+real_buffer_size=1000
+real_steps=5
 
 # Ray
 NNODES=${NNODES:-8}
@@ -61,8 +61,8 @@ offload=True
 gen_tp=4
 fsdp_size=32
 
-# Use JEPO recipe
-python3 recipe/jepo/main_jepo.py \
+# Use REAL recipe
+python3 recipe/real/main_real.py \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -74,12 +74,12 @@ python3 recipe/jepo/main_jepo.py \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.jepo_delimiter="${jepo_delimiter}" \
-    algorithm.jepo_format_penalty=${jepo_format_penalty} \
-    algorithm.jepo_beta_supp=${jepo_beta_supp} \
-    algorithm.jepo_beta_kl=${jepo_beta_kl} \
-    algorithm.jepo_buffer_size=${jepo_buffer_size} \
-    algorithm.jepo_steps=${jepo_steps} \
+    algorithm.real_delimiter="${real_delimiter}" \
+    algorithm.real_format_penalty=${real_format_penalty} \
+    algorithm.real_beta_supp=${real_beta_supp} \
+    algorithm.real_beta_kl=${real_beta_kl} \
+    algorithm.real_buffer_size=${real_buffer_size} \
+    algorithm.real_steps=${real_steps} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \

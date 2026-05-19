@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-JEPO (Just Exploration with Policy Optimization) main training script.
+REAL-enhanced DAPO main training script.
 """
 
 import os
@@ -25,15 +25,20 @@ from omegaconf import OmegaConf
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 
-from .jepo_ray_trainer import RayJEPOTrainer
+from recipe.dapo.real_dapo_ray_trainer import RayREALDAPOTrainer
 
+ray.init(
+    runtime_env={
+        "env_vars": {"RAY_DEBUG_POST_MORTEM": "0"},
+    }
+)
 
-@hydra.main(config_path="config", config_name="jepo_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="real_dapo_trainer", version_base=None)
 def main(config):
-    run_jepo(config)
+    run_real_dapo(config)
 
 
-def run_jepo(config) -> None:
+def run_real_dapo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
@@ -115,11 +120,6 @@ class TaskRunner:
         }
 
         # we should adopt a multi-source reward function here
-        # - for rule-based rm, we directly call a reward score
-        # - for model-based rm, we call a model
-        # - for code related prompt, we send to a sandbox if there are test cases
-        # - finally, we combine all the rewards together
-        # - The reward type depends on the tag of the data
         if config.reward_model.enable:
             if config.reward_model.strategy in {"fsdp", "fsdp2"}:
                 from verl.workers.fsdp_workers import RewardModelWorker
@@ -153,7 +153,7 @@ class TaskRunner:
         )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        trainer = RayJEPOTrainer(
+        trainer = RayREALDAPOTrainer(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

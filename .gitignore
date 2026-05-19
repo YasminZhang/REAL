@@ -1,4 +1,5 @@
 data/real_data/
+ckpts/
 plot/
 *.md
 tract_data/

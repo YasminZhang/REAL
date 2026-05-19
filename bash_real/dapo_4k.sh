@@ -35,22 +35,22 @@ filter_groups_metric=acc
 max_num_gen_batches=10
 
 # JEPO specific parameters
-use_jepo=False
-jepo_delimiter="\\boxed\{"
-jepo_format_penalty=10
-jepo_beta_supp=0.001
-jepo_beta_kl=0.0
-jepo_entropy_coeff=0.0
-jepo_buffer_size=256 # number of questions
-jepo_steps=1
-jepo_update_frequency=100000
-jepo_epochs=1
-jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
-jepo_mini_batch_size_per_gpu=64 # responses per gpu
-jepo_micro_batch_size_per_gpu=4 # responses per gpu
+use_real=False
+real_delimiter="\\boxed\{"
+real_format_penalty=10
+real_beta_supp=0.001
+real_beta_kl=0.0
+real_entropy_coeff=0.0
+real_buffer_size=256 # number of questions
+real_steps=1
+real_update_frequency=100000
+real_epochs=1
+real_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 64))
+real_mini_batch_size_per_gpu=64 # responses per gpu
+real_micro_batch_size_per_gpu=4 # responses per gpu
 
-jepo_responses_micro_batch_size=1024 # this param will be ignored
-jepo_accum_steps=1 # this is also ignored
+real_responses_micro_batch_size=1024 # this param will be ignored
+real_accum_steps=1 # this is also ignored
 
 # Ray - single node setup for 1.5B
 NNODES=1
@@ -78,7 +78,7 @@ gen_tp=1  # Single tensor parallel for 1.5B
 fsdp_size=-1  # Auto FSDP size
 
 # Use JEPO-DAPO recipe
-python3 -m recipe.dapo.main_jepo_dapo \
+python3 -m recipe.dapo.main_real_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -90,25 +90,25 @@ python3 -m recipe.dapo.main_jepo_dapo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.use_jepo=${use_jepo} \
-    algorithm.jepo_delimiter="${jepo_delimiter}" \
-    algorithm.jepo_format_penalty=${jepo_format_penalty} \
-    algorithm.jepo_beta_supp=${jepo_beta_supp} \
-    algorithm.jepo_beta_kl=${jepo_beta_kl} \
-    algorithm.jepo_buffer_size=${jepo_buffer_size} \
-    algorithm.jepo_steps=${jepo_steps} \
-    algorithm.jepo_update_frequency=${jepo_update_frequency} \
-    +algorithm.jepo_epochs=${jepo_epochs} \
-    +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
-    +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
-    +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
-    +algorithm.jepo_delimiter_suffix_anchor=True \
-    +algorithm.jepo_delimiter_suffix_min_len=2 \
-    +algorithm.jepo_accum_steps=${jepo_accum_steps} \
-    +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
-    +algorithm.jepo_entropy_coeff=${jepo_entropy_coeff} \
-    +algorithm.jepo_use_dynamic_bsz=False \
-    +algorithm.jepo_use_dynamic_balancer=False \
+    algorithm.use_real=${use_real} \
+    algorithm.real_delimiter="${real_delimiter}" \
+    algorithm.real_format_penalty=${real_format_penalty} \
+    algorithm.real_beta_supp=${real_beta_supp} \
+    algorithm.real_beta_kl=${real_beta_kl} \
+    algorithm.real_buffer_size=${real_buffer_size} \
+    algorithm.real_steps=${real_steps} \
+    algorithm.real_update_frequency=${real_update_frequency} \
+    +algorithm.real_epochs=${real_epochs} \
+    +algorithm.real_mini_batch_size_per_gpu=${real_mini_batch_size_per_gpu} \
+    +algorithm.real_micro_batch_size_per_gpu=${real_micro_batch_size_per_gpu} \
+    +algorithm.real_responses_micro_batch_size=${real_responses_micro_batch_size} \
+    +algorithm.real_delimiter_suffix_anchor=True \
+    +algorithm.real_delimiter_suffix_min_len=2 \
+    +algorithm.real_accum_steps=${real_accum_steps} \
+    +algorithm.real_loss_agg_mode=${loss_agg_mode} \
+    +algorithm.real_entropy_coeff=${real_entropy_coeff} \
+    +algorithm.real_use_dynamic_bsz=False \
+    +algorithm.real_use_dynamic_balancer=False \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -124,7 +124,7 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
+    +algorithm.real_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
@@ -133,8 +133,8 @@ python3 -m recipe.dapo.main_jepo_dapo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
-    +actor_rollout_ref.jepo_actor.optim.lr=1e-6 \
-    +actor_rollout_ref.jepo_actor.optim.lr_warmup_steps=0 \
+    +actor_rollout_ref.real_actor.optim.lr=1e-6 \
+    +actor_rollout_ref.real_actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \

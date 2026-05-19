@@ -40,43 +40,43 @@ filter_groups_metric=acc
 max_num_gen_batches=10
 
 # JEPO specific parameters
-use_jepo=True
+use_real=True
 use_grpo=False
-jepo_delimiter=" So the overall score is " # no use
-jepo_format_penalty=1
+real_delimiter=" So the overall score is " # no use
+real_format_penalty=1
 
 #######################################################################
 n_resp_per_prompt=16
-jepo_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
-jepo_beta_supp=1.0 # lambda
-jepo_beta_supp_extra=0.000 # beta
-jepo_beta_kl=0.000
-jepo_entropy_coeff=0.000
-jepo_use_format_adv=False
+real_lr=1e-6 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
+real_beta_supp=1.0 # lambda
+real_beta_supp_extra=0.000 # beta
+real_beta_kl=0.000
+real_entropy_coeff=0.000
+real_use_format_adv=False
 
-jepo_use_extra_loss=False
-jepo_use_log_prob_loss=True
-jepo_use_l2_loss=True
+real_use_extra_loss=False
+real_use_log_prob_loss=True
+real_use_l2_loss=True
 
-jepo_normalize_advantages=True # keep it as it is
-jepo_use_cot_loss=True
-jepo_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
-jepo_use_prob_as_reward=True # keep it as it is
-jepo_use_rloo=False # if True, please set use_extra_loss to False
-jepo_update_freq=10 # Qwen -> 20
+real_normalize_advantages=True # keep it as it is
+real_use_cot_loss=True
+real_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
+real_use_prob_as_reward=True # keep it as it is
+real_use_rloo=False # if True, please set use_extra_loss to False
+real_update_freq=10 # Qwen -> 20
 ##########################################################################
 
-jepo_buffer_size=${train_prompt_bsz} # number of questions
-jepo_steps=1
-jepo_update_frequency=100000
-jepo_epochs=3
-jepo_use_dynamic_bsz=True
-jepo_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
-jepo_mini_batch_size_per_gpu=128 # responses per gpu
-jepo_micro_batch_size_per_gpu=64 # responses per gpu
+real_buffer_size=${train_prompt_bsz} # number of questions
+real_steps=1
+real_update_frequency=100000
+real_epochs=3
+real_use_dynamic_bsz=True
+real_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+real_mini_batch_size_per_gpu=128 # responses per gpu
+real_micro_batch_size_per_gpu=64 # responses per gpu
 
-jepo_responses_micro_batch_size=1024 # this param will be ignored
-jepo_accum_steps=1 # this is also ignored
+real_responses_micro_batch_size=1024 # this param will be ignored
+real_accum_steps=1 # this is also ignored
 
 # Ray - single node setup for 1.5B
 NNODES=2
@@ -139,7 +139,7 @@ ray job submit \
     --job-id="${project_name}_${exp_name}_$(date +%Y%m%d_%H%M%S)" \
     --working-dir="$(pwd)" \
     --runtime-env-json='{"env_vars": {"WANDB_ENTITY": "yszhang"}}' \
-    -- python3 -m recipe.dapo.main_jepo_dapo \
+    -- python3 -m recipe.dapo.main_real_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     +data.extra_val_files="${extra_val_files}" \
@@ -153,40 +153,40 @@ ray job submit \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.use_jepo=${use_jepo} \
-    algorithm.jepo_delimiter="${jepo_delimiter}" \
-    algorithm.jepo_format_penalty=${jepo_format_penalty} \
-    algorithm.jepo_beta_supp=${jepo_beta_supp} \
-    +algorithm.jepo_beta_supp_extra=${jepo_beta_supp_extra} \
-    algorithm.jepo_beta_kl=${jepo_beta_kl} \
-    algorithm.jepo_buffer_size=${jepo_buffer_size} \
-    algorithm.jepo_steps=${jepo_steps} \
-    algorithm.jepo_update_frequency=${jepo_update_frequency} \
-    +algorithm.jepo_use_regression_reward=True \
-    +algorithm.jepo_use_last_token_as_answer=True \
-    +algorithm.jepo_answer_token_length=1 \
-    +algorithm.jepo_store_last_token_probs=True \
-    +algorithm.jepo_use_format_adv=${jepo_use_format_adv} \
-    +algorithm.jepo_use_log_prob_loss=${jepo_use_log_prob_loss} \
-    +algorithm.jepo_use_extra_loss=${jepo_use_extra_loss} \
-    +algorithm.jepo_use_cot_loss=${jepo_use_cot_loss} \
-    +algorithm.jepo_normalize_advantages=${jepo_normalize_advantages} \
-    +algorithm.jepo_use_l2_loss=${jepo_use_l2_loss} \
-    +algorithm.jepo_use_prob_as_reward=${jepo_use_prob_as_reward} \
-    +algorithm.jepo_use_rloo=${jepo_use_rloo} \
+    algorithm.use_real=${use_real} \
+    algorithm.real_delimiter="${real_delimiter}" \
+    algorithm.real_format_penalty=${real_format_penalty} \
+    algorithm.real_beta_supp=${real_beta_supp} \
+    +algorithm.real_beta_supp_extra=${real_beta_supp_extra} \
+    algorithm.real_beta_kl=${real_beta_kl} \
+    algorithm.real_buffer_size=${real_buffer_size} \
+    algorithm.real_steps=${real_steps} \
+    algorithm.real_update_frequency=${real_update_frequency} \
+    +algorithm.real_use_regression_reward=True \
+    +algorithm.real_use_last_token_as_answer=True \
+    +algorithm.real_answer_token_length=1 \
+    +algorithm.real_store_last_token_probs=True \
+    +algorithm.real_use_format_adv=${real_use_format_adv} \
+    +algorithm.real_use_log_prob_loss=${real_use_log_prob_loss} \
+    +algorithm.real_use_extra_loss=${real_use_extra_loss} \
+    +algorithm.real_use_cot_loss=${real_use_cot_loss} \
+    +algorithm.real_normalize_advantages=${real_normalize_advantages} \
+    +algorithm.real_use_l2_loss=${real_use_l2_loss} \
+    +algorithm.real_use_prob_as_reward=${real_use_prob_as_reward} \
+    +algorithm.real_use_rloo=${real_use_rloo} \
     +algorithm.model_name="${MODEL_PATH}" \
-    +algorithm.jepo_data_type=${jepo_data_type} \
-    +algorithm.jepo_epochs=${jepo_epochs} \
-    +algorithm.jepo_mini_batch_size_per_gpu=${jepo_mini_batch_size_per_gpu} \
-    +algorithm.jepo_micro_batch_size_per_gpu=${jepo_micro_batch_size_per_gpu} \
-    +algorithm.jepo_responses_micro_batch_size=${jepo_responses_micro_batch_size} \
-    +algorithm.jepo_delimiter_suffix_anchor=False \
-    +algorithm.jepo_delimiter_suffix_min_len=2 \
-    +algorithm.jepo_accum_steps=${jepo_accum_steps} \
-    +algorithm.jepo_loss_agg_mode=${loss_agg_mode} \
-    +algorithm.jepo_entropy_coeff=${jepo_entropy_coeff} \
-    +algorithm.jepo_use_dynamic_bsz=${jepo_use_dynamic_bsz} \
-    +algorithm.jepo_use_dynamic_balancer=False \
+    +algorithm.real_data_type=${real_data_type} \
+    +algorithm.real_epochs=${real_epochs} \
+    +algorithm.real_mini_batch_size_per_gpu=${real_mini_batch_size_per_gpu} \
+    +algorithm.real_micro_batch_size_per_gpu=${real_micro_batch_size_per_gpu} \
+    +algorithm.real_responses_micro_batch_size=${real_responses_micro_batch_size} \
+    +algorithm.real_delimiter_suffix_anchor=False \
+    +algorithm.real_delimiter_suffix_min_len=2 \
+    +algorithm.real_accum_steps=${real_accum_steps} \
+    +algorithm.real_loss_agg_mode=${loss_agg_mode} \
+    +algorithm.real_entropy_coeff=${real_entropy_coeff} \
+    +algorithm.real_use_dynamic_bsz=${real_use_dynamic_bsz} \
+    +algorithm.real_use_dynamic_balancer=False \
     +algorithm.use_grpo=${use_grpo} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
@@ -206,7 +206,7 @@ ray job submit \
     actor_rollout_ref.ref.model_name="${MODEL_PATH}" \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    +algorithm.jepo_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
+    +algorithm.real_ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
@@ -219,9 +219,9 @@ ray job submit \
     actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
-    +actor_rollout_ref.jepo_actor.optim.lr=${jepo_lr} \
-    +actor_rollout_ref.jepo_actor.optim.warmup_style=constant \
-    +actor_rollout_ref.jepo_actor.optim.warmup_ratio=0.0 \
+    +actor_rollout_ref.real_actor.optim.lr=${real_lr} \
+    +actor_rollout_ref.real_actor.optim.warmup_style=constant \
+    +actor_rollout_ref.real_actor.optim.warmup_ratio=0.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
@@ -257,8 +257,8 @@ ray job submit \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
-    trainer.test_freq=${jepo_update_freq} \
-    trainer.save_freq=${jepo_update_freq} \
+    trainer.test_freq=${real_update_freq} \
+    trainer.save_freq=${real_update_freq} \
     trainer.total_epochs=500 \
     trainer.total_training_steps=5000 \
     trainer.default_local_dir="${CKPTS_DIR}" \

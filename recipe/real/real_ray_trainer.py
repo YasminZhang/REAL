@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-JEPO Ray Trainer - combines GRPO workflow with JEPO algorithm
+REAL Ray Trainer - combines GRPO workflow with REAL algorithm
 """
 
 from collections import defaultdict
@@ -25,67 +25,67 @@ from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.utils.torch_functional import masked_mean
 
-from .jepo_core_algos import (JEPOBuffer, JEPOConfig, compute_jepo_advantages,
-                              compute_jepo_gradients, jepo_loss)
+from .real_core_algos import (REALBuffer, REALConfig, compute_real_advantages,
+                              compute_real_gradients, real_loss)
 
 
-class RayJEPOTrainer(RayPPOTrainer):
+class RayREALTrainer(RayPPOTrainer):
     """
-    JEPO Trainer that extends PPO/GRPO with JEPO algorithm
+    REAL Trainer that extends PPO/GRPO with REAL algorithm
     
     Integrates with the existing ReLIFT workflow by:
     1. Performing standard GRPO training
-    2. Replacing the SFT update step with JEPO training when buffer conditions are met
-    3. Using the same buffer logic as ReLIFT but applying JEPO algorithm instead of SFT
+    2. Replacing the SFT update step with REAL training when buffer conditions are met
+    3. Using the same buffer logic as ReLIFT but applying REAL algorithm instead of SFT
     """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # Initialize JEPO components
-        self.jepo_config = JEPOConfig(
-            delimiter=getattr(self.config.algorithm, 'jepo_delimiter', '\n\n'),
-            format_penalty=getattr(self.config.algorithm, 'jepo_format_penalty', 0.1),
-            beta_supp=getattr(self.config.algorithm, 'jepo_beta_supp', 1.0),
-            beta_kl=getattr(self.config.algorithm, 'jepo_beta_kl', 0.1),
-            buffer_size=getattr(self.config.algorithm, 'jepo_buffer_size', 1000),
-            jepo_steps=getattr(self.config.algorithm, 'jepo_steps', 5),
-            epochs=getattr(self.config.algorithm, 'jepo_epochs', 1),
-            mini_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_mini_batch_size_per_gpu', 8),
-            micro_batch_size_per_gpu=getattr(self.config.algorithm, 'jepo_micro_batch_size_per_gpu', 1),
-            num_response_per_question=getattr(self.config.algorithm, 'jepo_num_response_per_question', 8),
-            accum_steps=getattr(self.config.algorithm, 'jepo_accum_steps', 4),
-            responses_micro_batch_size=getattr(self.config.algorithm, 'jepo_responses_micro_batch_size', 8),
-            # +algorithm.jepo_use_regression_reward=True \
-            # +algorithm.jepo_use_last_token_as_answer=True \
-            # +algorithm.jepo_answer_token_length=1 \
-            # +algorithm.jepo_store_last_token_probs=True \
-            # +algorithm.jepo_use_format_adv=${jepo_use_format_adv} \
-            # +algorithm.jepo_use_log_prob_loss=${jepo_use_log_prob_loss} \
-            # +algorithm.jepo_use_extra_loss=${jepo_use_extra_loss} \
-            # +algorithm.jepo_use_cot_loss=${jepo_use_cot_loss} \
-            # +algorithm.jepo_normalize_advantages=${jepo_normalize_advantages} \
+        # Initialize REAL components
+        self.real_config = REALConfig(
+            delimiter=getattr(self.config.algorithm, 'real_delimiter', '\n\n'),
+            format_penalty=getattr(self.config.algorithm, 'real_format_penalty', 0.1),
+            beta_supp=getattr(self.config.algorithm, 'real_beta_supp', 1.0),
+            beta_kl=getattr(self.config.algorithm, 'real_beta_kl', 0.1),
+            buffer_size=getattr(self.config.algorithm, 'real_buffer_size', 1000),
+            real_steps=getattr(self.config.algorithm, 'real_steps', 5),
+            epochs=getattr(self.config.algorithm, 'real_epochs', 1),
+            mini_batch_size_per_gpu=getattr(self.config.algorithm, 'real_mini_batch_size_per_gpu', 8),
+            micro_batch_size_per_gpu=getattr(self.config.algorithm, 'real_micro_batch_size_per_gpu', 1),
+            num_response_per_question=getattr(self.config.algorithm, 'real_num_response_per_question', 8),
+            accum_steps=getattr(self.config.algorithm, 'real_accum_steps', 4),
+            responses_micro_batch_size=getattr(self.config.algorithm, 'real_responses_micro_batch_size', 8),
+            # +algorithm.real_use_regression_reward=True \
+            # +algorithm.real_use_last_token_as_answer=True \
+            # +algorithm.real_answer_token_length=1 \
+            # +algorithm.real_store_last_token_probs=True \
+            # +algorithm.real_use_format_adv=${real_use_format_adv} \
+            # +algorithm.real_use_log_prob_loss=${real_use_log_prob_loss} \
+            # +algorithm.real_use_extra_loss=${real_use_extra_loss} \
+            # +algorithm.real_use_cot_loss=${real_use_cot_loss} \
+            # +algorithm.real_normalize_advantages=${real_normalize_advantages} \
                 
             # add the new configs above
-            use_regression_reward=getattr(self.config.algorithm, 'jepo_use_regression_reward', True),
-            use_last_token_as_answer=getattr(self.config.algorithm, 'jepo_use_last_token_as_answer', True),
-            answer_token_length=getattr(self.config.algorithm, 'jepo_answer_token_length', 1),
-            store_last_token_probs=getattr(self.config.algorithm, 'jepo_store_last_token_probs', True),
-            use_format_adv=getattr(self.config.algorithm, 'jepo_use_format_adv', False),
-            use_log_prob_loss=getattr(self.config.algorithm, 'jepo_use_log_prob_loss', False),
-            use_extra_loss=getattr(self.config.algorithm, 'jepo_use_extra_loss', False),
-            use_cot_loss=getattr(self.config.algorithm, 'jepo_use_cot_loss', False),
-            normalize_advantages=getattr(self.config.algorithm, 'jepo_normalize_advantages', False),
-            use_l2_loss=getattr(self.config.algorithm, 'jepo_use_l2_loss', False),    
+            use_regression_reward=getattr(self.config.algorithm, 'real_use_regression_reward', True),
+            use_last_token_as_answer=getattr(self.config.algorithm, 'real_use_last_token_as_answer', True),
+            answer_token_length=getattr(self.config.algorithm, 'real_answer_token_length', 1),
+            store_last_token_probs=getattr(self.config.algorithm, 'real_store_last_token_probs', True),
+            use_format_adv=getattr(self.config.algorithm, 'real_use_format_adv', False),
+            use_log_prob_loss=getattr(self.config.algorithm, 'real_use_log_prob_loss', False),
+            use_extra_loss=getattr(self.config.algorithm, 'real_use_extra_loss', False),
+            use_cot_loss=getattr(self.config.algorithm, 'real_use_cot_loss', False),
+            normalize_advantages=getattr(self.config.algorithm, 'real_normalize_advantages', False),
+            use_l2_loss=getattr(self.config.algorithm, 'real_use_l2_loss', False),    
                 
             
         )
         
-        self.jepo_buffer = JEPOBuffer(self.jepo_config.buffer_size)
-        self.jepo_metrics = defaultdict(list)
+        self.real_buffer = REALBuffer(self.real_config.buffer_size)
+        self.real_metrics = defaultdict(list)
         
-        # Enable JEPO mode if configured
-        self.use_jepo = getattr(self.config.algorithm, 'use_jepo', True)
+        # Enable REAL mode if configured
+        self.use_real = getattr(self.config.algorithm, 'use_real', True)
         
          
         
@@ -127,7 +127,7 @@ class RayJEPOTrainer(RayPPOTrainer):
     
     def _perform_jepo_training_step(self, batch_data: Dict[str, Any]) -> Dict[str, float]:
         """
-        Perform one JEPO training step on buffered data
+        Perform one REAL training step on buffered data
         
         Args:
             batch_data: Dictionary containing prompt, answer, and responses
@@ -149,8 +149,8 @@ class RayJEPOTrainer(RayPPOTrainer):
             response_tokens.append(tokens)
             
             # Split by delimiter to get chain-of-thought part
-            if self.jepo_config.delimiter in response:
-                cot_text = response.split(self.jepo_config.delimiter)[0]
+            if self.real_config.delimiter in response:
+                cot_text = response.split(self.real_config.delimiter)[0]
             else:
                 cot_text = response
             cot_tokens = self.tokenizer.encode(cot_text, return_tensors='pt')
@@ -191,35 +191,35 @@ class RayJEPOTrainer(RayPPOTrainer):
         answer_log_probs = torch.stack(answer_log_probs)
         cot_log_probs = torch.stack(cot_log_probs)
         
-        # Prepare response tokens for JEPO
+        # Prepare response tokens for REAL
         response_token_lists = []
         for tokens in response_tokens:
             response_token_lists.append(tokens.squeeze(0).tolist())  # Remove batch dim and convert to list
         
-        # Compute JEPO advantages using ground truth answer
-        tilde_A_i, tilde_A_i_ref, cot_log_probs_jepo, answer_log_probs_jepo = compute_jepo_advantages(
+        # Compute REAL advantages using ground truth answer
+        tilde_A_i, tilde_A_i_ref, cot_log_probs_jepo, answer_log_probs_jepo = compute_real_advantages(
             responses=responses,
             log_probs=answer_log_probs,
             response_tokens=response_token_lists,
             tokenizer=self.tokenizer,
-            delimiter=self.jepo_config.delimiter,
-            format_penalty=self.jepo_config.format_penalty,
+            delimiter=self.real_config.delimiter,
+            format_penalty=self.real_config.format_penalty,
             ground_truth_answer=answer,
             model=self.actor_rollout_ref.module,
             question=prompt,
             device=self.device
         )
         
-        # Compute JEPO loss using the ground truth answer log probs
-        loss_dict = jepo_loss(
+        # Compute REAL loss using the ground truth answer log probs
+        loss_dict = real_loss(
             chain_of_thought_log_probs=cot_log_probs,
-            answer_log_probs=answer_log_probs_jepo,  # Use ground truth answer log probs from JEPO
+            answer_log_probs=answer_log_probs_jepo,  # Use ground truth answer log probs from REAL
             tilde_A_i=tilde_A_i,
             tilde_A_i_ref=tilde_A_i_ref,
             ref_log_probs=ref_log_probs,
             current_log_probs=current_log_probs,
-            beta_supp=self.jepo_config.beta_supp,
-            beta_kl=self.jepo_config.beta_kl
+            beta_supp=self.real_config.beta_supp,
+            beta_kl=self.real_config.beta_kl
         )
         
         # Backward pass and optimization
@@ -234,31 +234,31 @@ class RayJEPOTrainer(RayPPOTrainer):
         metrics = {}
         for key, value in loss_dict.items():
             if isinstance(value, torch.Tensor):
-                metrics[f'jepo_{key}'] = value.item()
+                metrics[f'real_{key}'] = value.item()
             else:
-                metrics[f'jepo_{key}'] = value
+                metrics[f'real_{key}'] = value
                 
         return metrics
     
-    def _run_jepo_training(self) -> Dict[str, float]:
+    def _run_real_training(self) -> Dict[str, float]:
         """
-        Run JEPO training on all buffered data
+        Run REAL training on all buffered data
         
         Returns:
             Aggregated training metrics
         """
-        if not self.jepo_buffer.is_full():
+        if not self.real_buffer.is_full():
             return {}
         
-        print(f"Running JEPO training with {len(self.jepo_buffer.buffer)} batches...")
+        print(f"Running REAL training with {len(self.real_buffer.buffer)} batches...")
         
         all_metrics = defaultdict(list)
         
-        # Perform JEPO steps on buffered data
-        for step in range(self.jepo_config.jepo_steps):
+        # Perform REAL steps on buffered data
+        for step in range(self.real_config.real_steps):
             step_metrics = defaultdict(list)
             
-            for batch_data in self.jepo_buffer.get_batch():
+            for batch_data in self.real_buffer.get_batch():
                 metrics = self._perform_jepo_training_step(batch_data)
                 
                 for key, value in metrics.items():
@@ -271,7 +271,7 @@ class RayJEPOTrainer(RayPPOTrainer):
                 all_metrics[key].append(avg_value)
         
         # Clear buffer after training
-        self.jepo_buffer.clear()
+        self.real_buffer.clear()
         
         # Return averaged metrics
         final_metrics = {}
@@ -282,7 +282,7 @@ class RayJEPOTrainer(RayPPOTrainer):
     
     def update_policy(self, data):
         """
-        Override the update_policy method to integrate JEPO training
+        Override the update_policy method to integrate REAL training
         """
         # First, run standard GRPO update
         metrics = super().update_policy(data)
@@ -294,31 +294,31 @@ class RayJEPOTrainer(RayPPOTrainer):
             responses = self._extract_responses_from_batch(data)
             prompt, answer = self._extract_prompt_and_answer(data)
             
-            # Add to JEPO buffer
-            self.jepo_buffer.add(prompt, answer, responses)
+            # Add to REAL buffer
+            self.real_buffer.add(prompt, answer, responses)
             
-            print(f"Added batch to JEPO buffer. Buffer size: {len(self.jepo_buffer.buffer)}/{self.jepo_buffer.max_size}")
+            print(f"Added batch to REAL buffer. Buffer size: {len(self.real_buffer.buffer)}/{self.real_buffer.max_size}")
         
-        # If buffer is full, run JEPO training
-        if self.jepo_buffer.is_full():
-            jepo_metrics = self._run_jepo_training()
-            metrics.update(jepo_metrics)
+        # If buffer is full, run REAL training
+        if self.real_buffer.is_full():
+            real_metrics = self._run_real_training()
+            metrics.update(real_metrics)
         
         return metrics
     
     def log_metrics(self, metrics: Dict[str, Any], step: int):
-        """Override to include JEPO metrics in logging"""
-        # Separate JEPO metrics
-        jepo_metrics = {k: v for k, v in metrics.items() if k.startswith('jepo_')}
-        other_metrics = {k: v for k, v in metrics.items() if not k.startswith('jepo_')}
+        """Override to include REAL metrics in logging"""
+        # Separate REAL metrics
+        real_metrics = {k: v for k, v in metrics.items() if k.startswith('real_')}
+        other_metrics = {k: v for k, v in metrics.items() if not k.startswith('real_')}
         
         # Log standard metrics
         super().log_metrics(other_metrics, step)
         
-        # Log JEPO metrics separately
-        if jepo_metrics:
-            print(f"JEPO Metrics at step {step}:")
-            for key, value in jepo_metrics.items():
+        # Log REAL metrics separately
+        if real_metrics:
+            print(f"REAL Metrics at step {step}:")
+            for key, value in real_metrics.items():
                 print(f"  {key}: {value}")
                 # Store for later analysis
-                self.jepo_metrics[key].append(value)
+                self.real_metrics[key].append(value)

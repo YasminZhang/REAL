@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Basic test script for JEPO algorithm components
+Basic test script for REAL algorithm components
 """
 
 import torch
 import numpy as np
-from jepo_core_algos import (
-    JEPOConfig, 
-    JEPOBuffer, 
-    compute_jepo_advantages,
-    jepo_loss
+from real_core_algos import (
+    REALConfig, 
+    REALBuffer, 
+    compute_real_advantages,
+    real_loss
 )
 
 def test_jepo_buffer():
-    """Test JEPO buffer functionality"""
-    print("Testing JEPO buffer...")
+    """Test REAL buffer functionality"""
+    print("Testing REAL buffer...")
     
-    buffer = JEPOBuffer(max_size=3)
+    buffer = REALBuffer(max_size=3)
     assert not buffer.is_full()
     
     # Add some test data
@@ -32,11 +32,11 @@ def test_jepo_buffer():
     assert buffer.is_full()
     assert len(buffer.buffer) == 3
     
-    print("✓ JEPO buffer test passed")
+    print("✓ REAL buffer test passed")
 
 def test_jepo_advantages():
-    """Test JEPO advantage computation"""
-    print("Testing JEPO advantages...")
+    """Test REAL advantage computation"""
+    print("Testing REAL advantages...")
     
     # Mock data
     responses = [
@@ -73,7 +73,7 @@ def test_jepo_advantages():
         tokenizer.encode(response) for response in responses
     ]
     
-    tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_jepo_advantages(
+    tilde_A_i, tilde_A_i_ref, cot_log_probs, answer_log_probs = compute_real_advantages(
         responses=responses,
         log_probs=log_probs,
         response_tokens=response_tokens,
@@ -92,11 +92,11 @@ def test_jepo_advantages():
     assert answer_log_probs.shape == (3,)
     assert torch.all(torch.abs(tilde_A_i) <= 1.0)  # Should be clipped to [-1, 1]
     
-    print("✓ JEPO advantages test passed")
+    print("✓ REAL advantages test passed")
 
 def test_jepo_loss():
-    """Test JEPO loss computation"""
-    print("Testing JEPO loss...")
+    """Test REAL loss computation"""
+    print("Testing REAL loss...")
     
     # Mock data
     batch_size, cot_seq_len, ans_seq_len = 3, 5, 8
@@ -108,7 +108,7 @@ def test_jepo_loss():
     ref_log_probs = torch.randn(batch_size, cot_seq_len + ans_seq_len)
     current_log_probs = torch.randn(batch_size, cot_seq_len + ans_seq_len)
     
-    loss_dict = jepo_loss(
+    loss_dict = real_loss(
         chain_of_thought_log_probs=cot_log_probs,
         answer_log_probs=ans_log_probs,
         tilde_A_i=tilde_A_i,
@@ -127,22 +127,22 @@ def test_jepo_loss():
         assert key in loss_dict, f"Missing key: {key}"
         assert isinstance(loss_dict[key], torch.Tensor), f"Key {key} should be a tensor"
     
-    print("✓ JEPO loss test passed")
+    print("✓ REAL loss test passed")
 
 def test_jepo_config():
-    """Test JEPO configuration"""
-    print("Testing JEPO config...")
+    """Test REAL configuration"""
+    print("Testing REAL config...")
     
-    config = JEPOConfig()
+    config = REALConfig()
     assert config.delimiter == "\n\n"
     assert config.format_penalty == 0.1
     assert config.beta_supp == 1.0
     assert config.beta_kl == 0.1
     assert config.buffer_size == 1000
-    assert config.jepo_steps == 5
+    assert config.real_steps == 5
     
     # Test custom config
-    custom_config = JEPOConfig(
+    custom_config = REALConfig(
         delimiter="###",
         format_penalty=0.2,
         buffer_size=500
@@ -151,18 +151,18 @@ def test_jepo_config():
     assert custom_config.format_penalty == 0.2
     assert custom_config.buffer_size == 500
     
-    print("✓ JEPO config test passed")
+    print("✓ REAL config test passed")
 
 def main():
     """Run all tests"""
-    print("Running JEPO basic tests...\n")
+    print("Running REAL basic tests...\n")
     
     test_jepo_config()
     test_jepo_buffer()
     test_jepo_advantages()
     test_jepo_loss()
     
-    print("\n🎉 All JEPO tests passed!")
+    print("\n🎉 All REAL tests passed!")
 
 if __name__ == "__main__":
     main()

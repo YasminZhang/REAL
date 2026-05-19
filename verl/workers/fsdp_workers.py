@@ -642,36 +642,36 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
-            # Initialize JEPO actor with separate optimizer
-            from verl.workers.actor.jepo_actor import JEPOActor
+            # Initialize REAL actor with separate optimizer
+            from verl.workers.actor.real_actor import REALActor
             
-            # Create separate optimizer for JEPO
-            if self.config.jepo_actor.optim is not None:
+            # Create separate optimizer for REAL
+            if self.config.real_actor.optim is not None:
                 import torch.optim as optim
-                print("Using JEPO separate optimizer config")
-                jepo_optim_config = self.config.jepo_actor.optim
-                self.jepo_actor_optimizer = optim.AdamW(
+                print("Using REAL separate optimizer config")
+                real_optim_config = self.config.real_actor.optim
+                self.real_actor_optimizer = optim.AdamW(
                     self.actor_module_fsdp.parameters(),
-                    lr=jepo_optim_config.lr,
-                    betas=jepo_optim_config.get("betas", (0.9, 0.999)),
-                    weight_decay=jepo_optim_config.get("weight_decay", 0.01),
+                    lr=real_optim_config.lr,
+                    betas=real_optim_config.get("betas", (0.9, 0.999)),
+                    weight_decay=real_optim_config.get("weight_decay", 0.01),
                 )
                 
-                # Create separate LR scheduler for JEPO
-                warmup_style = jepo_optim_config.get("warmup_style", "constant")
-                warmup_ratio = jepo_optim_config.get("warmup_ratio", 0.03)
-                num_warmup_steps = int(warmup_ratio * jepo_optim_config.get("total_training_steps", 1000))
-                total_steps = jepo_optim_config.get("total_training_steps", 1000)
-                min_lr_ratio = jepo_optim_config.get("min_lr_ratio", 0.1)
+                # Create separate LR scheduler for REAL
+                warmup_style = real_optim_config.get("warmup_style", "constant")
+                warmup_ratio = real_optim_config.get("warmup_ratio", 0.03)
+                num_warmup_steps = int(warmup_ratio * real_optim_config.get("total_training_steps", 1000))
+                total_steps = real_optim_config.get("total_training_steps", 1000)
+                min_lr_ratio = real_optim_config.get("min_lr_ratio", 0.1)
                 
                 from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
                 if warmup_style == "constant":
-                    self.jepo_actor_lr_scheduler = get_constant_schedule_with_warmup(
-                        optimizer=self.jepo_actor_optimizer, num_warmup_steps=num_warmup_steps
+                    self.real_actor_lr_scheduler = get_constant_schedule_with_warmup(
+                        optimizer=self.real_actor_optimizer, num_warmup_steps=num_warmup_steps
                     )
                 elif warmup_style == "cosine":
-                    self.jepo_actor_lr_scheduler = get_cosine_schedule_with_warmup(
-                        optimizer=self.jepo_actor_optimizer,
+                    self.real_actor_lr_scheduler = get_cosine_schedule_with_warmup(
+                        optimizer=self.real_actor_optimizer,
                         num_warmup_steps=num_warmup_steps,
                         num_training_steps=total_steps,
                         min_lr_ratio=min_lr_ratio,
@@ -679,18 +679,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     raise ValueError(f"Unknown warmup_style: {warmup_style}")
             else:
-                # raise ValueError("Can not find jepo actor optim config.")
-                self.jepo_actor_optimizer = None
-                self.jepo_actor_lr_scheduler = None
+                # raise ValueError("Can not find real actor optim config.")
+                self.real_actor_optimizer = None
+                self.real_actor_lr_scheduler = None
             
-            self.jepo_actor = JEPOActor(
-                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.jepo_actor_optimizer
+            self.real_actor = REALActor(
+                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.real_actor_optimizer
             )
-            # Pass the tokenizer to JEPO actor
+            # Pass the tokenizer to REAL actor
             if hasattr(self, 'tokenizer') and self.tokenizer is not None:
-                self.jepo_actor._cached_tokenizer = self.tokenizer
+                self.real_actor._cached_tokenizer = self.tokenizer
             elif hasattr(self, 'processor') and self.processor is not None:
-                self.jepo_actor._cached_tokenizer = self.processor
+                self.real_actor._cached_tokenizer = self.processor
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(
@@ -725,8 +725,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            # NOTE: Currently only checkpointing main DAPO optimizer, not JEPO optimizer
-            # Future work: Consider separate checkpoint management for JEPO optimizer
+            # NOTE: Currently only checkpointing main DAPO optimizer, not REAL optimizer
+            # Future work: Consider separate checkpoint management for REAL optimizer
             self.checkpoint_manager = FSDPCheckpointManager(
                 model=self.actor_module_fsdp,
                 optimizer=self.actor.actor_optimizer,
@@ -794,8 +794,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_update")
-    def jepo_update_actor(self, data: DataProto):
-        """JEPO-specific actor update method"""
+    def real_update_actor(self, data: DataProto):
+        """REAL-specific actor update method"""
         # Support all hardwares
         data = data.to(get_device_id())
         data.meta_info["temperature"] = self.config.rollout.temperature
@@ -803,33 +803,33 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.jepo_actor_optimizer, device_id=get_device_id())
-        # Ensure reference model is available to JEPO actor when computing KL
+            load_fsdp_optimizer(optimizer=self.real_actor_optimizer, device_id=get_device_id())
+        # Ensure reference model is available to REAL actor when computing KL
         ref_loaded = False
         if hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None:
             try:
-                # Attach ref module to JEPO actor for KL computation
-                self.jepo_actor._ref_module = self.ref_module_fsdp
+                # Attach ref module to REAL actor for KL computation
+                self.real_actor._ref_module = self.ref_module_fsdp
                 if self._is_offload_param:
                     load_fsdp_model_to_gpu(self.ref_module_fsdp)
                     ref_loaded = True
             except Exception:
-                self.jepo_actor._ref_module = None
+                self.real_actor._ref_module = None
 
         with self.ulysses_sharding_manager:
-            # perform JEPO training
-            with Timer(name="jepo_update_policy", logger=None) as timer:
-                metrics = self.jepo_actor.update_policy(data=data)
+            # perform REAL training
+            with Timer(name="real_update_policy", logger=None) as timer:
+                metrics = self.real_actor.update_policy(data=data)
             delta_time = timer.last
             metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
             metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
-            lr = self.jepo_actor_lr_scheduler.get_last_lr()[0] if self.jepo_actor_lr_scheduler else 0.0
-            print("jepo optim lr:", lr*1e7)
-            metrics["jepo_actor/lr"] = lr
-            if self.jepo_actor_lr_scheduler:
-                self.jepo_actor_lr_scheduler.step()
+            lr = self.real_actor_lr_scheduler.get_last_lr()[0] if self.real_actor_lr_scheduler else 0.0
+            print("real optim lr:", lr*1e7)
+            metrics["real_actor/lr"] = lr
+            if self.real_actor_lr_scheduler:
+                self.real_actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={"metrics": metrics})
@@ -838,14 +838,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during jepo_update_actor", logger=logger)
+            log_gpu_memory_usage("After offload actor model during real_update_actor", logger=logger)
         if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.jepo_actor_optimizer)
-            log_gpu_memory_usage("After offload actor optimizer during jepo_update_actor", logger=logger)
-        # Offload ref model if we loaded it for JEPO
+            offload_fsdp_optimizer(optimizer=self.real_actor_optimizer)
+            log_gpu_memory_usage("After offload actor optimizer during real_update_actor", logger=logger)
+        # Offload ref model if we loaded it for REAL
         if ref_loaded and self._is_offload_param and hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None:
             offload_fsdp_model_to_cpu(self.ref_module_fsdp)
-            log_gpu_memory_usage("After offload ref model during jepo_update_actor", logger=logger)
+            log_gpu_memory_usage("After offload ref model during real_update_actor", logger=logger)
 
         return output
 
@@ -1115,45 +1115,45 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         dist.barrier()
 
-        # Additionally save JEPO optimizer and its extra state (e.g., LR scheduler) if present
+        # Additionally save REAL optimizer and its extra state (e.g., LR scheduler) if present
         try:
-            if getattr(self, "jepo_actor_optimizer", None) is not None:
+            if getattr(self, "real_actor_optimizer", None) is not None:
                 # Ensure optimizer state tensors are on CPU before saving to reduce GPU memory pressure
                 from verl.utils.fsdp_utils import offload_fsdp_optimizer
 
-                offload_fsdp_optimizer(self.jepo_actor_optimizer)
+                offload_fsdp_optimizer(self.real_actor_optimizer)
 
                 world_size = dist.get_world_size()
                 rank = dist.get_rank()
-                jepo_optim_path = os.path.join(
+                real_optim_path = os.path.join(
                     local_path, f"jepo_optim_world_size_{world_size}_rank_{rank}.pt"
                 )
-                torch.save(self.jepo_actor_optimizer.state_dict(), jepo_optim_path)
+                torch.save(self.real_actor_optimizer.state_dict(), real_optim_path)
                 log_with_rank(
-                    f"Saved JEPO optimizer to {os.path.abspath(jepo_optim_path)}",
+                    f"Saved REAL optimizer to {os.path.abspath(real_optim_path)}",
                     rank=rank,
                     logger=logger,
                 )
 
-                # Save JEPO LR scheduler and other extra state
-                jepo_extra_path = os.path.join(
+                # Save REAL LR scheduler and other extra state
+                real_extra_path = os.path.join(
                     local_path, f"jepo_extra_state_world_size_{world_size}_rank_{rank}.pt"
                 )
-                jepo_lr_sched_state = (
-                    self.jepo_actor_lr_scheduler.state_dict() if getattr(self, "jepo_actor_lr_scheduler", None) is not None else None
+                real_lr_sched_state = (
+                    self.real_actor_lr_scheduler.state_dict() if getattr(self, "real_actor_lr_scheduler", None) is not None else None
                 )
-                jepo_extra_state = {
-                    "lr_scheduler": jepo_lr_sched_state,
+                real_extra_state = {
+                    "lr_scheduler": real_lr_sched_state,
                 }
-                torch.save(jepo_extra_state, jepo_extra_path)
+                torch.save(real_extra_state, real_extra_path)
                 log_with_rank(
-                    f"Saved JEPO extra_state to {os.path.abspath(jepo_extra_path)}",
+                    f"Saved REAL extra_state to {os.path.abspath(real_extra_path)}",
                     rank=rank,
                     logger=logger,
                 )
         except Exception as _e:
             log_with_rank(
-                f"Warning: failed to save JEPO optimizer state: {_e}",
+                f"Warning: failed to save REAL optimizer state: {_e}",
                 rank=dist.get_rank(),
                 logger=logger,
                 log_only_rank_0=True,
@@ -1213,64 +1213,64 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 
-        # Additionally load JEPO optimizer state if present
+        # Additionally load REAL optimizer state if present
         try:
-            if getattr(self, "jepo_actor_optimizer", None) is not None:
+            if getattr(self, "real_actor_optimizer", None) is not None:
                 world_size = dist.get_world_size()
                 rank = dist.get_rank()
-                jepo_optim_path = os.path.join(
+                real_optim_path = os.path.join(
                     local_path, f"jepo_optim_world_size_{world_size}_rank_{rank}.pt"
                 )
-                if os.path.exists(jepo_optim_path):
-                    state = torch.load(jepo_optim_path, weights_only=False)
-                    self.jepo_actor_optimizer.load_state_dict(state)
+                if os.path.exists(real_optim_path):
+                    state = torch.load(real_optim_path, weights_only=False)
+                    self.real_actor_optimizer.load_state_dict(state)
                     if self._is_offload_optimizer:
-                        offload_fsdp_optimizer(self.jepo_actor_optimizer)
+                        offload_fsdp_optimizer(self.real_actor_optimizer)
                     from verl.utils.logger import log_with_rank
 
                     log_with_rank(
-                        f"Loaded JEPO optimizer from {os.path.abspath(jepo_optim_path)}",
+                        f"Loaded REAL optimizer from {os.path.abspath(real_optim_path)}",
                         rank=rank,
                         logger=logger,
                     )
                     if del_local_after_load:
                         try:
-                            os.remove(jepo_optim_path)
+                            os.remove(real_optim_path)
                         except Exception:
                             pass
-                # Load JEPO LR scheduler and other extra state if available
-                jepo_extra_path = os.path.join(
+                # Load REAL LR scheduler and other extra state if available
+                real_extra_path = os.path.join(
                     local_path, f"jepo_extra_state_world_size_{world_size}_rank_{rank}.pt"
                 )
-                if os.path.exists(jepo_extra_path):
-                    extra_state = torch.load(jepo_extra_path, weights_only=False)
-                    if getattr(self, "jepo_actor_lr_scheduler", None) is not None:
+                if os.path.exists(real_extra_path):
+                    extra_state = torch.load(real_extra_path, weights_only=False)
+                    if getattr(self, "real_actor_lr_scheduler", None) is not None:
                         lr_sched_state = extra_state.get("lr_scheduler", None)
                         if lr_sched_state is not None:
                             try:
-                                self.jepo_actor_lr_scheduler.load_state_dict(lr_sched_state)
+                                self.real_actor_lr_scheduler.load_state_dict(lr_sched_state)
                                 log_with_rank(
-                                    f"Loaded JEPO lr_scheduler from {os.path.abspath(jepo_extra_path)}",
+                                    f"Loaded REAL lr_scheduler from {os.path.abspath(real_extra_path)}",
                                     rank=rank,
                                     logger=logger,
                                 )
                             except Exception as _esh:
                                 log_with_rank(
-                                    f"Warning: failed to load JEPO lr_scheduler state: {_esh}",
+                                    f"Warning: failed to load REAL lr_scheduler state: {_esh}",
                                     rank=rank,
                                     logger=logger,
                                     log_only_rank_0=True,
                                 )
                     if del_local_after_load:
                         try:
-                            os.remove(jepo_extra_path)
+                            os.remove(real_extra_path)
                         except Exception:
                             pass
         except Exception as _e:
             from verl.utils.logger import log_with_rank
 
             log_with_rank(
-                f"Warning: failed to load JEPO optimizer state: {_e}",
+                f"Warning: failed to load REAL optimizer state: {_e}",
                 rank=dist.get_rank(),
                 logger=logger,
                 log_only_rank_0=True,

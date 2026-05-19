@@ -11,7 +11,7 @@ data:
 
 reward_model:
   reward_manager: dapo  # Use DAPO reward manager as base
-  overlong_buffer: 
+  overlong_buffer:
     enable: False # We try to avoid forgetting to set enable
     len: 0
     penalty_factor: 0.0
@@ -20,17 +20,17 @@ reward_model:
 algorithm:
   # Standard DAPO/GRPO parameters
   adv_estimator: grpo
-  
-  # JEPO specific parameters
-  use_jepo: True  # Enable JEPO functionality
-  jepo_delimiter: "\n\n"  # delimiter to split chain-of-thought from response
-  jepo_format_penalty: 0.1  # penalty p for responses without delimiter
-  jepo_beta_supp: 1.0  # coefficient for grad2 (suppression gradient)
-  jepo_beta_kl: 0.1  # coefficient for KL divergence gradient
-  jepo_buffer_size: 100  # maximum buffer size for storing incorrect responses
-  jepo_steps: 5  # number of JEPO steps when buffer is full
-  jepo_update_frequency: 10  # perform JEPO training every N steps when buffer has data
-  
+
+  # REAL specific parameters
+  use_real: True  # Enable REAL functionality
+  real_delimiter: "\n\n"  # delimiter to split chain-of-thought from response
+  real_format_penalty: 0.1  # penalty p for responses without delimiter
+  real_beta_supp: 1.0  # coefficient for grad2 (suppression gradient)
+  real_beta_kl: 0.1  # coefficient for KL divergence gradient
+  real_buffer_size: 100  # maximum buffer size for storing incorrect responses
+  real_steps: 5  # number of REAL steps when buffer is full
+  real_update_frequency: 10  # perform REAL training every N steps when buffer has data
+
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: False # We try to avoid forgetting to set enable
@@ -38,4 +38,4 @@ algorithm:
     max_num_gen_batches: 0 # Non-positive values mean no upper limit
 
 trainer:
-  project_name: verl-jepo-dapo
+  project_name: verl-real-dapo

@@ -56,6 +56,16 @@ wandb login
 
 ## Data Preparation
 
+## Datasets
+
+- **Training**: Feedback Collection (~100K pointwise samples with fine-grained score rubrics)
+- **Evaluation**:
+  - Feedback Bench (in-domain, new rubrics) — 1K rubrics, 200 instructions, 1K responses
+  - FLASK (out-of-domain) — 200 prompts, 12 rubrics, 2K responses
+  - Vicuna Bench (out-of-domain) — 80 prompts, 320 responses
+  - MT Bench (out-of-domain) — 80 multi-turn prompts, 320 responses
+
+
 ### Option 1 — Download the prepared parquet files (recommended)
 
 All preprocessed train/eval splits are mirrored on the Hugging Face Hub at
@@ -128,7 +138,7 @@ under the `yasiz/` namespace.
 Download a single checkpoint:
 
 ```bash
-huggingface-cli download yasiz/Qwen3-8B-REAL --local-dir ./ckpts/Qwen3-8B-REAL
+huggingface-cli download yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy --local-dir ./ckpts/Mistral-7b-v0.2-Instruct-TRACT-copy
 ```
 
 Then point `MODEL_PATH` in your launch script (e.g. [bash_real/run_real.sh](bash_real/run_real.sh))
@@ -226,14 +236,7 @@ All 32B scripts use Ray for multi-node distributed training (2×8 A100 GPUs).
 | `real_test.sh`                                 | 32B evaluation script                    |
 
 
-## Datasets
 
-- **Training**: Feedback Collection (~100K pointwise samples with fine-grained score rubrics)
-- **Evaluation**:
-  - Feedback Bench (in-domain) — 1K rubrics, 200 instructions
-  - FLASK (out-of-domain) — 200 prompts, 12 rubrics, 2K responses
-  - Vicuna Bench (out-of-domain) — 80 prompts, 320 responses
-  - MT Bench (out-of-domain) — 80 multi-turn prompts, 320 responses
 
 ## Citation
 

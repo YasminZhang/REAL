@@ -27,14 +27,14 @@ n_resp_per_prompt=16
 train_prompt_mini_bsz=32
 
 # JEPO specific parameters
-use_jepo=True
-jepo_delimiter="\n\n"
-jepo_format_penalty=0.1
-jepo_beta_supp=1.0
-jepo_beta_kl=0.1
-jepo_buffer_size=100
-jepo_steps=5
-jepo_update_frequency=10
+use_real=True
+real_delimiter="\n\n"
+real_format_penalty=0.1
+real_beta_supp=1.0
+real_beta_kl=0.1
+real_buffer_size=100
+real_steps=5
+real_update_frequency=10
 
 # Ray
 NNODES=${NNODES:-8}
@@ -64,7 +64,7 @@ gen_tp=4
 fsdp_size=32
 
 # Use JEPO-DAPO recipe
-python3 recipe/dapo/main_jepo_dapo.py \
+python3 recipe/dapo/main_real_dapo.py \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -76,14 +76,14 @@ python3 recipe/dapo/main_jepo_dapo.py \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.use_jepo=${use_jepo} \
-    algorithm.jepo_delimiter="${jepo_delimiter}" \
-    algorithm.jepo_format_penalty=${jepo_format_penalty} \
-    algorithm.jepo_beta_supp=${jepo_beta_supp} \
-    algorithm.jepo_beta_kl=${jepo_beta_kl} \
-    algorithm.jepo_buffer_size=${jepo_buffer_size} \
-    algorithm.jepo_steps=${jepo_steps} \
-    algorithm.jepo_update_frequency=${jepo_update_frequency} \
+    algorithm.use_real=${use_real} \
+    algorithm.real_delimiter="${real_delimiter}" \
+    algorithm.real_format_penalty=${real_format_penalty} \
+    algorithm.real_beta_supp=${real_beta_supp} \
+    algorithm.real_beta_kl=${real_beta_kl} \
+    algorithm.real_buffer_size=${real_buffer_size} \
+    algorithm.real_steps=${real_steps} \
+    algorithm.real_update_frequency=${real_update_frequency} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \

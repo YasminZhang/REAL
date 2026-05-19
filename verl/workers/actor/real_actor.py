@@ -19,7 +19,6 @@ import sys
 import numpy as np
 import torch
 
-sys.path.append('/home/aiscuser/jepo/recipe/jepo')
 
 import logging
 import os
@@ -55,14 +54,14 @@ elif is_npu_available:
 
 import sys as _sys
 from pathlib import Path as _Path
-# Avoid recipe.jepo/__init__.py which references stale symbols; import the
-# module directly via sys.path, matching recipe/dapo/jepo_dapo_ray_trainer.py.
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[3] / "recipe" / "jepo"))
-from jepo_core_algos import (_allreduce_sum_scalar,
-                             attach_jepo_adv_to_dataproto,
+# Avoid recipe.real/__init__.py which references stale symbols; import the
+# module directly via sys.path, matching recipe/dapo/real_dapo_ray_trainer.py.
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3] / "recipe" / "real"))
+from real_core_algos import (_allreduce_sum_scalar,
+                             attach_real_adv_to_dataproto,
                              dummy_backward_fsdp_safe)
 
-__all__ = ["JEPOActor"]
+__all__ = ["REALActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -89,10 +88,10 @@ def _chunk_list(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
 
-class JEPOActor(DataParallelPPOActor):
+class REALActor(DataParallelPPOActor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        logger.info("Initialized JEPO Actor")
+        logger.info("Initialized REAL Actor")
         self._cached_tokenizer = None
 
     def _optimizer_step(self):
@@ -114,45 +113,45 @@ class JEPOActor(DataParallelPPOActor):
 
     # no wrapper for dynamic bsz in precompute; use prepare_dynamic_batch directly there
 
-    @GPUMemoryLogger(role="jepo actor", logger=logger)
+    @GPUMemoryLogger(role="real actor", logger=logger)
     def update_policy(self, data: DataProto):
         self.actor_module.train()
         self.actor_optimizer.zero_grad()
 
         # -------- config --------
-        jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
-        epochs = int(jepo_cfg.get("epochs", 1))
-        mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))        # questions per optimizer step per rank
-        micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))      # questions per backward call
-        format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
-        beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
-        beta_supp_extra = float(jepo_cfg.get("beta_supp_extra", 0.001))
-        beta_kl = float(jepo_cfg.get("beta_kl", 0.0))
+        real_cfg = data.meta_info.get("real_config", {}) or {}
+        epochs = int(real_cfg.get("epochs", 1))
+        mini_bs = int(real_cfg.get("mini_batch_size_per_gpu", 8))        # questions per optimizer step per rank
+        micro_bs = int(real_cfg.get("micro_batch_size_per_gpu", 4))      # questions per backward call
+        format_penalty = float(real_cfg.get("format_penalty", 0.0))
+        beta_supp = float(real_cfg.get("beta_supp", 0.001))
+        beta_supp_extra = float(real_cfg.get("beta_supp_extra", 0.001))
+        beta_kl = float(real_cfg.get("beta_kl", 0.0))
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
-        use_rloo = bool(jepo_cfg.get("use_rloo", False))
+        use_rloo = bool(real_cfg.get("use_rloo", False))
         
-        print('jepo_cfg:', jepo_cfg)
+        print('real_cfg:', real_cfg)
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
 
         # Entropy regularization (match dp_actor behavior)
-        entropy_coeff = float(jepo_cfg.get("entropy_coeff", 0.0))
-        loss_agg_mode = jepo_cfg.get("loss_agg_mode", "token-mean")
+        entropy_coeff = float(real_cfg.get("entropy_coeff", 0.0))
+        loss_agg_mode = real_cfg.get("loss_agg_mode", "token-mean")
 
         # -------- build teacher-forced packs per question --------
-        data = attach_jepo_adv_to_dataproto(
+        data = attach_real_adv_to_dataproto(
             data=data,
             model=self.actor_module,
-            jepo_cfg=jepo_cfg,
+            real_cfg=real_cfg,
             cached_tokenizer=self._cached_tokenizer
         )
         # Precompute A_raw, format_adv, and weights using teacher-forced batches per question
-        # Note: jepo_data_dicts carries per-question grouping; it's only needed for precompute.
-        if "jepo_data_dicts" in data.non_tensor_batch:
+        # Note: real_data_dicts carries per-question grouping; it's only needed for precompute.
+        if "real_data_dicts" in data.non_tensor_batch:
             # Drop grouping artifact to allow generic per-response slicing downstream
             try:
-                del data.non_tensor_batch["jepo_data_dicts"]
+                del data.non_tensor_batch["real_data_dicts"]
             except Exception:
                 pass
             data = self._precompute_adv_w_with_verl(data, temperature=temperature, format_penalty=format_penalty)
@@ -165,19 +164,19 @@ class JEPOActor(DataParallelPPOActor):
         # -------- meters --------
         meters = dict(
             extra_loss=0.0,
-            raw_jepo_loss=0.0,
+            raw_real_loss=0.0,
             raw_cot_loss=0.0,
             raw_log_likelihood_loss=0.0,
             raw_l2_loss=0.0,
             raw_supp_loss=0.0,
             raw_total_loss=0.0,
             raw_kl_loss=0.0,
-            jepo_loss=0.0,
+            real_loss=0.0,
             supp_loss=0.0,
             total_loss=0.0,
             grad_norm=0.0,
-            jepo_advs_mean=0.0,
-            jepo_advs_std=0.0,
+            real_advs_mean=0.0,
+            real_advs_std=0.0,
             cot_log_probs_mean=0.0,
             log_mean_answer_probs_mean=0.0,
             kl_loss=0.0,
@@ -189,13 +188,13 @@ class JEPOActor(DataParallelPPOActor):
         num_responses = int(data.batch["responses"].shape[0])
         num_delim = int(has_delimiter_mask.sum().item())
         # Extract stored advantages and weights (all responses)
-        # Safely read JEPO advantages: prefer 'jepo_adv_raw' if present; fallback to 'jepo_adv' without
+        # Safely read REAL advantages: prefer 'real_adv_raw' if present; fallback to 'real_adv' without
         # eagerly indexing a missing key (TensorDict.get default is evaluated before call)
-        if "jepo_adv_raw" in set(data.batch.keys()):
-            jepo_adv_raw_all = data.batch["jepo_adv_raw"]
+        if "real_adv_raw" in set(data.batch.keys()):
+            real_adv_raw_all = data.batch["real_adv_raw"]
         else:
-            jepo_adv_raw_all = data.batch["jepo_adv"]
-        format_adv_all = data.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_all))
+            real_adv_raw_all = data.batch["real_adv"]
+        format_adv_all = data.batch.get("format_adv", torch.zeros_like(real_adv_raw_all))
         
         # Buffer-wide diagnostics for format advantage
         try:
@@ -212,9 +211,9 @@ class JEPOActor(DataParallelPPOActor):
         except Exception:
             frac_delim_glob = float(num_delim / max(num_responses, 1))
 
-        use_dynamic_bsz = bool(jepo_cfg.get("use_dynamic_bsz", True))
+        use_dynamic_bsz = bool(real_cfg.get("use_dynamic_bsz", True))
         max_token_len = (
-            jepo_cfg.get("ppo_max_token_len_per_gpu", 16384)
+            real_cfg.get("ppo_max_token_len_per_gpu", 16384)
             * getattr(self, "ulysses_sequence_parallel_size", 1)
         )
 
@@ -243,9 +242,9 @@ class JEPOActor(DataParallelPPOActor):
                         torch.distributed.all_reduce(t_max, op=torch.distributed.ReduceOp.MAX)
                         assert (
                             int(t_min.item()) == int(t_max.item())
-                        ), f"JEPO micro-batch count mismatch across ranks: min={int(t_min.item())}, max={int(t_max.item())}"
+                        ), f"REAL micro-batch count mismatch across ranks: min={int(t_min.item())}, max={int(t_max.item())}"
                 except Exception:
-                    raise RuntimeError("JEPO micro-batch count check failed")
+                    raise RuntimeError("REAL micro-batch count check failed")
 
                 self.actor_optimizer.zero_grad()
                 for micro_batch in micro_batches:
@@ -268,20 +267,20 @@ class JEPOActor(DataParallelPPOActor):
                         except Exception:
                             gt_tokens = gt_tokens_nd
 
-                    if "jepo_adv_raw" in set(micro_batch.batch.keys()):
-                        jepo_adv_raw_mb = micro_batch.batch["jepo_adv_raw"]
+                    if "real_adv_raw" in set(micro_batch.batch.keys()):
+                        real_adv_raw_mb = micro_batch.batch["real_adv_raw"]
                     else:
-                        jepo_adv_raw_mb = micro_batch.batch["jepo_adv"]
-                    format_adv_mb = micro_batch.batch.get("format_adv", torch.zeros_like(jepo_adv_raw_mb))
+                        real_adv_raw_mb = micro_batch.batch["real_adv"]
+                    format_adv_mb = micro_batch.batch.get("format_adv", torch.zeros_like(real_adv_raw_mb))
                     
                      
 
                     # add a parameter to not use format_adv_mb
-                    use_format_adv = bool(jepo_cfg.get("use_format_adv", True))
-                    A_all = jepo_adv_raw_mb + format_adv_mb if use_format_adv else jepo_adv_raw_mb # TODO: ablate
+                    use_format_adv = bool(real_cfg.get("use_format_adv", True))
+                    A_all = real_adv_raw_mb + format_adv_mb if use_format_adv else real_adv_raw_mb # TODO: ablate
 
-                    w_all = micro_batch.batch.get("jepo_weights", torch.ones((ids_full.size(0),), device=dev))
-                    w_all_extra = micro_batch.batch.get("jepo_extra_weights", torch.ones((ids_full.size(0),), device=dev))
+                    w_all = micro_batch.batch.get("real_weights", torch.ones((ids_full.size(0),), device=dev))
+                    w_all_extra = micro_batch.batch.get("real_extra_weights", torch.ones((ids_full.size(0),), device=dev))
 
                     gt_values = micro_batch.batch.get("gt_values", torch.zeros((ids_full.size(0),), device=dev))
 
@@ -367,9 +366,9 @@ class JEPOActor(DataParallelPPOActor):
                     log_likelihood_loss = (-last_token_log_probs).detach().mean().clone()
                     
                     
-                    use_log_loss = jepo_cfg.get("use_log_prob_loss", True)
-                    use_extra_loss = jepo_cfg.get("use_extra_loss", True)
-                    use_l2_loss = jepo_cfg.get("use_l2_loss", False)
+                    use_log_loss = real_cfg.get("use_log_prob_loss", True)
+                    use_extra_loss = real_cfg.get("use_extra_loss", True)
+                    use_l2_loss = real_cfg.get("use_l2_loss", False)
                     extra_loss = 0.0
                     if use_extra_loss:
                         if use_log_loss and use_l2_loss:
@@ -396,12 +395,12 @@ class JEPOActor(DataParallelPPOActor):
                     
                     # breakpoint()
 
-                    use_cot_loss = jepo_cfg.get("use_cot_loss", False)
+                    use_cot_loss = real_cfg.get("use_cot_loss", False)
                     if not use_cot_loss:
                         lp_combined = torch.zeros_like(lp_combined)
  
 
-                    jepo_loss_part, cot_loss_backup, _, _ = gpg_fn(
+                    real_loss_part, cot_loss_backup, _, _ = gpg_fn(
                         old_log_prob=None,
                         log_prob=lp_combined,
                         advantages=comb_adv,
@@ -416,7 +415,7 @@ class JEPOActor(DataParallelPPOActor):
                         entropy_loss = agg_loss(
                             loss_mat=entropy_tok, loss_mask=comb_mask, loss_agg_mode=loss_agg_mode
                         )
-                        jepo_loss_part = jepo_loss_part - entropy_coeff * entropy_loss
+                        real_loss_part = real_loss_part - entropy_coeff * entropy_loss
 
                     cot_log_probs = (lp_combined * (mask_cot > 0)).sum(dim=-1).detach()
                     answer_log_probs = (lp_combined * (mask_ans > 0)).sum(dim=-1).detach()
@@ -445,12 +444,12 @@ class JEPOActor(DataParallelPPOActor):
                         loss_scale_factor = float(Bp) / float(max(mini_bs, 1))
                     else:
                         loss_scale_factor = 1.0 / float(max(self.gradient_accumulation, 1))
-                    loss_chunk = (jepo_loss_part + kl_loss_part) * loss_scale_factor
+                    loss_chunk = (real_loss_part + kl_loss_part) * loss_scale_factor
                     loss_chunk.backward()
 
                     meters["total_loss"] += float(loss_chunk.detach())
                     meters["extra_loss"] += float(extra_loss.mean().detach())  
-                    meters["jepo_loss"] += float(jepo_loss_part.detach()) * loss_scale_factor
+                    meters["real_loss"] += float(real_loss_part.detach()) * loss_scale_factor
                     
                     meters["raw_total_loss"] += float(loss_chunk.detach()) / loss_scale_factor
                     meters["raw_cot_loss"] += float(cot_loss_backup.detach()) 
@@ -460,8 +459,8 @@ class JEPOActor(DataParallelPPOActor):
 
                     meters["raw_kl_loss"] += float(kl_loss_part.detach().item())
                     with torch.no_grad():
-                        meters["jepo_advs_mean"] += float(A_all.mean().detach())
-                        meters["jepo_advs_std"] += float(A_all.std(unbiased=False).detach())
+                        meters["real_advs_mean"] += float(A_all.mean().detach())
+                        meters["real_advs_std"] += float(A_all.std(unbiased=False).detach())
                     if cot_log_probs.numel() > 0:
                         meters["cot_log_probs_mean"] += float(cot_log_probs.mean().detach())
                     if answer_log_probs.numel() > 0:
@@ -478,13 +477,13 @@ class JEPOActor(DataParallelPPOActor):
         print("number of responses has delimiter for this rank:", num_delim)
 
         # print raw losses
-        print("="*20 + " JEPO Actor Losses " + "="*20)
-        print(f"JEPO Actor raw_cot_loss: {meters['raw_cot_loss'] / max(meter_count, 1):.6f}")
-        print(f"JEPO Actor raw_l2_loss: {meters['raw_l2_loss'] / max(meter_count, 1):.6f}")
-        print(f"JEPO Actor raw_log_likelihood_loss: {meters['raw_log_likelihood_loss'] / max(meter_count, 1):.6f}")
-        print(f"JEPO Actor raw_supp_loss: {meters['raw_supp_loss'] / max(meter_count, 1):.6f}")
-        print(f"JEPO Actor raw_total_loss: {meters['raw_total_loss'] / max(meter_count, 1):.6f}")
-        print(f"JEPO Actor extra_loss: {meters.get('extra_loss', 0.0) / max(meter_count, 1):.6f}")
+        print("="*20 + " REAL Actor Losses " + "="*20)
+        print(f"REAL Actor raw_cot_loss: {meters['raw_cot_loss'] / max(meter_count, 1):.6f}")
+        print(f"REAL Actor raw_l2_loss: {meters['raw_l2_loss'] / max(meter_count, 1):.6f}")
+        print(f"REAL Actor raw_log_likelihood_loss: {meters['raw_log_likelihood_loss'] / max(meter_count, 1):.6f}")
+        print(f"REAL Actor raw_supp_loss: {meters['raw_supp_loss'] / max(meter_count, 1):.6f}")
+        print(f"REAL Actor raw_total_loss: {meters['raw_total_loss'] / max(meter_count, 1):.6f}")
+        print(f"REAL Actor extra_loss: {meters.get('extra_loss', 0.0) / max(meter_count, 1):.6f}")
 
 
 
@@ -494,51 +493,51 @@ class JEPOActor(DataParallelPPOActor):
                 meters[k] /= meter_count
 
         return {
-            "jepo_actor/extra_loss": meters.get("extra_loss", 0.0),
-            "jepo_actor/raw_cot_loss": meters["raw_cot_loss"],
-            "jepo_actor/raw_total_loss": meters["raw_total_loss"],
-            "jepo_actor/raw_kl_loss": meters["raw_kl_loss"],
-            "jepo_actor/jepo_loss": meters["jepo_loss"],
-            "jepo_actor/raw_supp_loss": meters["raw_supp_loss"],
-            "jepo_actor/raw_l2_loss": meters["raw_l2_loss"],
-            "jepo_actor/raw_log_likelihood_loss": meters["raw_log_likelihood_loss"],
-            "jepo_actor/total_loss": meters["total_loss"],
-            "jepo_actor/grad_norm": meters["grad_norm"],
-            "jepo_actor/jepo_advs_mean": meters["jepo_advs_mean"],
-            "jepo_actor/jepo_advs_std": meters["jepo_advs_std"],
-            "jepo_actor/cot_log_probs_mean": meters["cot_log_probs_mean"],
-            "jepo_actor/log_mean_answer_probs_mean": meters["log_mean_answer_probs_mean"],
-            "jepo_actor/beta_supp": beta_supp,
-            "jepo_actor/beta_supp_extra": beta_supp_extra,
-            "jepo_actor/kl_loss": meters.get("kl_loss", 0.0),
-            "jepo_actor/beta_kl": beta_kl,
-            "jepo_buffer/num_has_delimiter": int(num_delim),
-            "jepo_buffer/frac_has_delimiter": float(num_delim / max(num_responses, 1)),
-            "jepo_buffer/frac_has_delimiter_global": frac_delim_glob,
-            "jepo_buffer/format_adv_max": fmt_max,
-            "jepo_actor/format_penalty": format_penalty,
+            "real_actor/extra_loss": meters.get("extra_loss", 0.0),
+            "real_actor/raw_cot_loss": meters["raw_cot_loss"],
+            "real_actor/raw_total_loss": meters["raw_total_loss"],
+            "real_actor/raw_kl_loss": meters["raw_kl_loss"],
+            "real_actor/real_loss": meters["real_loss"],
+            "real_actor/raw_supp_loss": meters["raw_supp_loss"],
+            "real_actor/raw_l2_loss": meters["raw_l2_loss"],
+            "real_actor/raw_log_likelihood_loss": meters["raw_log_likelihood_loss"],
+            "real_actor/total_loss": meters["total_loss"],
+            "real_actor/grad_norm": meters["grad_norm"],
+            "real_actor/real_advs_mean": meters["real_advs_mean"],
+            "real_actor/real_advs_std": meters["real_advs_std"],
+            "real_actor/cot_log_probs_mean": meters["cot_log_probs_mean"],
+            "real_actor/log_mean_answer_probs_mean": meters["log_mean_answer_probs_mean"],
+            "real_actor/beta_supp": beta_supp,
+            "real_actor/beta_supp_extra": beta_supp_extra,
+            "real_actor/kl_loss": meters.get("kl_loss", 0.0),
+            "real_actor/beta_kl": beta_kl,
+            "real_buffer/num_has_delimiter": int(num_delim),
+            "real_buffer/frac_has_delimiter": float(num_delim / max(num_responses, 1)),
+            "real_buffer/frac_has_delimiter_global": frac_delim_glob,
+            "real_buffer/format_adv_max": fmt_max,
+            "real_actor/format_penalty": format_penalty,
         }
 
     
 
     @torch.no_grad()
     def _precompute_adv_w_with_verl(self, data: DataProto, temperature: float, format_penalty: float) -> DataProto:
-        print("Precomputing JEPO advantages and weights with verl...")
+        print("Precomputing REAL advantages and weights with verl...")
         dev = data.batch["responses"].device
         pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
         N = data.batch["responses"].shape[0]
 
         # NEW: Get vocab size for storing probability distributions
         vocab_size = self.actor_module.config.vocab_size if hasattr(self.actor_module, 'config') else 32000
-        jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
-        store_last_token_probs = bool(jepo_cfg.get("store_last_token_probs", True))
-        beta_supp = float(jepo_cfg.get("beta_supp", 0.001))
+        real_cfg = data.meta_info.get("real_config", {}) or {}
+        store_last_token_probs = bool(real_cfg.get("store_last_token_probs", True))
+        beta_supp = float(real_cfg.get("beta_supp", 0.001))
 
         # Outputs to fill (on device for final writeback)
-        jepo_adv_raw = torch.zeros(N, device=dev)
+        real_adv_raw = torch.zeros(N, device=dev)
         format_adv = torch.zeros(N, device=dev)
-        jepo_weights = torch.zeros(N, device=dev)
-        jepo_extra_weights = torch.zeros(N, device=dev)
+        real_weights = torch.zeros(N, device=dev)
+        real_extra_weights = torch.zeros(N, device=dev)
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
         gt_values_stored = torch.zeros(N, device=dev)
         
@@ -556,20 +555,20 @@ class JEPOActor(DataParallelPPOActor):
             _rank = 0
 
         # ---------------- Stage 1: no-grad dynamic microbatching via prepare_dynamic_batch ----------------
-        jepo_cfg = data.meta_info.get("jepo_config", {}) or {}
-        mini_bs = int(jepo_cfg.get("mini_batch_size_per_gpu", 8))
-        micro_bs = int(jepo_cfg.get("micro_batch_size_per_gpu", 4))
-        use_dynamic_bsz = bool(jepo_cfg.get("use_dynamic_bsz", True))
+        real_cfg = data.meta_info.get("real_config", {}) or {}
+        mini_bs = int(real_cfg.get("mini_batch_size_per_gpu", 8))
+        micro_bs = int(real_cfg.get("micro_batch_size_per_gpu", 4))
+        use_dynamic_bsz = bool(real_cfg.get("use_dynamic_bsz", True))
         max_token_len = (
-            jepo_cfg.get("ppo_max_token_len_per_gpu", 16384)
+            real_cfg.get("ppo_max_token_len_per_gpu", 16384)
             * getattr(self, "ulysses_sequence_parallel_size", 1)
         )
         # use_prob_as_reward
-        use_prob_as_reward = bool(jepo_cfg.get("use_prob_as_reward", False))
+        use_prob_as_reward = bool(real_cfg.get("use_prob_as_reward", False))
         
-        use_rloo = bool(jepo_cfg.get("use_rloo", False))
+        use_rloo = bool(real_cfg.get("use_rloo", False))
         
-        model_name = str(jepo_cfg.get("model_name", "unknown_model"))
+        model_name = str(real_cfg.get("model_name", "unknown_model"))
         
         if 'qwen' in model_name.lower():
             token_to_digit = {16:1,17:2,18:3,19:4,20:5}
@@ -591,13 +590,13 @@ class JEPOActor(DataParallelPPOActor):
 
         # One steady inner pbar across all microbatches (count responses, not just non-empty)
         # Option B: allow per-rank bars written to files to avoid console interleaving
-        show_all_rank_pbar_to_file = bool(jepo_cfg.get("show_all_rank_pbar_to_file", False))
-        pbar_file_dir = jepo_cfg.get("pbar_file_dir", "user_logs")
+        show_all_rank_pbar_to_file = bool(real_cfg.get("show_all_rank_pbar_to_file", False))
+        pbar_file_dir = real_cfg.get("pbar_file_dir", "user_logs")
         _pbar_file_handle = None
         if show_all_rank_pbar_to_file:
             try:
                 os.makedirs(pbar_file_dir, exist_ok=True)
-                pbar_path = os.path.join(pbar_file_dir, f"jepo_tf_rank{_rank}.log")
+                pbar_path = os.path.join(pbar_file_dir, f"real_tf_rank{_rank}.log")
                 _pbar_file_handle = open(pbar_path, mode="w", buffering=1)
                 _inner_pbar = tqdm(
                     total=N,
@@ -609,7 +608,7 @@ class JEPOActor(DataParallelPPOActor):
                     mininterval=0.2,
                 )
             except Exception:
-                raise RuntimeError(f"Cannot open JEPO pbar log file for rank {_rank} at {pbar_path}")
+                raise RuntimeError(f"Cannot open REAL pbar log file for rank {_rank} at {pbar_path}")
                 _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
         else:
             _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
@@ -640,7 +639,7 @@ class JEPOActor(DataParallelPPOActor):
                 for micro_batch, idx_local in zip(micro_batches, idx_lists):
                     bs = len(idx_local)
                     if bs == 0:
-                        raise RuntimeError("Zero-length micro-batch encountered in JEPO precompute")
+                        raise RuntimeError("Zero-length micro-batch encountered in REAL precompute")
                     # Build trimmed micro-batch tensors up to answer_end = ans_start + ans_len
                     ids_src = micro_batch.batch.get("batch_input_ids")
                     attn_src = micro_batch.batch.get("attention_mask")
@@ -680,7 +679,7 @@ class JEPOActor(DataParallelPPOActor):
                     if micro_max_len == 0 or R_max == 0:
                         R_max_flag = True
                         _inner_pbar.update(bs)
-                        #raise RuntimeError("Zero-length micro_max_len or R_max encountered in JEPO precompute")
+                        #raise RuntimeError("Zero-length micro_max_len or R_max encountered in REAL precompute")
 
                     ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
                     attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
@@ -866,13 +865,13 @@ class JEPOActor(DataParallelPPOActor):
                 _pbar_file_handle.flush()
                 _pbar_file_handle.close()
         except Exception:
-            raise RuntimeError("Failed to close JEPO precompute pbar file handle")
+            raise RuntimeError("Failed to close REAL precompute pbar file handle")
         if prev_training:
             self.actor_module.train()
 
         # ---------------- Stage 2: advantage/weight computation per UID group ----------------
         # NEW: Check if we should use regression-based advantages
-        use_regression_reward = bool(jepo_cfg.get("use_regression_reward", True))
+        use_regression_reward = bool(real_cfg.get("use_regression_reward", True))
         
         # Build uid groups preserving order of first appearance
         uids = data.non_tensor_batch.get("uid")
@@ -914,7 +913,7 @@ class JEPOActor(DataParallelPPOActor):
                 order.append(u)
             groups[u].append(idx)
 
-        _outer_pbar = tqdm(total=len(order), desc="JEPO precompute: prompts", disable=(_rank != 0))
+        _outer_pbar = tqdm(total=len(order), desc="REAL precompute: prompts", disable=(_rank != 0))
         for u in order:
             idxs = groups[u]
             B = len(idxs)
@@ -953,7 +952,7 @@ class JEPOActor(DataParallelPPOActor):
                     A_raw = rewards - rewards.mean()  # Zero-centered
                 
                 # Normalize advantages
-                if bool(jepo_cfg.get("normalize_advantages", True)):
+                if bool(real_cfg.get("normalize_advantages", True)):
                     A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
                 A_raw = A_raw.clamp(-1.0, 1.0)
 
@@ -1020,7 +1019,7 @@ class JEPOActor(DataParallelPPOActor):
                     # A_prob = (log_mean - v_i)
                                      
                     # Normalize advantages
-                    if bool(jepo_cfg.get("normalize_advantages", True)):
+                    if bool(real_cfg.get("normalize_advantages", True)):
                         A_prob = A_prob / (A_prob.std(unbiased=False) + 1e-8)
                     A_prob = A_prob.clamp(-1.0, 1.0)
                     
@@ -1049,7 +1048,7 @@ class JEPOActor(DataParallelPPOActor):
                         # Single sample: no baseline
                         A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
                     # Normalize advantages
-                    if bool(jepo_cfg.get("normalize_advantages", True)):
+                    if bool(real_cfg.get("normalize_advantages", True)):
                         A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
                     A_acc = A_acc.clamp(-1.0, 1.0)  
 
@@ -1092,12 +1091,12 @@ class JEPOActor(DataParallelPPOActor):
                 w_full = torch.softmax(ans_logprob, dim=0)
 
             if use_rloo:
-                jepo_adv_raw[idxs] = A_acc
+                real_adv_raw[idxs] = A_acc
             else:
-                jepo_adv_raw[idxs] = A_raw + beta_supp * A_prob 
+                real_adv_raw[idxs] = A_raw + beta_supp * A_prob 
             format_adv[idxs] = fmt
-            jepo_weights[idxs] = w_full
-            jepo_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
+            real_weights[idxs] = w_full
+            real_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
             
             if use_regression_reward:
                 gt_values_stored[idxs] = gt_value  
@@ -1106,11 +1105,11 @@ class JEPOActor(DataParallelPPOActor):
         _outer_pbar.close()
 
         # Write back to batch
-        data.batch["jepo_adv_raw"] = jepo_adv_raw
+        data.batch["real_adv_raw"] = real_adv_raw
         data.batch["format_adv"] = format_adv
-        data.batch["jepo_weights"] = jepo_weights
+        data.batch["real_weights"] = real_weights
         data.batch["has_delimiter"] = has_delim_all
-        data.batch["jepo_extra_weights"] = jepo_extra_weights
+        data.batch["real_extra_weights"] = real_extra_weights
         data.batch["gt_values"] = gt_values_stored
         
         # NEW: Write back last token probabilities if collected
@@ -1126,12 +1125,12 @@ class JEPOActor(DataParallelPPOActor):
             print(f"  Total unique prompts: {len(order)}")
             print(f"  Use regression reward: {use_regression_reward}")
             print(f"  Store last token probs: {store_last_token_probs}")
-            print(f"  JEPO advantages - mean: {jepo_adv_raw.mean().item():.4f}, std: {jepo_adv_raw.std().item():.4f}")
+            print(f"  REAL advantages - mean: {real_adv_raw.mean().item():.4f}, std: {real_adv_raw.std().item():.4f}")
             print(f"  Format advantages - mean: {format_adv.mean().item():.4f}, std: {format_adv.std().item():.4f}")
             print(f"  Has delimiter (valid format) - count: {has_delim_all.sum().item()}/{N} ({100*has_delim_all.float().mean().item():.1f}%)")
             if use_regression_reward:
-                print(f"  Weights - min: {jepo_weights.min().item():.4f}, max: {jepo_weights.max().item():.4f}, mean: {jepo_weights.mean().item():.4f}")
-                print(f"  Extra Weights - min: {jepo_extra_weights.min().item():.4f}, max: {jepo_extra_weights.max().item():.4f}, mean: {jepo_extra_weights.mean().item():.4f}")
+                print(f"  Weights - min: {real_weights.min().item():.4f}, max: {real_weights.max().item():.4f}, mean: {real_weights.mean().item():.4f}")
+                print(f"  Extra Weights - min: {real_extra_weights.min().item():.4f}, max: {real_extra_weights.max().item():.4f}, mean: {real_extra_weights.mean().item():.4f}")
                 print(f"  GT values stored - min: {gt_values_stored.min().item():.4f}, max: {gt_values_stored.max().item():.4f}, mean: {gt_values_stored.mean().item():.4f}")
             
         

@@ -61,13 +61,13 @@ def _maybe_dummy_backward(model):
 
 
 @dataclass
-class JEPOConfig:
+class REALConfig:
     delimiter: str = "\n\n"
     format_penalty: float = 0.1
     beta_supp: float = 1e-3
     beta_kl: float = 1e-3
     buffer_size: int = 1000
-    jepo_steps: int = 5
+    real_steps: int = 5
     epochs: int = 1
     mini_batch_size_per_gpu: int = 8  # questions per optimizer step per rank
     micro_batch_size_per_gpu: int = 1  # questions per backward pass per rank
@@ -145,7 +145,7 @@ def _find_delimiter_position(
 
      
 
-def build_jepo_teacher_forced_batch(
+def build_real_teacher_forced_batch(
     response_tokens: torch.Tensor,
     prompt_tokens: torch.Tensor,
     ground_truth_answer_tokens: np.ndarray,
@@ -302,7 +302,7 @@ def build_jepo_teacher_forced_batch(
     }
 
 
-def build_jepo_batches_by_prompt(
+def build_real_batches_by_prompt(
     response_tokens,
     prompt_tokens,
     ground_truth_answer_tokens,
@@ -334,7 +334,7 @@ def build_jepo_batches_by_prompt(
         
         if len(response_tokens_uid) == 0:
             continue
-        data_dict = build_jepo_teacher_forced_batch(
+        data_dict = build_real_teacher_forced_batch(
             response_tokens=response_tokens_uid,
             prompt_tokens=prompt_tokens_uid,
             ground_truth_answer_tokens=ground_truth_answer_tokens_uid,
@@ -361,33 +361,33 @@ def build_jepo_batches_by_prompt(
 
 
 @torch.no_grad()
-def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_tokenizer):
+def attach_real_adv_to_dataproto(data: DataProto, model, real_cfg: dict, cached_tokenizer):
     """
-    Compute JEPO advantages and necessary info for data, maintaining DataProto class.
+    Compute REAL advantages and necessary info for data, maintaining DataProto class.
     This function does not require any gradients and only adds keys and values to data proto.
     
     Args:
         data: DataProto object containing batch data
         model: The actor model 
-        jepo_cfg: JEPO configuration dictionary
+        real_cfg: REAL configuration dictionary
         cached_tokenizer: Tokenizer for encoding/decoding
         
     Returns:
         DataProto object with added advantage information in data.batch
     """
     # Extract config
-    format_penalty = float(jepo_cfg.get("format_penalty", 0.0))
+    format_penalty = float(real_cfg.get("format_penalty", 0.0))
     temperature = float(data.meta_info["temperature"])
     # dynamic chunking is used downstream; no fixed responses_micro_batch_size
     
     # NEW: Option to use last token position instead of delimiter
-    use_last_token_as_answer = bool(jepo_cfg.get("use_last_token_as_answer", False))
-    answer_token_length = int(jepo_cfg.get("answer_token_length", 1))  # How many tokens to treat as answer
+    use_last_token_as_answer = bool(real_cfg.get("use_last_token_as_answer", False))
+    answer_token_length = int(real_cfg.get("answer_token_length", 1))  # How many tokens to treat as answer
     
-    delimiter = jepo_cfg.get("delimiter", " So the overall score is ")
+    delimiter = real_cfg.get("delimiter", " So the overall score is ")
     # Configurable suffix-anchor matching for delimiters
-    use_suffix_anchor = bool(jepo_cfg.get("delimiter_suffix_anchor", True))
-    suffix_min_len = int(jepo_cfg.get("delimiter_suffix_min_len", 2))
+    use_suffix_anchor = bool(real_cfg.get("delimiter_suffix_anchor", True))
+    suffix_min_len = int(real_cfg.get("delimiter_suffix_min_len", 2))
     
         
     # Prepare model inputs
@@ -414,7 +414,7 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
     #     )
     # else:
         # Original: Use delimiter-based approach
-    data_dicts = build_jepo_batches_by_prompt(
+    data_dicts = build_real_batches_by_prompt(
         response_tokens=data.batch["responses"],
         prompt_tokens=data.batch["prompts"],
         ground_truth_answer_tokens=ground_truths_tokens,
@@ -428,9 +428,9 @@ def attach_jepo_adv_to_dataproto(data: DataProto, model, jepo_cfg: dict, cached_
         delimiter_suffix_anchor=use_suffix_anchor,
         delimiter_suffix_min_len=suffix_min_len,
     )
-    # Only attach per-question teacher-forced packs; JEPO actor computes A/w later using VERL internals
-    data.non_tensor_batch["jepo_data_dicts"] = data_dicts
-    # Flatten teacher-forced fields into top-level batch for per-response slicing in the JEPO actor
+    # Only attach per-question teacher-forced packs; REAL actor computes A/w later using VERL internals
+    data.non_tensor_batch["real_data_dicts"] = data_dicts
+    # Flatten teacher-forced fields into top-level batch for per-response slicing in the REAL actor
     flat_batch_input_ids = []
     flat_attention_mask = []
     flat_position_ids = []
