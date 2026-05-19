@@ -13,16 +13,12 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
-import torch
-
-
-import logging
-import os
-
 import ray
 import torch
 from torch import nn
@@ -52,11 +48,8 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
-import sys as _sys
-from pathlib import Path as _Path
-# Avoid recipe.real/__init__.py which references stale symbols; import the
-# module directly via sys.path, matching recipe/dapo/real_dapo_ray_trainer.py.
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[3] / "recipe" / "real"))
+# Bypass recipe.real/__init__.py (stale symbols) and import the module directly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "recipe" / "real"))
 from real_core_algos import (_allreduce_sum_scalar,
                              attach_real_adv_to_dataproto,
                              dummy_backward_fsdp_safe)
@@ -66,22 +59,12 @@ __all__ = ["REALActor"]
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+
 def compute_response_mask(data: DataProto):
     responses = data.batch["responses"]
     response_length = responses.size(1)
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
-
-
-## Note: dynamic micro-batching uses verl.utils.seqlen_balancing.prepare_dynamic_batch
-## No custom token bucketing helpers are used here to avoid divergence from internals.
-
-
-import math
-from contextlib import nullcontext
-
-import numpy as np
-import torch
 
 
 def _chunk_list(lst, chunk_size):
@@ -111,8 +94,6 @@ class REALActor(DataParallelPPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
-    # no wrapper for dynamic bsz in precompute; use prepare_dynamic_batch directly there
-
     @GPUMemoryLogger(role="real actor", logger=logger)
     def update_policy(self, data: DataProto):
         self.actor_module.train()
@@ -130,36 +111,31 @@ class REALActor(DataParallelPPOActor):
         kl_loss_type = getattr(self.config, "kl_loss_type", "low_var_kl")
         temperature = float(data.meta_info["temperature"])
         use_rloo = bool(real_cfg.get("use_rloo", False))
-        
+
         print('real_cfg:', real_cfg)
 
         assert mini_bs % micro_bs == 0, "Expected mini_bs to be multiple of micro_bs"
 
-        # Entropy regularization (match dp_actor behavior)
         entropy_coeff = float(real_cfg.get("entropy_coeff", 0.0))
         loss_agg_mode = real_cfg.get("loss_agg_mode", "token-mean")
 
-        # -------- build teacher-forced packs per question --------
+        # -------- attach REAL advantages/weights from teacher-forced packs --------
         data = attach_real_adv_to_dataproto(
             data=data,
             model=self.actor_module,
             real_cfg=real_cfg,
             cached_tokenizer=self._cached_tokenizer
         )
-        # Precompute A_raw, format_adv, and weights using teacher-forced batches per question
-        # Note: real_data_dicts carries per-question grouping; it's only needed for precompute.
+        # real_data_dicts carries per-question grouping; drop after precompute so
+        # downstream code can slice generically per-response.
         if "real_data_dicts" in data.non_tensor_batch:
-            # Drop grouping artifact to allow generic per-response slicing downstream
             try:
                 del data.non_tensor_batch["real_data_dicts"]
             except Exception:
                 pass
             data = self._precompute_adv_w_with_verl(data, temperature=temperature, format_penalty=format_penalty)
-            
-        
-        # -------- do not drop samples; keep mask & counts --------
-        has_delimiter_mask = data.batch["has_delimiter"]  # [N]
 
+        has_delimiter_mask = data.batch["has_delimiter"]  # [N]
 
         # -------- meters --------
         meters = dict(
@@ -184,25 +160,22 @@ class REALActor(DataParallelPPOActor):
         meter_count = 0
         num_delim = 0
 
-        # Counts
         num_responses = int(data.batch["responses"].shape[0])
         num_delim = int(has_delimiter_mask.sum().item())
-        # Extract stored advantages and weights (all responses)
-        # Safely read REAL advantages: prefer 'real_adv_raw' if present; fallback to 'real_adv' without
-        # eagerly indexing a missing key (TensorDict.get default is evaluated before call)
+        # Prefer 'real_adv_raw'; fall back to 'real_adv'. Avoid TensorDict.get(default=...)
+        # because the default would be eagerly evaluated.
         if "real_adv_raw" in set(data.batch.keys()):
             real_adv_raw_all = data.batch["real_adv_raw"]
         else:
             real_adv_raw_all = data.batch["real_adv"]
         format_adv_all = data.batch.get("format_adv", torch.zeros_like(real_adv_raw_all))
-        
-        # Buffer-wide diagnostics for format advantage
+
         try:
             fmt_max = float(torch.max(format_adv_all).detach().item())
         except Exception:
             fmt_max = 0.0
 
-        # Globalized delimiter fraction across FSDP ranks
+        # Delimiter fraction summed across FSDP ranks
         try:
             _dev_glob = has_delimiter_mask.device
             num_resp_glob = _allreduce_sum_scalar(num_responses, device=_dev_glob)
@@ -221,18 +194,16 @@ class REALActor(DataParallelPPOActor):
             self.actor_optimizer.zero_grad()
             self.actor_module.train()
 
-            # dp_actor-style mini-batch iterator
             mini_batches = data.split(mini_bs)
 
             for mini_batch in mini_batches:
-                # dp_actor-style micro-batch iterator
                 if use_dynamic_bsz:
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
                     self.gradient_accumulation = max(1, mini_bs // max(micro_bs, 1))
                     micro_batches = mini_batch.split(micro_bs)
 
-                # Sanity check: ensure equal micro-batch counts across ranks
+                # Ensure equal micro-batch counts across ranks (FSDP step would otherwise deadlock).
                 try:
                     if torch.distributed.is_available() and torch.distributed.is_initialized():
                         t = torch.tensor([len(micro_batches)], device=get_device_name(), dtype=torch.int32)
@@ -272,12 +243,9 @@ class REALActor(DataParallelPPOActor):
                     else:
                         real_adv_raw_mb = micro_batch.batch["real_adv"]
                     format_adv_mb = micro_batch.batch.get("format_adv", torch.zeros_like(real_adv_raw_mb))
-                    
-                     
 
-                    # add a parameter to not use format_adv_mb
                     use_format_adv = bool(real_cfg.get("use_format_adv", True))
-                    A_all = real_adv_raw_mb + format_adv_mb if use_format_adv else real_adv_raw_mb # TODO: ablate
+                    A_all = real_adv_raw_mb + format_adv_mb if use_format_adv else real_adv_raw_mb  # TODO: ablate
 
                     w_all = micro_batch.batch.get("real_weights", torch.ones((ids_full.size(0),), device=dev))
                     w_all_extra = micro_batch.batch.get("real_extra_weights", torch.ones((ids_full.size(0),), device=dev))
@@ -316,35 +284,28 @@ class REALActor(DataParallelPPOActor):
                             attn_pack[j, :Lp] = attn_full[j, :c]
                             pos_pack[j, :Lp] = pos_full[j, :c]
                         if Lc > 0:
-                            ids_pack[j, Lp : Lp + Lc] = ids_full[j, c:a]
-                            # Preserve attention semantics (mask out eos/pad carried in source)
-                            attn_pack[j, Lp : Lp + Lc] = attn_full[j, c:a]
+                            ids_pack[j, Lp: Lp + Lc] = ids_full[j, c:a]
+                            # Preserve attention semantics (mask out eos/pad carried in source).
+                            attn_pack[j, Lp: Lp + Lc] = attn_full[j, c:a]
                             resp_pack[j, :Lc] = ids_full[j, c:a]
-                            # Loss mask should also respect attention
                             mask_cot[j, :Lc] = attn_full[j, c:a].to(mask_cot.dtype)
                             A_pack[j, :Lc] = A_all[j]
                         if La > 0:
                             gt_row = gt_tokens[j]
                             if gt_row is None:
-                                ans_ids = ids_full[j, a : a + La]
+                                ans_ids = ids_full[j, a: a + La]
                             else:
                                 ans_ids = torch.as_tensor(gt_row, device=dev, dtype=ids_full.dtype)
-                            ids_pack[j, Lp + Lc : Lp + Lc + La] = ans_ids
-                            attn_pack[j, Lp + Lc : Lp + Lc + La] = 1
-                            # attention for GT answer tokens is 1 (no eos in GT by assumption)
-                            resp_pack[j, Lc : Lc + La] = ans_ids
-                            mask_ans[j, Lc : Lc + La] = 1
-                            # First term: beta_supp * w_all[j] (existing)
-                            # Second term: w_all[j] * last_token_log_prob will be added after forward pass
+                            ids_pack[j, Lp + Lc: Lp + Lc + La] = ans_ids
+                            attn_pack[j, Lp + Lc: Lp + Lc + La] = 1  # GT answer tokens are always attended.
+                            resp_pack[j, Lc: Lc + La] = ans_ids
+                            mask_ans[j, Lc: Lc + La] = 1
                             if not use_rloo:
-                                A_pack[j, Lc : Lc + La] = 0.0  # placeholder TODO: fix later 
+                                A_pack[j, Lc: Lc + La] = 0.0  # placeholder TODO: fix later
                             else:
-                                A_pack[j, Lc : Lc + La] = A_all[j]
+                                A_pack[j, Lc: Lc + La] = A_all[j]
 
-                         
-                      
-
-                    # Derive positions from attention to ensure consistent left/right padding
+                    # Derive positions from attention so left/right padding stays consistent.
                     if attn_pack.numel() > 0:
                         pos_from_mask = (attn_pack.cumsum(dim=1) - 1).clamp_min(0) * attn_pack
                         pos_pack[:, :] = pos_from_mask.to(dtype=pos_pack.dtype)
@@ -358,47 +319,35 @@ class REALActor(DataParallelPPOActor):
                     calculate_entropy = entropy_coeff != 0
 
                     entropy_tok, lp_combined, expected_values, last_token_log_probs = self._forward_micro_batch(
-                        micro, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, expected_prob_replace=True, 
+                        micro, temperature=temperature, calculate_entropy=calculate_entropy, regression=True, expected_prob_replace=True,
                     )
-                    
-                    
-                    l2_loss = ((expected_values - gt_values)**2).detach().mean().clone()
+
+                    l2_loss = ((expected_values - gt_values) ** 2).detach().mean().clone()
                     log_likelihood_loss = (-last_token_log_probs).detach().mean().clone()
-                    
-                    
+
                     use_log_loss = real_cfg.get("use_log_prob_loss", True)
                     use_extra_loss = real_cfg.get("use_extra_loss", True)
                     use_l2_loss = real_cfg.get("use_l2_loss", False)
                     extra_loss = 0.0
                     if use_extra_loss:
                         if use_log_loss and use_l2_loss:
-                            extra_loss = float(beta_supp_extra) *   ( (expected_values - gt_values)**2).mean() +  float(beta_supp_extra) *   float(beta_supp) *  (-last_token_log_probs).mean()
+                            extra_loss = float(beta_supp_extra) * ((expected_values - gt_values) ** 2).mean() + float(beta_supp_extra) * float(beta_supp) * (-last_token_log_probs).mean()
                         elif use_log_loss:
-                            extra_loss = -  float(beta_supp_extra) *   float(beta_supp) *  last_token_log_probs.mean()
+                            extra_loss = - float(beta_supp_extra) * float(beta_supp) * last_token_log_probs.mean()
                         elif use_l2_loss:
-                            extra_loss = float(beta_supp_extra) *   ( (expected_values - gt_values)**2).mean()
+                            extra_loss = float(beta_supp_extra) * ((expected_values - gt_values) ** 2).mean()
                         else:
                             raise RuntimeError("At least one of use_log_loss or use_l2_loss must be True if use_extra_loss is True")
                     else:
                         extra_loss = torch.tensor(0.0, device=dev)
-                  
-                             
-                         
 
                     gpg_fn = get_policy_loss_fn("gpg")
                     comb_mask = (mask_cot + mask_ans).clamp_max(1)
                     comb_adv = A_pack
-                    
-                  
-                    
-                   
-                    
-                    # breakpoint()
 
                     use_cot_loss = real_cfg.get("use_cot_loss", False)
                     if not use_cot_loss:
                         lp_combined = torch.zeros_like(lp_combined)
- 
 
                     real_loss_part, cot_loss_backup, _, _ = gpg_fn(
                         old_log_prob=None,
@@ -448,11 +397,11 @@ class REALActor(DataParallelPPOActor):
                     loss_chunk.backward()
 
                     meters["total_loss"] += float(loss_chunk.detach())
-                    meters["extra_loss"] += float(extra_loss.mean().detach())  
+                    meters["extra_loss"] += float(extra_loss.mean().detach())
                     meters["real_loss"] += float(real_loss_part.detach()) * loss_scale_factor
-                    
+
                     meters["raw_total_loss"] += float(loss_chunk.detach()) / loss_scale_factor
-                    meters["raw_cot_loss"] += float(cot_loss_backup.detach()) 
+                    meters["raw_cot_loss"] += float(cot_loss_backup.detach())
                     meters["raw_supp_loss"] += float(l2_loss.detach()) + float(log_likelihood_loss.detach())
                     meters["raw_l2_loss"] += float(l2_loss.detach())
                     meters["raw_log_likelihood_loss"] += float(log_likelihood_loss.detach())
@@ -469,15 +418,13 @@ class REALActor(DataParallelPPOActor):
                     meter_count += 1
                     print(f"micro-batch loss: {float(loss_chunk.detach()) / loss_scale_factor:.6f}")
 
-                # End of mini-batch: step optimizer
                 grad_norm = self._optimizer_step()
                 meters["grad_norm"] += float(grad_norm.detach())
                 self.actor_optimizer.zero_grad()
 
         print("number of responses has delimiter for this rank:", num_delim)
 
-        # print raw losses
-        print("="*20 + " REAL Actor Losses " + "="*20)
+        print("=" * 20 + " REAL Actor Losses " + "=" * 20)
         print(f"REAL Actor raw_cot_loss: {meters['raw_cot_loss'] / max(meter_count, 1):.6f}")
         print(f"REAL Actor raw_l2_loss: {meters['raw_l2_loss'] / max(meter_count, 1):.6f}")
         print(f"REAL Actor raw_log_likelihood_loss: {meters['raw_log_likelihood_loss'] / max(meter_count, 1):.6f}")
@@ -485,9 +432,6 @@ class REALActor(DataParallelPPOActor):
         print(f"REAL Actor raw_total_loss: {meters['raw_total_loss'] / max(meter_count, 1):.6f}")
         print(f"REAL Actor extra_loss: {meters.get('extra_loss', 0.0) / max(meter_count, 1):.6f}")
 
-
-
-        # average meters
         if meter_count > 0:
             for k in meters:
                 meters[k] /= meter_count
@@ -527,34 +471,31 @@ class REALActor(DataParallelPPOActor):
         pad_id = self._cached_tokenizer.pad_token_id if self._cached_tokenizer is not None else 0
         N = data.batch["responses"].shape[0]
 
-        # NEW: Get vocab size for storing probability distributions
         vocab_size = self.actor_module.config.vocab_size if hasattr(self.actor_module, 'config') else 32000
         real_cfg = data.meta_info.get("real_config", {}) or {}
         store_last_token_probs = bool(real_cfg.get("store_last_token_probs", True))
         beta_supp = float(real_cfg.get("beta_supp", 0.001))
 
-        # Outputs to fill (on device for final writeback)
+        # Outputs (filled on device, written back at the end).
         real_adv_raw = torch.zeros(N, device=dev)
         format_adv = torch.zeros(N, device=dev)
         real_weights = torch.zeros(N, device=dev)
         real_extra_weights = torch.zeros(N, device=dev)
         has_delim_all = torch.zeros(N, dtype=torch.bool, device=dev)
         gt_values_stored = torch.zeros(N, device=dev)
-        
-        # NEW: Store full probability distribution for last token if requested
+
         if store_last_token_probs:
             last_token_probs_all = torch.zeros((N, vocab_size), device=dev)
         else:
             last_token_probs_all = None
 
-        # Rank gating for progress bars
         try:
             _is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
             _rank = torch.distributed.get_rank() if _is_dist else 0
         except Exception:
             _rank = 0
 
-        # ---------------- Stage 1: no-grad dynamic microbatching via prepare_dynamic_batch ----------------
+        # ---------------- Stage 1: no-grad dynamic microbatching ----------------
         real_cfg = data.meta_info.get("real_config", {}) or {}
         mini_bs = int(real_cfg.get("mini_batch_size_per_gpu", 8))
         micro_bs = int(real_cfg.get("micro_batch_size_per_gpu", 4))
@@ -563,33 +504,28 @@ class REALActor(DataParallelPPOActor):
             real_cfg.get("ppo_max_token_len_per_gpu", 16384)
             * getattr(self, "ulysses_sequence_parallel_size", 1)
         )
-        # use_prob_as_reward
         use_prob_as_reward = bool(real_cfg.get("use_prob_as_reward", False))
-        
         use_rloo = bool(real_cfg.get("use_rloo", False))
-        
         model_name = str(real_cfg.get("model_name", "unknown_model"))
-        
+
+        # Map digit token IDs back to integer values 1..5; tokenizer-specific.
         if 'qwen' in model_name.lower():
-            token_to_digit = {16:1,17:2,18:3,19:4,20:5}
+            token_to_digit = {16: 1, 17: 2, 18: 3, 19: 4, 20: 5}
         elif 'mistral' in model_name.lower():
-            token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+            token_to_digit = {28740: 1, 28750: 2, 28770: 3, 28781: 4, 28782: 5}
         elif 'llama' in model_name.lower():
-            token_to_digit =  {16:1,17:2,18:3,19:4,20:5}
+            token_to_digit = {16: 1, 17: 2, 18: 3, 19: 4, 20: 5}
         else:
             print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
-            token_to_digit = {28740:1, 28750:2, 28770:3, 28781:4, 28782:5}
+            token_to_digit = {28740: 1, 28750: 2, 28770: 3, 28781: 4, 28782: 5}
 
-
-        # Preallocate accumulators
-        logp_sum_all = []  # accumulate per-mini then extend in order
+        logp_sum_all = []
         expected_values_all = []
         last_token_log_probs_all = []
         accs_all = []
         gts_all = []
 
-        # One steady inner pbar across all microbatches (count responses, not just non-empty)
-        # Option B: allow per-rank bars written to files to avoid console interleaving
+        # Per-rank pbars can be routed to files to avoid console interleaving.
         show_all_rank_pbar_to_file = bool(real_cfg.get("show_all_rank_pbar_to_file", False))
         pbar_file_dir = real_cfg.get("pbar_file_dir", "user_logs")
         _pbar_file_handle = None
@@ -613,15 +549,12 @@ class REALActor(DataParallelPPOActor):
         else:
             _inner_pbar = tqdm(total=N, desc="Teacher-forced answers", leave=False, disable=(_rank != 0))
 
-        # Cache original training mode and switch to eval
         prev_training = self.actor_module.training if hasattr(self, "actor_module") else False
         self.actor_module.eval()
 
         with torch.inference_mode():
-            # Iterate like update_policy: first mini-batches, then micro-batches
             for mini_batch in data.split(mini_bs):
                 Bmini = len(mini_batch)
-                # prepare dynamic micro-batches following dp_actor
                 if use_dynamic_bsz:
                     micro_batches, idx_lists = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
@@ -630,7 +563,7 @@ class REALActor(DataParallelPPOActor):
                     idx_lists = [
                         list(range(i * micro_bs, min((i + 1) * micro_bs, Bmini))) for i in range(len(micro_batches))
                     ]
-                # per-mini accumulator in mini order
+                # per-mini accumulators in mini order
                 logp_sum_mini = [0.0] * Bmini
                 expected_values_mini = [0.0] * Bmini
                 last_token_log_probs_mini = [0.0] * Bmini
@@ -640,21 +573,20 @@ class REALActor(DataParallelPPOActor):
                     bs = len(idx_local)
                     if bs == 0:
                         raise RuntimeError("Zero-length micro-batch encountered in REAL precompute")
-                    # Build trimmed micro-batch tensors up to answer_end = ans_start + ans_len
+                    # Trim micro-batch tensors to answer_end = ans_start + ans_len.
                     ids_src = micro_batch.batch.get("batch_input_ids")
                     attn_src = micro_batch.batch.get("attention_mask")
                     pos_src = micro_batch.batch.get("position_ids")
                     ans_start = micro_batch.batch.get("answer_start_positions")
                     accs_mb = micro_batch.non_tensor_batch.get("acc", torch.zeros(bs, device=dev, dtype=torch.float32))
                     gt_tokens_mb = micro_batch.non_tensor_batch.get("ground_truth_answer_tokens", [])
-                    
+
                     gt_tokens_len_mb = [
                         (int(len(t)) if (t is not None) else 0) for t in gt_tokens_mb
                     ]
                     if np.any(np.array(gt_tokens_len_mb) == 0):
                         gt_tokens_mb = torch.ones((bs, 1), dtype=torch.int64, device=dev)
 
-                    # Compute per-row end lengths and maxima
                     ans_lens_mb = []
                     end_lens = []
                     for slot in range(bs):
@@ -669,7 +601,6 @@ class REALActor(DataParallelPPOActor):
                             try:
                                 L_ans = int(len(gt_i))
                             except Exception:
-                                #L_ans = int(np.asarray(gt_i).size)
                                 raise RuntimeError(f"Cannot interpret ground_truth_answer_tokens row {slot} of type {type(gt_i)}")
                         ans_lens_mb.append(L_ans)
                         end_lens.append(int(ans_start[slot].item() + L_ans) if L_ans > 0 else 0)
@@ -679,20 +610,17 @@ class REALActor(DataParallelPPOActor):
                     if micro_max_len == 0 or R_max == 0:
                         R_max_flag = True
                         _inner_pbar.update(bs)
-                        #raise RuntimeError("Zero-length micro_max_len or R_max encountered in REAL precompute")
 
                     ids_mb = torch.full((bs, micro_max_len), pad_id, dtype=ids_src.dtype, device=dev)
                     attn_mb = torch.zeros((bs, micro_max_len), dtype=attn_src.dtype, device=dev)
                     pos_mb = torch.zeros((bs, micro_max_len), dtype=pos_src.dtype, device=dev)
                     resp_mb = torch.full((bs, R_max), pad_id, dtype=ids_src.dtype, device=dev)
 
-                    # --- Instrumentation: show per-microbatch lengths on tqdm (rank 0 only) ---
+                    # tqdm instrumentation (rank 0): per-microbatch length stats.
                     try:
-                        # Answer lengths stats
                         ans_len_mean = float(np.mean(ans_lens_mb)) if ans_lens_mb else 0.0
                         ans_len_max = int(R_max)
 
-                        # CoT lengths stats, if available
                         cot_lens_mb = None
                         if "cot_start_positions" in micro_batch.batch.keys():
                             cot_start = micro_batch.batch.get("cot_start_positions")
@@ -702,7 +630,7 @@ class REALActor(DataParallelPPOActor):
                         cot_len_mean = float(np.mean(cot_lens_mb)) if cot_lens_mb else 0.0
                         cot_len_max = int(max(cot_lens_mb)) if cot_lens_mb else 0
 
-                        # Simple ASCII bars (scaled to micro_max_len to avoid huge bars)
+                        # Bars are scaled to micro_max_len so they don't overflow.
                         def _mk_bar(val, vmax, width=20):
                             vmax = max(1, int(vmax))
                             n = max(0, min(width, int(round(width * float(val) / float(vmax)))))
@@ -711,15 +639,13 @@ class REALActor(DataParallelPPOActor):
                         ans_bar = _mk_bar(ans_len_mean, micro_max_len)
                         cot_bar = _mk_bar(cot_len_mean, micro_max_len)
 
-                        # Decode one representative ground-truth answer (the row with max end length)
+                        # Decode the heaviest-row ground-truth answer as a preview.
                         gt_preview = None
                         try:
-                            # choose the heaviest row for preview
                             slot_show = 0
                             if end_lens:
                                 slot_show = int(np.argmax(end_lens))
                             gt_i = gt_tokens_mb[slot_show]
-                            # convert to list[int]
                             if isinstance(gt_i, (list, tuple)):
                                 gt_ids = list(gt_i)
                             elif isinstance(gt_i, np.ndarray):
@@ -733,7 +659,6 @@ class REALActor(DataParallelPPOActor):
                                 gt_text = self._cached_tokenizer.decode(gt_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                             else:
                                 gt_text = str(gt_ids[:20])
-                            # one-line, trimmed preview
                             gt_text = gt_text.replace("\n", " ").replace("\r", " ")
                             if len(gt_text) > 64:
                                 gt_text = gt_text[:64] + "…"
@@ -741,7 +666,6 @@ class REALActor(DataParallelPPOActor):
                         except Exception:
                             raise RuntimeError("Failed to decode ground_truth_answer_tokens for progress bar")
 
-                        # Update postfix (rank 0 only; disabled elsewhere by tqdm constructor)
                         if gt_preview is not None and len(gt_preview) > 0:
                             _inner_pbar.set_postfix_str(
                                 f"bs={bs} seq_max={micro_max_len} ans={ans_len_mean:.0f}/{ans_len_max} [{ans_bar}] "
@@ -753,7 +677,6 @@ class REALActor(DataParallelPPOActor):
                                 f"cot={cot_len_mean:.0f}/{cot_len_max} [{cot_bar}]"
                             )
                     except Exception:
-                        # Never break training due to instrumentation
                         raise RuntimeError("Failed to decode ground_truth_answer_tokens for progress bar")
 
                     for slot in range(bs):
@@ -764,7 +687,7 @@ class REALActor(DataParallelPPOActor):
                         ids_i = ids_src[slot, :L_end]
                         l_i = int(ids_i.size(0))
                         ids_mb[slot, :l_i] = ids_i
-                        # copy attention from the source slice to respect eos/pad masking
+                        # Carry attention from source so eos/pad masking is preserved.
                         attn_mb[slot, :l_i] = attn_src[slot, :l_i]
 
                         gt_i = gt_tokens_mb[slot]
@@ -774,19 +697,11 @@ class REALActor(DataParallelPPOActor):
                             gt_i_t = gt_i.to(device=dev, dtype=ids_src.dtype)
                         else:
                             gt_i_t = torch.tensor(list(gt_i), dtype=ids_src.dtype, device=dev)
-                        resp_mb[slot, :L_ans] = gt_i_t[:L_ans] 
-                        
-                        
+                        resp_mb[slot, :L_ans] = gt_i_t[:L_ans]
+
                         print('ids_mb[slot, l_i - 1]', ids_mb[slot, l_i - 1], 'gt_i_t[0]', gt_i_t[0])
-                         
-                        # ids_mb[slot, l_i - 1] = gt_i_t[0]
-                        
-                        
-                        
-                        # breakpoint()
 
-
-                    # Derive positions from attention so first attended token starts at 0
+                    # Derive positions from attention so first attended token starts at 0.
                     if attn_mb.numel() > 0:
                         pos_from_mask = (attn_mb.cumsum(dim=1) - 1).clamp_min(0) * attn_mb
                         pos_mb[:, :] = pos_from_mask.to(dtype=pos_mb.dtype)
@@ -799,35 +714,27 @@ class REALActor(DataParallelPPOActor):
                     }
 
                     if R_max_flag:
-                        
                         _, lp_mb = self._forward_micro_batch(
                             micro_inputs, temperature=temperature, calculate_entropy=False
                         )
                         lp_mb = lp_mb * 0.0
-                        # Set expected_values to zeros if R_max_flag and store_last_token_probs
                         if store_last_token_probs:
                             expected_values = torch.zeros(bs, device=dev, dtype=torch.float32)
                     else:
-                       
-                        # NEW (regression setting): If we need full probability distributions, get logits too
                         if store_last_token_probs:
-                           if use_prob_as_reward:
-                                _, lp_mb, expected_values, last_token_log_probs  = self._forward_micro_batch(
+                            if use_prob_as_reward:
+                                _, lp_mb, expected_values, last_token_log_probs = self._forward_micro_batch(
                                     micro_inputs, temperature=temperature, calculate_entropy=False, regression=True, expected_prob_replace=True)
-                           else:
-                               _, lp_mb, expected_values  = self._forward_micro_batch(
+                            else:
+                                _, lp_mb, expected_values = self._forward_micro_batch(
                                     micro_inputs, temperature=temperature, calculate_entropy=False, regression=True)
-                               last_token_log_probs = torch.zeros(bs, device=dev, dtype=torch.float32)
-                               
+                                last_token_log_probs = torch.zeros(bs, device=dev, dtype=torch.float32)
                         else:
-
-
-                            # Original: just get log probs
                             _, lp_mb = self._forward_micro_batch(
                                 micro_inputs, temperature=temperature, calculate_entropy=False
                             )
 
-                    # Accumulate per-row sums into mini-batch order via idx_local
+                    # Scatter per-row sums into mini-batch order via idx_local.
                     lp_mb_cpu = lp_mb.detach().to("cpu")
                     for slot, mini_pos in enumerate(idx_local):
                         L_ans = int(ans_lens_mb[slot])
@@ -835,25 +742,21 @@ class REALActor(DataParallelPPOActor):
                             logp_sum_mini[mini_pos] += float(lp_mb_cpu[slot, :L_ans].sum().item())
                     _inner_pbar.update(bs)
 
-                    # Accumulate per-row sums into mini-batch order via idx_local for expected values
                     if store_last_token_probs:
                         expected_values_cpu = expected_values.detach().to("cpu")
                         last_token_log_probs_cpu = last_token_log_probs.detach().to("cpu")
-                        
+
                         for slot, mini_pos in enumerate(idx_local):
                             L_ans = int(ans_lens_mb[slot])
                             if L_ans > 0:
                                 expected_values_mini[mini_pos] = float(expected_values_cpu[slot].item())
                                 last_token_log_probs_mini[mini_pos] = float(last_token_log_probs_cpu[slot].item())
-                    
-                    # Accumulate accs and gts
+
                     accs_mb_cpu = accs_mb
                     for slot, mini_pos in enumerate(idx_local):
                         accs_mini[mini_pos] = float(accs_mb_cpu[slot].item())
                         gts_mini[mini_pos] = gt_tokens_mb[slot]
-                    
 
-                # Append this mini-batch results to the global list in order
                 expected_values_all.extend(expected_values_mini)
                 last_token_log_probs_all.extend(last_token_log_probs_mini)
                 accs_all.extend(accs_mini)
@@ -869,11 +772,10 @@ class REALActor(DataParallelPPOActor):
         if prev_training:
             self.actor_module.train()
 
-        # ---------------- Stage 2: advantage/weight computation per UID group ----------------
-        # NEW: Check if we should use regression-based advantages
+        # ---------------- Stage 2: per-UID advantage/weight computation ----------------
         use_regression_reward = bool(real_cfg.get("use_regression_reward", True))
-        
-        # Build uid groups preserving order of first appearance
+
+        # Build uid groups preserving order of first appearance.
         uids = data.non_tensor_batch.get("uid")
         if isinstance(uids, torch.Tensor):
             uids_list = [str(x) for x in uids.cpu().tolist()]
@@ -881,22 +783,20 @@ class REALActor(DataParallelPPOActor):
             uids_list = [str(x) for x in (uids.tolist() if hasattr(uids, "tolist") else list(uids))]
 
         ans_logprob_all = torch.as_tensor(logp_sum_all, device=dev, dtype=torch.float32)
-        expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32)  
-        last_token_log_probs_all = torch.as_tensor(last_token_log_probs_all, device=dev, dtype=torch.float32)  
+        expected_values_all = torch.as_tensor(expected_values_all, device=dev, dtype=torch.float32)
+        last_token_log_probs_all = torch.as_tensor(last_token_log_probs_all, device=dev, dtype=torch.float32)
         accs_all = torch.as_tensor(accs_all, device=dev, dtype=torch.float32)
         gts_all = torch.as_tensor(gts_all, device=dev, dtype=torch.float32)
         has_delim_src = data.batch.get("has_delimiter")
         has_delim_all = has_delim_src.clone() if isinstance(has_delim_src, torch.Tensor) else torch.as_tensor(has_delim_src, device=dev, dtype=torch.bool)
 
-        # Get ground truth answers for regression reward
         if use_regression_reward:
             gt_answers = data.non_tensor_batch.get("reward_model", {})
             gt_values = []
             for gt_dict in gt_answers:
                 gt_str = gt_dict.get("ground_truth", "0")
                 try:
-                    # Extract numeric value from ground truth string
-                    # Handle formats like "42", "\\boxed{42}", etc.
+                    # Extract leading number; handles "42", "\\boxed{42}", etc.
                     import re
                     numbers = re.findall(r'\d+', str(gt_str))
                     gt_val = float(numbers[0]) if numbers else 0.0
@@ -917,46 +817,32 @@ class REALActor(DataParallelPPOActor):
         for u in order:
             idxs = groups[u]
             B = len(idxs)
-            
-            # Initialize A_prob for all code paths
+
             A_prob = torch.zeros(B, device=dev, dtype=torch.float32)
             A_acc = torch.zeros(B, device=dev, dtype=torch.float32)
-            
+
             if use_regression_reward and store_last_token_probs:
                 expected_values = expected_values_all[idxs]  # [B]
-          
-                # Get ground truth value for this group
-                # gt_value = gt_values_tensor[idxs[0]]  # All samples in group have same GT
-                
-                gt_values_token = gts_all[idxs[0]]  # list of ground truth token sequences
-                
-                
-                
+                gt_values_token = gts_all[idxs[0]]
                 gt_value = token_to_digit.get(int(gt_values_token[0].item()), 0)
-                
-                # breakpoint()
-                
-                # Compute rewards: R_i = -(E[digit]_i - y)^2
+
+                # Regression reward: R_i = -(E[digit]_i - y)^2 (we want to minimize the squared error).
                 squared_errors = (expected_values - gt_value) ** 2
-                rewards = -squared_errors  # Negative because we want to minimize error
-                
-               
-                # Compute advantages using leave-one-out baseline
+                rewards = -squared_errors
+
+                # Leave-one-out baseline.
                 if B > 1:
-                    # Leave-one-out mean reward
                     total_reward = rewards.sum()
                     loo_mean_rewards = (total_reward - rewards) / (B - 1)
                     A_raw = rewards - loo_mean_rewards
                 else:
-                    # Single sample: no baseline
-                    A_raw = rewards - rewards.mean()  # Zero-centered
-                
-                # Normalize advantages
+                    A_raw = rewards - rewards.mean()
+
                 if bool(real_cfg.get("normalize_advantages", True)):
                     A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
                 A_raw = A_raw.clamp(-1.0, 1.0)
 
-                if _rank == 0:  # Only first 3 groups to avoid spam
+                if _rank == 0:
                     print(f"\n[DEBUG Regression] UID: {u}")
                     print(f"  Group size (B): {B}")
                     print(f"  Ground truth: {gt_value:.2f}")
@@ -965,18 +851,12 @@ class REALActor(DataParallelPPOActor):
                     print(f"  Rewards (neg squared errors): {rewards.cpu().numpy()}")
                     print(f"  Digit probs for first response:")
                     print(f'LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
-                    # print A_raw
                     print(f'Advantages A_raw: {A_raw.cpu().numpy()}')
-                    # for k in range(10):
-                    #     print(f"    P({k}) = {digit_probs[0, k].item():.4f}")
                     print(f"  E[digit] = {expected_values[0].item():.4f}")
-                
-                # Compute weights based on rewards (higher reward = higher weight)
-                # Use softmax on rewards (not log-probs)
-                # w_full = torch.softmax(rewards, dim=0)
-                w_full = - 2 * (expected_values - gt_value) 
-                
-                # Format advantage based on valid last token (1-5 check)
+
+                # Per-sample weight = gradient of -(E[digit]-y)^2 w.r.t. E[digit].
+                w_full = -2 * (expected_values - gt_value)
+
                 has_delim = has_delim_all[idxs]
                 fmt = torch.where(
                     has_delim,
@@ -987,87 +867,53 @@ class REALActor(DataParallelPPOActor):
 
                 ans_logprob = ans_logprob_all[idxs]
                 extra_w_full = torch.softmax(ans_logprob, dim=0)
-                
-                
-                
-            
-                #################### calculate the accuracy reward ####################
+
+                # Accuracy reward from last-token probability (LOO-baselined).
                 last_token_log_probs = last_token_log_probs_all[idxs] if last_token_log_probs_all is not None else None
                 if last_token_log_probs is not None:
-                    rewards = torch.exp(last_token_log_probs)  # Convert log-probs to probs, [B]
+                    rewards = torch.exp(last_token_log_probs)
                     if B > 1:
-                        # Leave-one-out mean reward
                         total_reward = rewards.sum()
                         loo_mean_rewards = (total_reward - rewards) / (B - 1)
                         A_prob = rewards - loo_mean_rewards
                     else:
-                        # Single sample: no baseline
-                        A_prob = rewards - rewards.mean()  # Zero-centered
-                    
-                    ###########################################
-                    
-                    # # Groupwise math (identical)
-                    # lse_all = torch.logsumexp(last_token_log_probs, dim=0)
-                    # if B > 1:
-                    #     d = last_token_log_probs - lse_all
-                    #     lse_others = lse_all + torch.log((-torch.expm1(d)).clamp_min(1e-12))
-                    #     v_i = lse_others - math.log(B - 1)
-                    # else:
-                    #     v_i = ans_logprob.new_full((B,), float("-inf"))
-                    # log_mean = lse_all - math.log(max(B, 1))
-                    
-                    # A_prob = (log_mean - v_i)
-                                     
-                    # Normalize advantages
+                        A_prob = rewards - rewards.mean()
+
                     if bool(real_cfg.get("normalize_advantages", True)):
                         A_prob = A_prob / (A_prob.std(unbiased=False) + 1e-8)
                     A_prob = A_prob.clamp(-1.0, 1.0)
-                    
-                    ###############################################
-                    
-                    if _rank == 0:  # Only first 3 groups to avoid spam
+
+                    if _rank == 0:
                         print(f"\n[DEBUG Regression - Accuracy Reward] UID: {u}")
                         print(f"  Last token probs: {last_token_log_probs.cpu().numpy()}")
-                        # print prob, exp(log_prob)
                         probs = torch.exp(last_token_log_probs)
                         print(f"  Last token probabilities: {probs.cpu().numpy()}")
                         print(f'  LOO mean rewards: {loo_mean_rewards.cpu().numpy()}' if B > 1 else "  LOO mean rewards: N/A (B=1)")
                         print(f'  Advantages A_prob: {A_prob.cpu().numpy()}')
-                        
 
                 if use_rloo:
-                    # use accuracy as extra advantage
-                    rewards_acc = accs_all[idxs]  # [B]
-                    
+                    # RLOO: use scalar accuracy as the extra advantage signal.
+                    rewards_acc = accs_all[idxs]
                     if B > 1:
-                        # Leave-one-out mean reward
                         total_reward_acc = rewards_acc.sum()
                         loo_mean_rewards_acc = (total_reward_acc - rewards_acc) / (B - 1)
                         A_acc = rewards_acc - loo_mean_rewards_acc
                     else:
-                        # Single sample: no baseline
-                        A_acc = rewards_acc - rewards_acc.mean()  # Zero-centered
-                    # Normalize advantages
+                        A_acc = rewards_acc - rewards_acc.mean()
                     if bool(real_cfg.get("normalize_advantages", True)):
                         A_acc = A_acc / (A_acc.std(unbiased=False) + 1e-8)
-                    A_acc = A_acc.clamp(-1.0, 1.0)  
+                    A_acc = A_acc.clamp(-1.0, 1.0)
 
-                    if _rank == 0:  # Only first 3 groups to avoid spam
+                    if _rank == 0:
                         print(f"\n[DEBUG Regression - Accuracy Advantage] UID: {u}")
                         print(f"  Accuracies: {rewards_acc.cpu().numpy()}")
                         print(f'  LOO mean rewards (acc): {loo_mean_rewards_acc.cpu().numpy()}' if B > 1 else "  LOO mean rewards (acc): N/A (B=1)")
                         print(f'  Advantages A_acc: {A_acc.cpu().numpy()}')
-            
-                    
-                        
-                
 
-                
             else:
-                # ============ ORIGINAL: Log-probability-based advantage computation ============
+                # ----- Original: log-prob-based advantage (groupwise leave-one-out in log-space) -----
                 ans_logprob = ans_logprob_all[idxs]
-                
-                # Groupwise math (identical)
+
                 lse_all = torch.logsumexp(ans_logprob, dim=0)
                 if B > 1:
                     d = ans_logprob - lse_all
@@ -1076,7 +922,7 @@ class REALActor(DataParallelPPOActor):
                 else:
                     v_i = ans_logprob.new_full((B,), float("-inf"))
                 log_mean = lse_all - math.log(max(B, 1))
-                
+
                 A_raw = (log_mean - v_i)
                 A_raw = A_raw / (A_raw.std(unbiased=False) + 1e-8)
                 A_raw = A_raw.clamp(-1.0, 1.0)
@@ -1093,32 +939,29 @@ class REALActor(DataParallelPPOActor):
             if use_rloo:
                 real_adv_raw[idxs] = A_acc
             else:
-                real_adv_raw[idxs] = A_raw + beta_supp * A_prob 
+                real_adv_raw[idxs] = A_raw + beta_supp * A_prob
             format_adv[idxs] = fmt
             real_weights[idxs] = w_full
             real_extra_weights[idxs] = extra_w_full if use_regression_reward else torch.zeros_like(w_full)
-            
+
             if use_regression_reward:
-                gt_values_stored[idxs] = gt_value  
+                gt_values_stored[idxs] = gt_value
 
             _outer_pbar.update(1)
         _outer_pbar.close()
 
-        # Write back to batch
         data.batch["real_adv_raw"] = real_adv_raw
         data.batch["format_adv"] = format_adv
         data.batch["real_weights"] = real_weights
         data.batch["has_delimiter"] = has_delim_all
         data.batch["real_extra_weights"] = real_extra_weights
         data.batch["gt_values"] = gt_values_stored
-        
-        # NEW: Write back last token probabilities if collected
+
         if store_last_token_probs and last_token_probs_all is not None:
             data.batch["last_token_probs"] = last_token_probs_all
             if _rank == 0:
                 print(f"\n[DEBUG Summary] Stored last_token_probs with shape: {last_token_probs_all.shape}")
-        
-        # DEBUG: Print precompute summary statistics
+
         if _rank == 0:
             print(f"\n[DEBUG Precompute Summary]")
             print(f"  Total responses (N): {N}")
@@ -1127,14 +970,10 @@ class REALActor(DataParallelPPOActor):
             print(f"  Store last token probs: {store_last_token_probs}")
             print(f"  REAL advantages - mean: {real_adv_raw.mean().item():.4f}, std: {real_adv_raw.std().item():.4f}")
             print(f"  Format advantages - mean: {format_adv.mean().item():.4f}, std: {format_adv.std().item():.4f}")
-            print(f"  Has delimiter (valid format) - count: {has_delim_all.sum().item()}/{N} ({100*has_delim_all.float().mean().item():.1f}%)")
+            print(f"  Has delimiter (valid format) - count: {has_delim_all.sum().item()}/{N} ({100 * has_delim_all.float().mean().item():.1f}%)")
             if use_regression_reward:
                 print(f"  Weights - min: {real_weights.min().item():.4f}, max: {real_weights.max().item():.4f}, mean: {real_weights.mean().item():.4f}")
                 print(f"  Extra Weights - min: {real_extra_weights.min().item():.4f}, max: {real_extra_weights.max().item():.4f}, mean: {real_extra_weights.mean().item():.4f}")
                 print(f"  GT values stored - min: {gt_values_stored.min().item():.4f}, max: {gt_values_stored.max().item():.4f}, mean: {gt_values_stored.mean().item():.4f}")
-            
-        
+
         return data
-
-    
-

@@ -172,69 +172,58 @@ Expected values (first 5): [1.8960844 2.8807998 4.1740913 2.6792083 2.679181]
 
 ## Training Configuration
 
-
-| Parameter             | Default      | Description                               |
-| --------------------- | ------------ | ----------------------------------------- |
-| `n_resp_per_prompt`   | 8            | Number of responses sampled per prompt    |
-| `max_prompt_length`   | 2048         | Maximum prompt token length               |
-| `max_response_length` | 1024         | Maximum response token length             |
-| `train_prompt_bsz`    | 256          | Training prompt batch size                |
-| `loss_agg_mode`       | `token-mean` | Token-level loss aggregation              |
-| `clip_ratio_low/high` | 0.2          | PPO-style clipping ratios                 |
-| `kl_loss_coef`        | 0.01         | KL divergence regularization coefficient  |
-| `offload`             | True         | FSDP CPU offloading for memory efficiency |
+All defaults below are taken from [`bash_real/run_real.sh`](bash_real/run_real.sh). Edit the corresponding bash variable to change a value — every entry is wired straight through to a Hydra override on the `python3 -m recipe.dapo.main_real_dapo` line.
 
 
-## Project Structure
+### Sequence lengths
 
-```
-.
-├── bash_real/                  # Training scripts (8B models, single-node)
-├── bash_real_32b/              # Training scripts (32B models, multi-node Ray)
-├── recipe/
-│   └── dapo/                   # Training entry points and configs
-│       ├── main_jepo_dapo.py   # Main training entry
-│       ├── jepo_dapo_ray_trainer.py  # Ray trainer
-│       ├── deepscaler_reward.py      # Reward function
-│       └── config/             # Hydra config files
-├── verl/                       # Core verl framework code
-├── azure/                      # Environment setup scripts
-├── data/                       # Data utilities
-├── examples/                   # Example scripts and data preprocessing
-└── tools/                      # Utility tools
-```
+| Variable                  | Default | Description                                                                    |
+| ------------------------- | ------- | ------------------------------------------------------------------------------ |
+| `max_prompt_length`       | `2048`  | Truncate/pad prompts to this many tokens (`data.truncation='left'`).           |
+| `max_response_length`     | `1024`  | Hard cap on generated tokens. Beyond this, responses are simply truncated.     |
 
-## Scripts
+### Batch sizes & DAPO filter groups
 
-### `bash_real/` — 8B Model Training Scripts
+| Variable                | Default | Description                                                                       |
+| ----------------------- | ------- | --------------------------------------------------------------------------------- |
+| `train_prompt_bsz`      | `256`   | Number of distinct prompts per global training batch.                             |
+| `train_prompt_mini_bsz` | `64`    | PPO mini-batch size (used by the standard PPO update path).                       |
+| `n_resp_per_prompt`     | `8`     | vLLM rollouts per prompt (also the LOO group size).                               |
 
 
-| Script                      | Description                                         |
-| --------------------------- | --------------------------------------------------- |
-| `qwen_rarl_grpo_4k_sft.sh`  | **Main script** — REAL training from SFT checkpoint |
-| `rarl_grpo_4k_sft.sh`       | REAL + GRPO from SFT checkpoint                     |
-| `rarl_grpo_4k_base.sh`      | REAL + GRPO from base model                         |
-| `dapo_4k.sh` / `dapo_8k.sh` | DAPO baseline (4k/8k context)                       |
-| `grpo_1k.sh` / `grpo_4k.sh` | GRPO baseline (1k/4k context)                       |
-| `sft.sh`                    | Supervised fine-tuning                              |
-| `generate_samples.sh`       | Sample generation for evaluation                    |
+### REAL — hyperparameters
+
+| Variable             | Default | Description                                                                                                                 |
+| -------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `real_lr`            | `5e-8`  | REAL actor LR. Rule of thumb: **Qwen ~1e-6**, **Mistral ~5e-8**, **LoRA ≈ 10× full-finetune LR**.                            |
+| `real_beta_supp`     | `1.0`   | λ — weight on the support (log-likelihood) loss. Recommended `1.0` for best correlation.                                    |
+| `real_beta_supp_extra` | `0.0` | β — weight on the L2 + log-likelihood extra-loss bundle. `0.0` is faster and gives reasonable results.                       |
+| `real_beta_kl`       | `0.0`   | KL coefficient on the original rollout policy (off by default).                                                             |
+| `real_entropy_coeff` | `0.0`   | Entropy regularization (off by default).                                                                                    |
+| `real_update_freq`   | `10`    | Eval/save cadence (steps). Qwen runs typically use `20`.                                                                    |
+| `val_before_train`   | `True`  | Run validation once before any training step (sanity-check baseline metrics).                                               |
 
 
-### `bash_real_32b/` — 32B Model Training Scripts
 
-All 32B scripts use Ray for multi-node distributed training (2×8 A100 GPUs).
+## Core Scripts
 
+The files below are the ones you'll most often touch when running or extending REAL.
 
-| Script                                         | Description                              |
-| ---------------------------------------------- | ---------------------------------------- |
-| `real_32b.sh`                                  | Base 32B training                        |
-| `real_32b_ray_submit.sh`                       | 32B Ray submit baseline                  |
-| `real_32b_ray_submit_from_raft.sh`             | Init from RAFT checkpoint                |
-| `real_32b_ray_submit_from_raft_full_lr1e-6.sh` | From RAFT, full fine-tuning, lr=1e-6     |
-| `real_32b_ray_submit_from_raft_r128.sh`        | From RAFT, LoRA rank=128                 |
-| `real_32b_ray_submit_from_tract_full_lr*.sh`   | From TRACT, full fine-tuning, various lr |
-| `real_test.sh`                                 | 32B evaluation script                    |
+### Environment
 
+- **[`azure/env_setup.sh`](azure/env_setup.sh)** — One-shot setup script that creates the `real` conda env and installs verl, vLLM, flash-attn 2.8.1, `transformers<4.54`, and Ray 2.38. Equivalent to the steps under [Environment Setup](#environment-setup).
+
+### Launch scripts (entry points)
+
+- **[`bash_real/sft.sh`](bash_real/sft.sh)** — SFT warmup launcher (RAFT / TRACT style). Wraps `verl/trainer/fsdp_sft_trainer.py` on `n` GPUs via `torchrun --standalone`, training a base model on `real_dataset_sft/`. Use this to produce the warm-start checkpoint that REAL then RL-finetunes.
+- **[`bash_real/run_real.sh`](bash_real/run_real.sh)** — Main 8-GPU REAL launcher (Mistral-7B / Qwen3-8B scale). Drives the `recipe.dapo.main_real_dapo` entry point with all `algorithm.real_*` Hydra overrides. Edit `MODEL_PATH`, `DATA_DIR`, and the REAL hyperparameters (`real_lr`, `real_beta_supp`, `real_use_*_loss`, etc.) here.
+- **[`bash_real/real_32b_ray_submit_from_raft_full_lr1e-6.sh`](bash_real/real_32b_ray_submit_from_raft_full_lr1e-6.sh)** — Multi-node Ray-submit launcher for the 32B-scale REAL run starting from the `Qwen3-32B-RAFT` checkpoint, with `lr=1e-6` and FSDP sharded across nodes. Use as the template for any 32B run.
+
+### Training core
+
+- **[`verl/trainer/ppo/ray_trainer.py`](verl/trainer/ppo/ray_trainer.py)** — `RayPPOTrainer`: the Ray-based single-controller PPO loop that REAL subclasses. Owns rollout generation (vLLM), reference/critic log-prob computation, advantage estimation, the actor-update call into the worker group, and the val/save cadence. The REAL trainer (`recipe/dapo/real_dapo_ray_trainer.py`) overrides `fit()` here to inject the REAL teacher-forced update.
+- **[`verl/workers/actor/dp_actor.py`](verl/workers/actor/dp_actor.py)** — `DataParallelPPOActor`: the FSDP actor worker. Implements `_forward_micro_batch` (with the regression branch that computes `E[digit] = Σ p(k) · k` over the digit tokens for the last position), `compute_log_prob` (teacher-forced log-probs for rollouts and the reference policy), and `update_policy` (standard PPO/GRPO update). REAL's actor inherits from this.
+- **[`verl/workers/actor/real_actor.py`](verl/workers/actor/real_actor.py)** — `REALActor`: subclasses `DataParallelPPOActor` and replaces `update_policy` with the REAL objective. `_precompute_adv_w_with_verl` runs Stage 1 (no-grad teacher-forced forward over the prompt + ground-truth answer per question to read `E[digit]` and the last-token log-prob) and Stage 2 (per-UID leave-one-out advantages from the regression reward `R = -(E[digit] - y)²` and the accuracy reward `R = p(y)`). `update_policy` then runs a second pass with grad enabled to combine the CoT policy-gradient loss with the regression supervision terms (`l2_loss`, `log_likelihood_loss`) weighted by `beta_supp`/`beta_supp_extra`, and steps the optimizer.
 
 
 

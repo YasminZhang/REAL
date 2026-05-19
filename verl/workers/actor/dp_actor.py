@@ -75,23 +75,21 @@ class DataParallelPPOActor(BasePPOActor):
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_remove_padding={self.use_remove_padding}")
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
-        
         self.model_name = self.config.get("model_name", "unknown_model")
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_fused_kernels={self.use_fused_kernels}")
             print(f"{role} model_name={self.model_name}")
-            
-        print("model_name:", self.model_name)
+
+        # Digit token IDs (1..5) used as regression targets; tokenizer-specific.
         if 'qwen' in self.model_name.lower():
-            self.digit_token_ids = [16,17,18,19,20]
+            self.digit_token_ids = [16, 17, 18, 19, 20]
         elif 'mistral' in self.model_name.lower():
             self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
         elif 'llama' in self.model_name.lower():
-            self.digit_token_ids =[16,17,18,19,20]
+            self.digit_token_ids = [16, 17, 18, 19, 20]
         else:
             print("Unknown model for regression digit token ids, using default Mistral digit token ids.")
             self.digit_token_ids = [28740, 28750, 28770, 28781, 28782]
-            
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
@@ -103,7 +101,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.compute_entropy_from_logits = (
             torch.compile(entropy_from_logits, dynamic=True)
-            if self.config.get("use_torch_compile", True)  #  use torch compile by default
+            if self.config.get("use_torch_compile", True)
             else entropy_from_logits
         )
         self.device_name = get_device_name()
@@ -204,9 +202,8 @@ class DataParallelPPOActor(BasePPOActor):
                     **multi_modal_inputs,
                     use_cache=False,
                     **extra_args,
-                )  # prevent model thinks we are generating
-                
-             
+                )  # attention_mask=None so the model doesn't treat this as generation
+
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
@@ -215,7 +212,7 @@ class DataParallelPPOActor(BasePPOActor):
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad.div_(temperature)
 
-                    # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
+                    # if use_sp: ((total_nnz / sp) + pad) ; else: (batch, seqlen)
                     inplace_backward = True
                     if calculate_entropy:
                         inplace_backward = False
@@ -224,72 +221,36 @@ class DataParallelPPOActor(BasePPOActor):
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
                     )
-                    
+
                     digit_token_ids = self.digit_token_ids
-                    
 
                     if regression:
-                         
-
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits_rmpad.device, dtype=torch.long)
-                        
-                        # Find the actual last token position for each sample using attention mask
-                        # attention_mask: (bsz, seqlen), 1 for valid tokens, 0 for padding
                         valid_lengths = attention_mask.sum(dim=1)  # (bsz,)
-                        
-                        
-                        # Now map from original positions to rmpad indices
-                        # indices: (total_nnz,) - maps from rmpad position to original (flattened) position
-                        # We need the reverse: find which rmpad position corresponds to our last token
-                        
-                        # Flatten the original (batch, seq) positions
-                        batch_indices = torch.arange(batch_size, device=logits_rmpad.device)
-                        # Vectorized search: for each original position, find its index in the rmpad tensor
-                        # Create a mapping from original position to rmpad index
-                        # Since indices can be very large, we use a more efficient approach
-                        
-                        # rmpad_positions will be the cumsum of valid lengths minus 2, one position shifted for 0-indexing, one for next token prediction
+
+                        # rmpad_positions: locate the last (or second-to-last in validation)
+                        # token of each sample in the packed sequence. -2 accounts for 0-indexing
+                        # plus next-token shift; -3 in validation skips one extra trailing token.
                         if validation:
                             rmpad_positions = torch.cumsum(valid_lengths, dim=0) - 3
                         else:
                             rmpad_positions = torch.cumsum(valid_lengths, dim=0) - 2
-                        
-                        # Get indices of last 1 in each batch
-                        # Flip along the sequence dimension, find first 1 from the end
-                        last_token_positions = attention_mask.size(1) - 1 - torch.argmax(attention_mask.flip(dims=[1]), dim=1)   
 
-                        
-
-                        # Extract logits for the last valid token of each sample from rmpad format
-                        # logits_rmpad: (total_nnz, vocab_size)
-
-                        
+                        last_token_positions = attention_mask.size(1) - 1 - torch.argmax(attention_mask.flip(dims=[1]), dim=1)
 
                         last_token_logits = logits_rmpad[rmpad_positions, :]  # (bsz, vocab_size)
                         last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
-                        # last_token_greedy_decode = torch.argmax(last_token_probs, dim=-1)  # (bsz,)
-                        # last_token_greedy_decode_values = last_token_greedy_decode.unsqueeze(-1).float()  # (bsz, 1)
-                        
-                    
-                        
-                        # Extract probabilities for digit tokens 0-5
-                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 6)
-                        digit_values = torch.arange(1, 6, device=logits_rmpad.device, dtype=torch.float32)  # [0,1,2,...,5]
-                        
-                    
-                        
+
+                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 5)
+                        digit_values = torch.arange(1, 6, device=logits_rmpad.device, dtype=torch.float32)
+
                         if expected_prob_replace:
-                            # calculate log probs input_ids_rmpad_rolled at last token positions
+                            # log p(target_token) at the last position
                             last_token_log_probs = torch.log(last_token_probs.gather(1, input_ids_rmpad_rolled[rmpad_positions].unsqueeze(-1)).squeeze(-1))  # (bsz,)
-                       
-                    
-                        
-                        # Compute expected value: E[digit] = Σ p(k) * k
+
+                        # E[digit] = Σ p(k) * k
                         expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
 
-                        
-    
-                        # print when running rank 0
                         if torch.distributed.get_rank() == 0:
                             print("expected_prob_replace:", expected_prob_replace)
                             print("[rmpad branch] Computed expected digit values for last token (no padding).")
@@ -298,13 +259,6 @@ class DataParallelPPOActor(BasePPOActor):
                             print(f"Corresponding rmpad positions (first 5): {rmpad_positions[:5].cpu().numpy()}")
                             print(f"Expected values (first 5): {expected_values[:5].detach().cpu().numpy()}")
 
-                        
-
-                   
-                  
-                        
-
-                    # compute entropy
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
@@ -344,26 +298,13 @@ class DataParallelPPOActor(BasePPOActor):
                     seqlen=seqlen,
                 )
 
-                
-
-                
-                
-                  
-
-                   
-
-                
-
-                # only return response part:
+                # response part only
                 if calculate_entropy:
-                    entropy = full_entropy.squeeze(-1)[:, -response_length -2 : -2]  # (bsz, response_length)
+                    entropy = full_entropy.squeeze(-1)[:, -response_length - 2: -2]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 2: -2]  # (bsz, response_length)
 
-                
-                
-                
-            ################## The Else branch not used in current implementation ##################
-            else:  # not using rmpad and no ulysses sp
+            # ----- non-rmpad branch (not exercised in current REAL configs) -----
+            else:
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
@@ -376,59 +317,45 @@ class DataParallelPPOActor(BasePPOActor):
                     **multi_modal_inputs,
                     use_cache=False,
                     **extra_args,
-                )  # prevent model thinks we are generating
+                )
 
                 if self.use_fused_kernels:
-                    log_probs = output.log_probs[:, -response_length - 1 : -1]
-                    entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    log_probs = output.log_probs[:, -response_length - 1: -1]
+                    entropy = output.entropy[:, -response_length - 1: -1]
 
                 else:
                     logits = output.logits
-
                     logits.div_(temperature)
-                    logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+                    logits = logits[:, -response_length - 1: -1, :]  # (bsz, response_length, vocab_size)
 
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
-                    
-                    # NEW: Replace last token's log-prob with expected value over digits 0-9
-                    # Check if we should use regression-based expected value for last token
-                    
+
                     if regression and response_length > 0:
-                        # Get digit token IDs (default for Llama/Mistral tokenizers)
-                        digit_token_ids = getattr(self.config, 'digit_token_ids', 
+                        # Qwen tokenizer digit IDs (0-9). Note: overrides self.config.digit_token_ids.
+                        digit_token_ids = getattr(self.config, 'digit_token_ids',
                                                    [28774, 28705, 28740, 28750, 28770, 28781, 28782, 28784, 28787, 28783])
-                        digit_token_ids = [15,16,17,18,19,20,21,22,23,24]  # For Qwen tokenizer
                         digit_token_ids_tensor = torch.tensor(digit_token_ids, device=logits.device, dtype=torch.long)
-                        
-                        # Find the actual last token position for each sample using attention mask
-                        # Note: logits is already sliced to response part: [:, -response_length - 1 : -1, :]
-                        # We need to work with the full sequence attention mask
-                        # attention_mask: (bsz, seqlen), 1 for valid tokens, 0 for padding
-                        valid_lengths = attention_mask.sum(dim=1)  # (bsz,) - total valid length
-                        
-                        # Get the full sequence logits (before slicing)
-                        full_logits = output.logits  # (bsz, seqlen, vocab_size)
+
+                        valid_lengths = attention_mask.sum(dim=1)
+
+                        # Re-read full-sequence logits to locate the true last valid position
+                        # (logits above was already sliced to the response window).
+                        full_logits = output.logits
                         full_logits.div_(temperature)
-                        
-                        # Get logits for the last valid token of each sample
+
                         batch_indices = torch.arange(batch_size, device=full_logits.device)
-                        last_token_positions = valid_lengths - 1  # Last valid position (0-indexed)
-                        last_token_logits = full_logits[batch_indices, last_token_positions, :]  # (bsz, vocab_size)
-                        last_token_probs = torch.softmax(last_token_logits, dim=-1)  # (bsz, vocab_size)
-                        
-                        # Extract probabilities for digit tokens 0-9
-                        digit_probs = last_token_probs[:, digit_token_ids_tensor]  # (bsz, 10)
-                        digit_values = torch.arange(10, device=logits.device, dtype=torch.float32)  # [0,1,2,...,9]
-                        
-                        # Compute expected value: E[digit] = Σ p(k) * k
-                        expected_values = (digit_probs * digit_values).sum(dim=1)  # (bsz,)
-                        
-                        # Replace last token's log-prob with expected value
-                        # Note: This mixes log-probs (for CoT) with expected values (for last token)
-                        
+                        last_token_positions = valid_lengths - 1
+                        last_token_logits = full_logits[batch_indices, last_token_positions, :]
+                        last_token_probs = torch.softmax(last_token_logits, dim=-1)
+
+                        digit_probs = last_token_probs[:, digit_token_ids_tensor]
+                        digit_values = torch.arange(10, device=logits.device, dtype=torch.float32)
+
+                        # E[digit] = Σ p(k) * k; replaces the last-token log-prob with this
+                        # expected value, mixing CoT log-probs with a regression target.
+                        expected_values = (digit_probs * digit_values).sum(dim=1)
                         log_probs[:, last_token_positions] = expected_values
 
-                        # print when running rank 0
                         if torch.distributed.get_rank() == 0:
                             print("[non-rmpad branch] Replaced last token log-probs with expected digit values.")
                             print(f"Valid lengths (first 5): {valid_lengths[:5].cpu().numpy()}")
@@ -443,10 +370,9 @@ class DataParallelPPOActor(BasePPOActor):
 
             if not regression:
                 return entropy, log_probs
-
             else:
                 if expected_prob_replace:
-                    return entropy, log_probs, expected_values, last_token_log_probs 
+                    return entropy, log_probs, expected_values, last_token_log_probs
                 else:
                     return entropy, log_probs, expected_values
 
@@ -460,7 +386,7 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
 
-        # if grad_norm is not finite, skip the update
+        # skip step if grad_norm is not finite
         if not torch.isfinite(grad_norm):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
@@ -487,11 +413,10 @@ class DataParallelPPOActor(BasePPOActor):
         Returns:
             torch.Tensor: the log_prob tensor
         """
-        # set to eval
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info["micro_batch_size"]
-        temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        temperature = data.meta_info["temperature"]  # required in meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
@@ -529,15 +454,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
 
-
-    
-    @GPUMemoryLogger(role="dp actor", logger=logger) 
+    @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob_with_logits(self, data: DataProto, calculate_entropy=False):
-        """Compute log probabilities, entropy, and logits for validation analysis.
-        
-        Similar to compute_log_prob but also returns the raw logits tensor.
-        """
-        # set to eval
+        """Like compute_log_prob, but also returns regression expected_values for validation."""
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info["micro_batch_size"]
@@ -584,14 +503,11 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys, logits
 
-    
-
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
-        # make sure we are in training mode
         self.actor_module.train()
 
-        temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        temperature = data.meta_info["temperature"]  # required in meta_info to avoid silent error
 
         select_keys = [
             "responses",
@@ -610,8 +526,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
-        # Split to make minibatch iterator for updating the actor
-        # See PPO paper for details. https://arxiv.org/abs/1707.06347
+        # PPO mini-batch iterator (https://arxiv.org/abs/1707.06347)
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
@@ -642,7 +557,7 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
-                    # all return: (bsz, response_length)
+                    # entropy / log_prob: (bsz, response_length)
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
@@ -650,10 +565,8 @@ class DataParallelPPOActor(BasePPOActor):
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
 
+                    # vanilla | gpg | clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_*
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-                    # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
-                    # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
-                    # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
                     pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
                         old_log_prob=old_log_prob,
@@ -666,15 +579,12 @@ class DataParallelPPOActor(BasePPOActor):
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        # compute policy loss
                         policy_loss = pg_loss - entropy_loss * entropy_coeff
                     else:
                         policy_loss = pg_loss
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]
-                        # compute kl loss
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
@@ -685,7 +595,6 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
                         loss = policy_loss * loss_scale_factor
                     else:
                         loss = policy_loss * loss_scale_factor
