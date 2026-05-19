@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
+# Launches a REAL RL training run for 32B-scale models on 2 nodes (16 GPUs)
+# via `ray job submit`. Assumes a Ray cluster is already up on this host
+# (head node listening on http://127.0.0.1:8265).
+# Usage: bash run_real_32B.sh
 set -xeuo pipefail
 
-# add eval
-project_name='JEPO_token_Ablation'
-exp_name="${1}"
+# ---------- Experiment identity ----------
+project_name='REAL_32B'
+exp_name="32B_full_lr_1e-6_from_raft"
 
+# ---------- Core RL algorithm (no use for real training) ----------
+# GRPO-style advantage estimator; KL is applied as a loss term, not in the reward.
 adv_estimator=grpo
-
-lr=1e-7
+lr=1e-6
 use_kl_in_reward=False
 kl_coef=0.01
 use_kl_loss=True
@@ -15,108 +20,123 @@ kl_loss_coef=0.01
 clip_ratio_low=0.2
 clip_ratio_high=0.2
 
-
-
-
+# ---------- Sequence lengths ----------
 max_prompt_length=2048
 max_response_length=1024
+# Overlong-buffer penalty is off; responses past max_response_length are simply truncated.
 enable_overlong_buffer=False
 overlong_buffer_len=1024
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-# Adjusted for 1.5B model - smaller batch sizes
-train_prompt_bsz=256
 
-train_prompt_mini_bsz=64
-
-# DAPO
-# don't do filter.
+# ---------- DAPO filter groups ----------
+# Disabled here: we do NOT filter generation batches by accuracy.
 enable_filter_groups=False
 filter_groups_metric=acc
 max_num_gen_batches=10
 
-# JEPO specific parameters
-use_real=True
-use_grpo=False
+# ---------- REAL mode ----------
+use_real=True # don't change
+use_grpo=False # don't change
 real_delimiter=" So the overall score is " # no use
-real_format_penalty=1
+real_format_penalty=1 # no use
 
-#######################################################################
+#############################################################################################
+# ---------- REAL hyperparameters ----------
+# lr scale rule of thumb: Qwen ~1e-6; Mistral ~5e-8; LoRA = ~10x full-finetune lr.
+#############################################################################################
+
+# ---------- Batch sizes (sized for a 32B model on 16 GPUs) ----------
+train_prompt_bsz=256
+train_prompt_mini_bsz=64
+
+# ---------- REAL hyperparameters (important for training) ----------
 n_resp_per_prompt=8
-real_lr=5e-8 # Qwen -> 1e-6, 5e-7, Mistral -> 5e-8, lora = full-finetuning * 10 
-real_beta_supp=1.0 # lambda
-real_beta_supp_extra=0.01 # beta
+real_lr=1e-6                # Qwen -> 1e-6, Mistral -> 5e-8, lora = full-finetuning * 10
+real_beta_supp=1.0          # lambda (support loss weight)
+real_beta_supp_extra=0.000  # beta (extra support loss weight)
 real_beta_kl=0.000
 real_entropy_coeff=0.000
-real_use_format_adv=False
+real_update_freq=10         # eval/save cadence; Qwen runs typically use 20
+real_use_rloo=False         # if True, set real_use_extra_loss=False
 
-real_use_extra_loss=True 
-real_use_log_prob_loss=True
-real_use_l2_loss=True
-
-real_normalize_advantages=True # keep it as it is
+# default settings for real training
+real_normalize_advantages=True
 real_use_cot_loss=True
-real_data_type="partial" # partial, all, incorrect, partial_incorrect, partial_correct
-real_use_prob_as_reward=True # keep it as it is
-real_use_rloo=False # if True, please set use_extra_loss to False
-real_update_freq=10 # Qwen -> 20
-##########################################################################
+real_data_type="partial"    # one of: partial, all, incorrect, partial_incorrect, partial_correct
 
-real_buffer_size=${train_prompt_bsz} # number of questions
+# some hard-coded flags for ablations
+real_use_prob_as_reward=True
+real_use_l2_loss=True
+real_use_log_prob_loss=True
+real_use_format_adv=False
+real_use_extra_loss=False   # if real_use_rloo=True, keep this False
+
+
+# ---------- REAL buffer / batching ----------
+# Dynamic batching: the per-GPU "responses" counts below cap micro-batches by token budget.
+real_buffer_size=${train_prompt_bsz}     # number of questions
 real_steps=1
 real_update_frequency=100000
 real_epochs=3
 real_use_dynamic_bsz=True
-real_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-real_mini_batch_size_per_gpu=128 # responses per gpu
-real_micro_batch_size_per_gpu=64 # responses per gpu
+real_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))   # unused — kept for parity
+real_mini_batch_size_per_gpu=128         # responses per gpu
+real_micro_batch_size_per_gpu=64         # responses per gpu
+real_responses_micro_batch_size=1024     # ignored at runtime
+real_accum_steps=1                       # ignored at runtime
 
-real_responses_micro_batch_size=1024 # this param will be ignored
-real_accum_steps=1 # this is also ignored
-
-# Ray - single node setup for 1.5B
-NNODES=1
+# ---------- Distributed setup ----------
+NNODES=2
 NGPUS_PER_NODE=8
 
-# Use 1.5B model
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1200/huggingface"
-# MODEL_PATH="mistralai/Mistral-7B-Instruct-v0.2"
-MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token/Regression-warmup/global_step_100_hf"
-# MODEL_PATH="yasiz/Mistral-7b-v0.2-Instruct-TRACT-copy"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec9/Regression-warmup-Qwen3-1.7B/global_step_1170/huggingface"
-# MODEL_PATH="Qwen/Qwen3-1.7B"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-1.7B-RAFT/global_step_100/huggingface"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_1950/huggingface"
-# MODEL_PATH="/blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5_stage2/global_step_1950/huggingface"
-# MODEL_PATH="yasiz/Llama-3.1-8B-Instruct-TRACT-copy"
-# MODEL_PATH=" /blob/v-tianyuchen/Projects/jepo/ckpts/JEPO_token_Dec13/Qwen3-8B-RAFT_epoch5/global_step_100/huggingface"
-CKPTS_DIR="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/train.parquet
-TEST_FILE=/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet
+# ---------- Model & data paths ----------
+DATA_DIR=./data/real_data/real_dataset
+MODEL_PATH=./ckpts//Qwen3-32B-RAFT
+CKPTS_DIR=./outputs/${project_name}/${exp_name}
+TRAIN_FILE=${DATA_DIR}/train.parquet
+TEST_FILE=${DATA_DIR}/feedback_ood_test/test.parquet
+# Extra eval sets reported alongside the primary TEST_FILE.
+extra_val_files=\"${DATA_DIR}/feedback_ood_test/test.parquet,${DATA_DIR}/flask/test.parquet,${DATA_DIR}/mt_bench/test.parquet,${DATA_DIR}/vicuna/test.parquet\"
 
-
-# Algorithm
+# ---------- Generation (vLLM rollout) ----------
 temperature=1
 top_p=0.9
-top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
+top_k=-1                # 0 for HF rollout, -1 for vLLM
 val_top_p=0.9
 repetition_penalty=1.0
 
-# Performance Related Parameter - adjusted for 1.5B model
-sp_size=1  # Single sequence parallel for smaller model
+# ---------- Performance / parallelism ----------
+sp_size=1               # Ulysses sequence parallel (1 = off)
 use_dynamic_bsz=True
-infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 8))
-offload=True  # Keep offload for memory efficiency
-gen_tp=1  # Single tensor parallel for 1.5B
-fsdp_size=-1  # Auto FSDP size
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+offload=True            # FSDP param/optimizer offload to CPU for memory headroom
+gen_tp=2                # vLLM tensor parallel per replica (2 for 32B)
+fsdp_size=-1            # auto
 
-extra_val_files=\"/blob/v-tianyuchen/Projects/jepo/jepo_dataset/feedback_ood_test/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/flask/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/mt_bench/test.parquet,/blob/v-tianyuchen/Projects/jepo/jepo_dataset/vicuna/test.parquet\"
+# ---------- NCCL / InfiniBand (multi-node) ----------
+# 1) Point NCCL at the IB libs in this conda env.
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+# 2) Enable InfiniBand for collectives (mlx5_ib matches `ls /sys/class/infiniband`).
+export NCCL_IB_DISABLE=0
+export NCCL_IB_HCA=mlx5_ib
+export NCCL_IB_GID_INDEX=3      # commonly required for RoCE/IB on many clusters
+# 3) Use eth0 only for the initial handshake; IB carries the heavy traffic.
+export NCCL_SOCKET_IFNAME=eth0
+# 4) Verbose NCCL logs — look for "Using network IB" on first run.
+export NCCL_DEBUG=INFO
 
-# Use JEPO-DAPO recipe
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
+# ---------- Launch (Ray job submit) ----------
+ray job submit \
+    --address="http://127.0.0.1:8265" \
+    --no-wait \
+    --job-id="${project_name}_${exp_name}_$(date +%Y%m%d_%H%M%S)" \
+    --working-dir="$(pwd)" \
+    --runtime-env-json='{"env_vars": {"WANDB_ENTITY": "yszhang"}}' \
+    -- python3 -m recipe.dapo.main_real_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     +data.extra_val_files="${extra_val_files}" \
@@ -125,6 +145,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
+    data.trust_remote_code=True \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
@@ -175,6 +196,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
     +actor_rollout_ref.actor.model_name="${MODEL_PATH}" \
     actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.rollout.layered_summon=True \
     +actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
@@ -187,9 +209,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.rollout.load_format="safetensors" \
-    actor_rollout_ref.model.target_modules=all-linear \
-    actor_rollout_ref.model.use_shm=True \
+    +actor_rollout_ref.rollout.trust_remote_code=True \
+    actor_rollout_ref.model.use_shm=False \
     actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
@@ -203,7 +226,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.50 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.90 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -216,7 +239,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     reward_model.reward_manager=dapo \
@@ -240,6 +263,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m recipe.dapo.main_real_dapo \
     trainer.log_val_generations=10 \
     trainer.validation_data_dir="${CKPTS_DIR}/validations" \
     custom_reward_function.path="recipe/dapo/deepscaler_reward.py" \
-    custom_reward_function.name=deepscaler_reward_fn \
-    # actor_rollout_ref.model.lora_rank=64 \
-    # actor_rollout_ref.model.lora_alpha=64.0 \
+    custom_reward_function.name=deepscaler_reward_fn
+
+echo ""
+echo "========================================"
+echo "Job submitted to Ray!"
+echo "========================================"
+echo "To check job status:    ray job status"
+echo "To view logs (follow):  ray job logs --follow <job-id>"
+echo "To list all jobs:       ray job list"
+echo "To stop the job:        ray job stop <job-id>"
+echo "========================================"

@@ -6,19 +6,19 @@ set -x
 # fi
 
 
-project_name='JEPO_token_Dec9'
+project_name='real_token_Dec9'
  
 exp_name="Regression-warmup-Qwen3-8B"
 nproc_per_node=8
-save_path="/blob/v-tianyuchen/Projects/jepo/ckpts/${project_name}/${exp_name}"
+save_path="/blob/v-tianyuchen/Projects/real/ckpts/${project_name}/${exp_name}"
 
 # Shift the arguments so $@ refers to the rest
 shift 2
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
     verl/trainer/fsdp_sft_trainer.py \
-    data.train_files=/blob/v-tianyuchen/Projects/jepo/jepo_dataset_sft/train.parquet \
-    data.val_files=/blob/v-tianyuchen/Projects/jepo/jepo_dataset_sft/test/train.parquet \
+    data.train_files=./real_dataset_sft/train.parquet \
+    data.val_files=./real_dataset_sft/test/train.parquet \
     data.prompt_key=extra_info \
     data.response_key=extra_info \
     data.prompt_dict_keys=['question'] \

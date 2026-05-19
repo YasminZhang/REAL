@@ -226,6 +226,8 @@ The files below are the ones you'll most often touch when running or extending R
 - **[`verl/workers/actor/real_actor.py`](verl/workers/actor/real_actor.py)** — `REALActor`: subclasses `DataParallelPPOActor` and replaces `update_policy` with the REAL objective. `_precompute_adv_w_with_verl` runs Stage 1 (no-grad teacher-forced forward over the prompt + ground-truth answer per question to read `E[digit]` and the last-token log-prob) and Stage 2 (per-UID leave-one-out advantages from the regression reward `R = -(E[digit] - y)²` and the accuracy reward `R = p(y)`). `update_policy` then runs a second pass with grad enabled to combine the CoT policy-gradient loss with the regression supervision terms (`l2_loss`, `log_likelihood_loss`) weighted by `beta_supp`/`beta_supp_extra`, and steps the optimizer.
 
 
+# TODO:
+- Test the whole loop
 
 ## Citation
 
