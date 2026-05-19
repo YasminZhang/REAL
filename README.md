@@ -4,7 +4,7 @@ REAL is a principled reinforcement learning framework designed to optimize **reg
 
 **Paper**: [REAL: Regression-Aware Reinforcement Learning for LLM-as-a-Judge](https://arxiv.org/abs/2603.17145) (ICML 2026)
 
-**Authors**: Yasi Zhang*, Tianyu Chen*, Mingyuan Zhou, Oscar Leong, Ying Nian Wu, Michal Lukasik
+**Authors**: [Yasi Zhang](https://yasminzhang.github.io/)*, [Tianyu Chen](https://tianyucodings.github.io/)*, Mingyuan Zhou, Oscar Leong, Ying Nian Wu, [Michal Lukasik](https://mlukasik.github.io/)
 
 ## Key Features
 
@@ -16,6 +16,11 @@ REAL is a principled reinforcement learning framework designed to optimize **reg
 - **RAIL Inference**: Computes expected value over digit tokens for regression-aware predictions at inference time
 - **Multi-scale Support**: Validated across 8B and 32B model scales with ready-to-use training scripts
 - **Built on verl**: Leverages the [verl](https://github.com/volcengine/verl) framework for efficient FSDP/vLLM integration and Ray distributed training
+
+## Key Takeaway
+```
+In RL, the probability assigned to the answer token offers a richer, more informative reward signal than binary accuracy alone.
+```
 
 ## Main Results
 
@@ -226,8 +231,11 @@ The files below are the ones you'll most often touch when running or extending R
 - **[`verl/workers/actor/real_actor.py`](verl/workers/actor/real_actor.py)** — `REALActor`: subclasses `DataParallelPPOActor` and replaces `update_policy` with the REAL objective. `_precompute_adv_w_with_verl` runs Stage 1 (no-grad teacher-forced forward over the prompt + ground-truth answer per question to read `E[digit]` and the last-token log-prob) and Stage 2 (per-UID leave-one-out advantages from the regression reward `R = -(E[digit] - y)²` and the accuracy reward `R = p(y)`). `update_policy` then runs a second pass with grad enabled to combine the CoT policy-gradient loss with the regression supervision terms (`l2_loss`, `log_likelihood_loss`) weighted by `beta_supp`/`beta_supp_extra`, and steps the optimizer.
 
 
-# TODO:
-- Test the whole loop
+```
+Feel free to raise an issue on Github if there's any questions on the paper or the code. 
+```
+
+
 
 ## Citation
 
