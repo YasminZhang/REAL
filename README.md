@@ -211,6 +211,10 @@ All defaults below are taken from [`bash_real/run_real.sh`](bash_real/run_real.s
 | `val_before_train`   | `True`  | Run validation once before any training step (sanity-check baseline metrics).                                               |
 
 
+## Experiments history
+
+You can check [Wandb Mistral](https://api.wandb.ai/links/yszhang/jcbufhms) and [Wandb Qwen](https://api.wandb.ai/links/yszhang/9aqammi7) for our experiments' record. 
+
 
 ## Core Scripts
 
